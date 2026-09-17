@@ -75,6 +75,7 @@ pub struct App {
     pub live_only: bool,
     pub tag_filter: Option<String>,
     pub show_subagents: bool,
+    pub show_preview: bool,
     pub expanded: HashSet<String>,
 
     pub status: String,
@@ -114,6 +115,7 @@ impl App {
             live_only: false,
             tag_filter: None,
             show_subagents: false,
+            show_preview: true,
             expanded: HashSet::new(),
             status: String::new(),
             outcome: None,
@@ -840,6 +842,14 @@ impl App {
                 self.date = DateRange::All;
                 self.status = "filters cleared".into();
                 self.rebuild();
+            }
+            KeyCode::Char('p') => {
+                self.show_preview = !self.show_preview;
+                self.status = if self.show_preview {
+                    "preview on".into()
+                } else {
+                    "preview off".into()
+                };
             }
             KeyCode::Char('R') | KeyCode::F(5) => {
                 self.want_refresh = true;

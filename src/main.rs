@@ -13,6 +13,7 @@ mod model;
 mod preview;
 mod scan;
 mod search;
+mod splash;
 mod ui;
 
 use anyhow::Result;
@@ -43,6 +44,7 @@ usage: mnemosyne [options]
   --search-mode M  content (default) | file | tool
 
   --subagents      start with subagent transcripts revealed
+  --no-splash      skip the opening animation (or set MNEMOSYNE_NO_SPLASH=1)
   --no-model       do not restore each session's original --model
   -h, --help       this text
   -V, --version    version
@@ -80,7 +82,22 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let sessions = index::refresh(include_subagents)?;
+    let interactive = !(has("--list")
+        || has("--json")
+        || has("--stats")
+        || args.iter().any(|a| a == "--search"));
+    let use_splash = interactive
+        && !has("--no-splash")
+        && std::env::var_os("MNEMOSYNE_NO_SPLASH").is_none();
+
+    // With the splash on, the real scan happens on a thread behind the
+    // animation, so the bar reports actual work instead of finishing before
+    // the first frame. Start from the cache, which costs one query.
+    let sessions = if use_splash {
+        index::Index::open()?.load()?.into_values().collect::<Vec<_>>()
+    } else {
+        index::refresh(include_subagents)?
+    };
 
     if has("--stats") {
         let main: Vec<_> = sessions.iter().filter(|s| !s.is_subagent).collect();
@@ -198,6 +215,22 @@ fn main() -> Result<()> {
     enable_raw_mode()?;
     stderr().execute(EnterAlternateScreen)?;
     let mut term = Terminal::new(CrosstermBackend::new(stderr()))?;
+
+    if use_splash {
+        let p = index::Progress::default();
+        let p2 = p.clone();
+        let handle = std::thread::spawn(move || index::refresh_with_progress(true, Some(p2)));
+        let _ = splash::run(&mut term, &p);
+        if let Ok(Ok(fresh)) = handle.join() {
+            let mut fresh = fresh;
+            fresh.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+            app.all = fresh;
+            app.live = live::live_map();
+            app.apply_overlay();
+            app.rebuild();
+        }
+    }
+
     let res = run(&mut term, &mut app);
     disable_raw_mode()?;
     execute!(term.backend_mut(), LeaveAlternateScreen)?;

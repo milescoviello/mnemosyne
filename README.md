@@ -10,19 +10,27 @@ directory you happen to be standing in, so there is no way to see the whole
 picture. `mnemosyne` is that missing view.
 
 ```
- mnemosyne  328/328 sessions  ★12  ●5 live              [sort:recency] [grouped]
-┌ sessions ───────────────────────────────┐┌ preview ──────────────────────────┐
-│ ★●   2m  ~/proj      fix the auth flow  ││ fix the auth flow                 │
-│      6m  ~/proj      add rate limiting  ││                                   │
-│  ◌  14m  ~           update the deps    ││ folder   ~/proj                   │
-│ ★   3h   ~/site      redesign landing   ││ branch   main                     │
-│     1d   ~/proj   ▾  migrate the schema ││ model    opus-5                   │
-│       └  agent 3f2a…                    ││ size     686K · 187 entries       │
-│     2d   ~/notes     tidy the vault     ││ when     2m ago · lasted 35m      │
-└─────────────────────────────────────────┘└───────────────────────────────────┘
- ↑↓ move  enter resume  ctrl+n new window  space select  / filter  F search
- s sort  o group by folder  D dates  T by tag  * ★ only  L live only  ? help
+  mnemosyne                                328 sessions · ★12 · 6 live · recency
+
+       AGE  FOLDER           TITLE                              MODEL    MSGS  TAGS
+   →    3s  ~                fix the auth flow                  opus-5   6.3k
+       26s  ~/proj           add rate limiting                  opus-5    412  #api
+    ●  30s  ~/proj           migrate the schema                 opus-5   1.2k
+    ★   4m  ~/site       ⌁27 redesign the landing page          opus-5   8.1k
+        5h  ~/notes          tidy the vault                     sonnet-5  3.4k
+
+  ───────────────────────────────────────────────────────────────────────────────
+  fix the auth flow                  ~/proj · main · 686K · 187 entries · 35m
+
+  left off   the redirect still drops the state param
+  claude     Found it — the callback rebuilds the URL and loses the query…
+
+  ↑↓ move   enter resume   / filter   F search   f ★   t tag   s sort   ? keys  1/328
 ```
+
+No borders, aligned columns, one footer line. The full key list lives behind
+`?` rather than permanently on screen.
+
 
 ## What it does
 
@@ -74,6 +82,28 @@ working directory — no child process can. So the binary draws the interface on
 **stderr** and prints its decision to **stdout**, and the function reads that
 and performs the `cd` plus `claude --resume` itself. It is a few lines long and
 you can read all of it in `shell/mn.fish`.
+
+## The opening animation
+
+The name resolves out of noise while the index is being built, so the animation
+is covering real work rather than stalling on purpose:
+
+```
+                            m n e m ~ y 7 0 %
+                             ────────
+                          recalling 1078 of 1080
+                          ██████████████████████
+                              any key to skip
+```
+
+It runs until indexing finishes or about a second has passed, whichever is
+later. Any key skips straight to the list, and that keypress is swallowed so it
+cannot act on the session under the cursor. When there is genuine work left the
+bar reports it; on a warm index the bar fills with the reveal and the counts
+below state the real totals. The bar never steps backwards when the source
+changes under it.
+
+Turn it off with `--no-splash` or `MNEMOSYNE_NO_SPLASH=1`.
 
 ## Non-interactive use
 

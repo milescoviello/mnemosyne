@@ -179,19 +179,47 @@ impl Index {
     }
 }
 
+/// Live counters so a caller can render a real progress bar while we work.
+#[derive(Clone, Default)]
+pub struct Progress {
+    pub total: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub done: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    pub finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
 /// Full refresh: discover transcripts, scan in parallel reusing cached rows,
 /// persist, and return everything sorted newest-first.
 pub fn refresh(include_subagents: bool) -> Result<Vec<Session>> {
+    refresh_with_progress(include_subagents, None)
+}
+
+pub fn refresh_with_progress(
+    include_subagents: bool,
+    progress: Option<Progress>,
+) -> Result<Vec<Session>> {
+    use std::sync::atomic::Ordering;
+
     let mut idx = Index::open()?;
     let cached = idx.load()?;
     let found = scan::discover(include_subagents);
+    if let Some(p) = &progress {
+        p.total.store(found.len(), Ordering::Relaxed);
+    }
 
     let sessions: Vec<Session> = found
         .par_iter()
         .filter_map(|(path, is_sub, parent)| {
             let key = path.to_string_lossy().to_string();
             let prev = cached.get(&key);
-            scan::scan(path, *is_sub, parent.clone(), prev).ok()
+            let out = scan::scan(path, *is_sub, parent.clone(), prev).ok();
+            if let Some(p) = &progress {
+                p.done.fetch_add(1, Ordering::Relaxed);
+                if let Some(s) = &out {
+                    p.bytes.fetch_add(s.size, Ordering::Relaxed);
+                }
+            }
+            out
         })
         .collect();
 
@@ -201,6 +229,9 @@ pub fn refresh(include_subagents: bool) -> Result<Vec<Session>> {
         .map(|(p, _, _)| p.to_string_lossy().to_string())
         .collect();
     let _ = idx.prune(&paths);
+    if let Some(p) = &progress {
+        p.finished.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 
     Ok(sessions)
 }

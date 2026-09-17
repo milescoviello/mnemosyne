@@ -194,6 +194,32 @@ pub fn human_dur(secs: i64) -> String {
     }
 }
 
+/// 412 -> "412", 6312 -> "6.3k", 1_200_000 -> "1.2m"
+pub fn compact_count(n: u32) -> String {
+    if n < 1000 {
+        format!("{n}")
+    } else if n < 1_000_000 {
+        let v = n as f64 / 1000.0;
+        if v < 10.0 { format!("{v:.1}k") } else { format!("{v:.0}k") }
+    } else {
+        format!("{:.1}m", n as f64 / 1_000_000.0)
+    }
+}
+
+/// Clip to `w` display columns, ending in an ellipsis when it had to cut.
+pub fn fit(s: &str, w: usize) -> String {
+    let n = s.chars().count();
+    if n <= w {
+        return s.to_string();
+    }
+    if w <= 1 {
+        return "…".into();
+    }
+    let mut out: String = s.chars().take(w - 1).collect();
+    out.push('…');
+    out
+}
+
 /// `/home/miles/OS-DEV` -> `~/OS-DEV`
 pub fn short_cwd(cwd: &str) -> String {
     let home = std::env::var("HOME").unwrap_or_default();
