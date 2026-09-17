@@ -1,0 +1,179 @@
+# mnemosyne
+
+A terminal browser for your Claude Code history. Every session you have ever
+run, across every folder, in one searchable list — with favourites, tags,
+full-text search inside the conversations, and one keypress to reattach.
+
+Claude Code writes every session to `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`
+and nothing is lost on reboot. But `claude --resume` only lists sessions for the
+directory you happen to be standing in, so there is no way to see the whole
+picture. `mnemosyne` is that missing view.
+
+```
+ mnemosyne  328/328 sessions  ★12  ●5 live              [sort:recency] [grouped]
+┌ sessions ───────────────────────────────┐┌ preview ──────────────────────────┐
+│ ★●   2m  ~/proj      fix the auth flow  ││ fix the auth flow                 │
+│      6m  ~/proj      add rate limiting  ││                                   │
+│  ◌  14m  ~           update the deps    ││ folder   ~/proj                   │
+│ ★   3h   ~/site      redesign landing   ││ branch   main                     │
+│     1d   ~/proj   ▾  migrate the schema ││ model    opus-5                   │
+│       └  agent 3f2a…                    ││ size     686K · 187 entries       │
+│     2d   ~/notes     tidy the vault     ││ when     2m ago · lasted 35m      │
+└─────────────────────────────────────────┘└───────────────────────────────────┘
+ ↑↓ move  enter resume  ctrl+n new window  space select  / filter  F search
+ s sort  o group by folder  D dates  T by tag  * ★ only  L live only  ? help
+```
+
+## What it does
+
+**Finds things.** `/` fuzzy-filters titles, folders, branches and tags. `F`
+searches *inside* the conversations — the actual text of what you and Claude
+said — across the whole corpus in about a fifth of a second. `m` switches that
+between three questions: what was *said*, which *files* a session actually
+edited, and which *tools* it used.
+
+**Remembers what matters to you.** `f` favourites a session and pins it to the
+top. `t` tags it; `T` filters to one tag. `N` attaches a private note. All of
+this lives in one small JSON file, separate from the disposable index.
+
+**Shows you the real titles.** Claude Code generates a title for each session
+and records it in the transcript. Most tools ignore it and fall back to the
+first user message, which turns a pasted multi-paragraph prompt into a useless
+list entry. `mnemosyne` uses the real title, plus the *last* prompt — the best
+single cue for "where was I".
+
+**Knows what's already running.** Live sessions are marked, and pressing enter
+on one tells you its pid instead of silently attaching a second client to the
+same transcript.
+
+**Restores the model.** If a session ran on a specific `--model`, resuming
+brings it back on that model rather than quietly dropping to the default.
+
+**Surfaces subagents.** Subagent transcripts live in a nested directory and are
+normally invisible. `a` reveals them; `→` expands a session's children.
+
+## Install
+
+Needs a Rust toolchain, and `fish` or `bash`.
+
+```sh
+git clone https://github.com/milescoviello/mnemosyne
+cd mnemosyne
+./install.sh
+```
+
+That builds the binary to `~/.local/bin/mnemosyne` and installs the `mn` shell
+function. Then just:
+
+```sh
+mn
+```
+
+The shell function exists because `mnemosyne` cannot change your shell's
+working directory — no child process can. So the binary draws the interface on
+**stderr** and prints its decision to **stdout**, and the function reads that
+and performs the `cd` plus `claude --resume` itself. It is a few lines long and
+you can read all of it in `shell/mn.fish`.
+
+## Non-interactive use
+
+Handy from scripts, and from inside a Claude session that wants to find its own
+past work.
+
+```sh
+mnemosyne --list                      # TSV of every session
+mnemosyne --json                      # same, as JSON
+mnemosyne --search "connection reset" # which sessions discussed this
+mnemosyne --search Cargo.toml --search-mode file   # which sessions edited it
+mnemosyne --search WebSearch --search-mode tool    # which sessions used it
+mnemosyne --stats                     # corpus summary
+mnemosyne --refresh                   # rebuild the index and exit
+```
+
+## How it stays fast
+
+The corpus this was built against is 2.5 GB across ~1,100 transcripts, with
+individual sessions over 400 MB. Measured on that corpus:
+
+| operation | time |
+|---|---|
+| first index, cold page cache | 0.50 s |
+| re-index, nothing changed | 0.02 s |
+| full-text search, all sessions | ~0.2 s |
+| preview any session | constant, regardless of size |
+
+Four things get it there:
+
+**No JSON parsing in the hot path.** A byte-level test classifies each line and
+only the handful that actually carry a title or a prompt are handed to a real
+JSON parser.
+
+**The right byte-level test.** Looking for the first `"type":"` in a line is
+wrong: message lines embed a nested `"type":"text"` content block *before* their
+own top-level `type`, which misclassifies about half of all lines. Metadata
+lines instead begin literally with `{"type":"`, and message lines carry
+`"role":"user"` / `"role":"assistant"` near their front. Those two tests
+together were verified exact over thousands of lines — no misses, no false
+positives.
+
+**Append-only incremental scanning.** Transcripts only ever grow, so the index
+records how many bytes it has consumed and later reads just the new tail. An
+untouched session costs one `stat()`.
+
+**Previews read backwards.** Showing the last few messages of a 400 MB session
+means seeking to the end, not reading 400 MB. Preview cost is independent of
+session size.
+
+## Search precision
+
+Naive substring search over raw transcripts is nearly useless, for two reasons
+that are easy to miss:
+
+- **Injected context.** Memory files and `<system-reminder>` blocks are pasted
+  into every session's context. Search for any word that appears in yours and
+  you match *every session you have ever run*. Matches inside injected spans,
+  and inside `attachment` records, are excluded.
+- **Base64.** Pasted images arrive as long unbroken base64, whose alphabet
+  cheerfully spells short words by chance. Prose contains whitespace and blobs
+  do not, so matches in a wide window with no whitespace are rejected.
+
+Together these cut a representative query from 58 hits to 36 real ones.
+
+## Keys
+
+Arrow keys, `enter`, `esc` and `tab` are the documented path and are always on
+screen; `?` shows everything. Vim motions (`j k g G h l`) work as silent
+aliases if you want them, and are never required.
+
+## Files it touches
+
+| path | what |
+|---|---|
+| `~/.claude/projects/**/*.jsonl` | read only, never modified |
+| `~/.claude/mnemosyne/index.db` | disposable cache; delete it any time |
+| `~/.claude/mnemosyne/meta.json` | your favourites, tags and notes |
+
+Only `meta.json` cannot be regenerated, so it is written via a temp file and
+rename and kept deliberately small and readable.
+
+## Retention warning
+
+Claude Code deletes local transcripts after `cleanupPeriodDays`, which
+**defaults to 30 days** by last activity and runs at startup. If you want a
+long history to browse, raise it in `~/.claude/settings.json`:
+
+```json
+{ "cleanupPeriodDays": 3650 }
+```
+
+There is no literal "never". Already-deleted transcripts are unrecoverable.
+
+## legacy/
+
+`legacy/` holds the small `fzf` + Python picker this replaced, kept because it
+has no dependencies beyond `fzf` and `python3` and so still works if the binary
+is missing. Install it as `cs-classic` if you want the simple version around.
+
+## License
+
+MIT.

@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+*.tmp
+# never commit anything derived from real transcripts
+meta.json
+index.db
+*.jsonl
