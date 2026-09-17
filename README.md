@@ -85,21 +85,40 @@ you can read all of it in `shell/mn.fish`.
 
 ## The opening animation
 
-The name resolves out of noise while the index is being built, so the animation
-is covering real work rather than stalling on purpose:
+Mnemosyne is the spring of memory in the underworld — the counter-pool to
+Lethe, which souls drank in order to forget. So the wordmark surfaces out of a
+rippling pool, lit by a gradient running from deep water to pale foam with a
+shimmer band that leads the reveal and then keeps sweeping:
 
 ```
-                            m n e m ~ y 7 0 %
-                             ────────
-                          recalling 1078 of 1080
-                          ██████████████████████
-                              any key to skip
+   ███╗   ███╗███╗   ██╗███████╗███╗   ███╗ ██████╗ ███████╗██╗   ██╗███╗   ██╗███████╗
+   ████╗ ████║████╗  ██║██╔════╝████╗ ████║██╔═══██╗██╔════╝╚██╗ ██╔╝████╗  ██║██╔════╝
+   ██╔████╔██║██╔██╗ ██║█████╗  ██╔████╔██║██║   ██║███████╗ ╚████╔╝ ██╔██╗ ██║█████╗
+   ██║╚██╔╝██║██║╚██╗██║██╔══╝  ██║╚██╔╝██║██║   ██║╚════██║  ╚██╔╝  ██║╚██╗██║██╔══╝
+   ██║ ╚═╝ ██║██║ ╚████║███████╗██║ ╚═╝ ██║╚██████╔╝███████║   ██║   ██║ ╚████║███████╗
+   ╚═╝     ╚═╝╚═╝  ╚═══╝╚══════╝╚═╝     ╚═╝ ╚═════╝ ╚══════╝   ╚═╝   ╚═══╝  ╚═══╝╚══════╝
+      ∼∼~~~~∼∼    ∼~~≈≈~~∼∼∼∼~~≈≈≈≈~∼∼  ∼∼~~~~∼∼    ∼∼~~~~~∼∼∼∼∼~≈≈≈≈~~∼∼∼∼∼~~~~~∼
+   ~~~~∼∼   ∼~~≈≈≈~~∼∼∼∼~~≈≈≈~~∼    ∼~~~~∼∼   ∼∼~~≈≈~~∼∼∼∼~~≈≈≈~~∼∼  ∼∼~~~~∼∼    ∼~~~~~
+
+                            1080 transcripts · 2.4G
+                ████████████████████████████████████████████████
+                                any key to skip
 ```
 
-It runs until indexing finishes or about a second has passed, whichever is
-later. Any key skips straight to the list, and that keypress is swallowed so it
-cannot act on the session under the cursor. When there is genuine work left the
-bar reports it; on a warm index the bar fills with the reveal and the counts
+Columns that have not surfaced yet show only the wave crests, so the
+unrevealed half reads as open water rather than a wall of glyphs. The pool
+uses two summed sine frequencies, because a single one falls into long uniform
+runs that look like teeth. Roughly 3,500 distinct colours are in play per
+frame, from `rgb(10,18,33)` to `rgb(239,251,250)`.
+
+Below about 90 columns it falls back to spaced letters resolving out of noise,
+with the same gradient and pool.
+
+It is covering real work — the index builds on a background thread while this
+runs — and it lasts until indexing finishes or about 1.5s has passed, whichever
+is later. Any key skips straight to the list, and that keypress is swallowed so
+it cannot act on the session under the cursor. When there is genuine work left
+the bar reports it; on a warm index the bar fills with the reveal and the counts
 below state the real totals. The bar never steps backwards when the source
 changes under it.
 

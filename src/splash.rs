@@ -1,15 +1,20 @@
 //! Opening animation.
 //!
-//! The name resolves out of noise while the index is actually being built, so
-//! the animation is doing real work rather than stalling on purpose: it runs
-//! until indexing finishes or a floor of ~1s has passed, whichever is later.
-//! Any keypress skips straight to the list, and the keypress is swallowed
-//! rather than leaking into the browser underneath.
+//! The wordmark rises out of a rippling pool -- Mnemosyne is the spring of
+//! memory, the counter-pool to Lethe -- lit by a gradient that runs from deep
+//! water to pale foam, with a shimmer band that leads the reveal and then
+//! keeps sweeping.
+//!
+//! It is covering real work: the index builds on a background thread while
+//! this runs, and the bar reports genuine progress whenever there is any left
+//! to report. Any keypress skips, and is swallowed so it cannot act on the
+//! list underneath.
 
+use crate::art;
 use crate::index::Progress;
 use crate::model::human_size;
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -18,22 +23,17 @@ use ratatui::{backend::Backend, Terminal};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-const WORD: &str = "mnemosyne";
-const GLYPHS: &[char] = &[
-    '#', '%', '&', '@', '$', '*', '?', '/', '\\', '=', '+', '~', '<', '>', '0', '1', '4', '7',
-    'x', 'z', 'k', 'q', 'w', 'm', 'n', 'e', 's', 'y', 'o',
-];
+const FLOOR: Duration = Duration::from_millis(1500);
+const FRAME: Duration = Duration::from_millis(28);
+const REVEAL_MS: f64 = 780.0;
+const SWEEP_MS: f64 = 1500.0;
 
-const ACCENT: Color = Color::Cyan;
-const CHROME: Color = Color::DarkGray;
-const BRIGHT: Color = Color::White;
+const BAR_W: usize = 48;
+const RIPPLE_ROWS: usize = 2;
 
-/// Minimum time on screen, so the reveal is actually visible on a warm index.
-const FLOOR: Duration = Duration::from_millis(1050);
-const FRAME: Duration = Duration::from_millis(33);
-/// When each letter stops scrambling.
-const LOCK_STEP: Duration = Duration::from_millis(62);
-const LOCK_START: Duration = Duration::from_millis(140);
+fn rgb((r, g, b): (u8, u8, u8)) -> Color {
+    Color::Rgb(r, g, b)
+}
 
 fn lcg(state: &mut u64) -> u64 {
     *state = state
@@ -51,141 +51,196 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
     }
 }
 
+/// A gradient progress bar with eighth-cell resolution.
+fn bar_line(pct: f64) -> Line<'static> {
+    let exact = pct.clamp(0.0, 1.0) * BAR_W as f64;
+    let full = exact.floor() as usize;
+    let frac = exact - full as f64;
+    let mut spans: Vec<Span> = Vec::with_capacity(BAR_W);
+    for x in 0..BAR_W {
+        let p = x as f64 / (BAR_W - 1) as f64;
+        if x < full {
+            spans.push(Span::styled("█", Style::default().fg(rgb(art::ramp(p)))));
+        } else if x == full && frac > 0.08 {
+            let i = ((frac * art::PARTIALS.len() as f64) as usize).min(art::PARTIALS.len() - 1);
+            spans.push(Span::styled(
+                art::PARTIALS[i].to_string(),
+                Style::default().fg(rgb(art::ramp(p))),
+            ));
+        } else {
+            spans.push(Span::styled(
+                "░",
+                Style::default().fg(rgb(art::sink(art::ramp(p), 0.72))),
+            ));
+        }
+    }
+    Line::from(spans)
+}
+
 /// Returns true if the user skipped.
 pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress) -> Result<bool> {
     let start = Instant::now();
     let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut skipped = false;
-    let letters: Vec<char> = WORD.chars().collect();
-    // The bar is fed from real progress while work remains and from the reveal
-    // once it is done; a high-water mark stops it from ever stepping backwards
-    // when the source changes under it.
     let mut bar_high = 0.0f64;
-    // Once real counts have been on screen, don't fall back to "recalling…".
     let mut showed_counts = false;
+
+    let marks = art::wordmark();
+    let mark_w = art::wordmark_width();
 
     loop {
         let elapsed = start.elapsed();
+        let ms = elapsed.as_secs_f64() * 1000.0;
         let done = p.done.load(Ordering::Relaxed);
         let total = p.total.load(Ordering::Relaxed);
         let bytes = p.bytes.load(Ordering::Relaxed);
         let finished = p.finished.load(Ordering::Relaxed);
 
-        // how many letters have settled
-        let settled = if elapsed < LOCK_START {
-            0
+        let rev = (ms / REVEAL_MS).min(1.0);
+        let complete = rev >= 1.0;
+
+        // the shimmer leads the reveal, then keeps sweeping across
+        let band = if !complete {
+            rev * mark_w as f64
         } else {
-            ((elapsed - LOCK_START).as_millis() / LOCK_STEP.as_millis()) as usize
+            let t = ((ms - REVEAL_MS) / SWEEP_MS).fract();
+            t * (mark_w as f64 + 30.0) - 15.0
+        };
+
+        let candidate = if finished {
+            rev
+        } else if total > 0 {
+            done as f64 / total as f64
+        } else {
+            0.0
+        };
+        bar_high = bar_high.max(candidate);
+
+        let status = if !finished && total > 0 {
+            showed_counts = true;
+            format!("recalling {done} of {total}")
+        } else if finished && (showed_counts || complete) {
+            format!("{total} transcripts · {}", human_size(bytes))
+        } else {
+            "recalling…".to_string()
         };
 
         term.draw(|f| {
             let area = f.area();
-            let w = 54u16.min(area.width);
-            let r = centered(area, w, 9);
+            let big = area.width as usize >= mark_w + 4 && area.height >= 18;
 
-            // the word: settled letters in place, the rest still churning
-            let mut spans: Vec<Span> = Vec::new();
-            for (i, ch) in letters.iter().enumerate() {
-                let (c, st) = if i < settled {
-                    (
-                        *ch,
-                        Style::default()
-                            .fg(BRIGHT)
-                            .add_modifier(Modifier::BOLD),
-                    )
-                } else {
-                    let g = GLYPHS[(lcg(&mut rng) as usize) % GLYPHS.len()];
-                    (g, Style::default().fg(CHROME))
-                };
-                spans.push(Span::styled(format!("{c} "), st));
+            let mut lines: Vec<Line> = Vec::new();
+
+            if big {
+                let revealed = (rev * mark_w as f64) as usize;
+                for (r, row) in marks.iter().enumerate() {
+                    let mut spans: Vec<Span> = Vec::with_capacity(mark_w);
+                    for (x, ch) in row.iter().enumerate() {
+                        if x < revealed {
+                            let c = art::column_color(x, mark_w, band, r, art::ROWS);
+                            spans.push(Span::styled(
+                                ch.to_string(),
+                                Style::default().fg(rgb(c)).add_modifier(Modifier::BOLD),
+                            ));
+                        } else {
+                            // Not yet surfaced. Only the crests show, so this
+                            // reads as open water instead of a wall of glyphs.
+                            let (w, i) =
+                                art::ripple_at(x, ms / 240.0, r as f64 * 1.9);
+                            if i > 0.80 {
+                                let c = art::sink(art::ramp(0.34), 0.55);
+                                spans.push(Span::styled(
+                                    w.to_string(),
+                                    Style::default().fg(rgb(c)),
+                                ));
+                            } else {
+                                spans.push(Span::raw(" "));
+                            }
+                        }
+                    }
+                    lines.push(Line::from(spans));
+                }
+            } else {
+                // compact fallback: spaced letters resolving out of noise
+                let letters: Vec<char> = art::WORD.chars().collect();
+                let settled = (rev * letters.len() as f64) as usize;
+                let mut spans: Vec<Span> = Vec::new();
+                for (i, ch) in letters.iter().enumerate() {
+                    if i < settled {
+                        let c = art::column_color(i * 2, letters.len() * 2, band / 6.0, 0, 1);
+                        spans.push(Span::styled(
+                            format!("{ch} "),
+                            Style::default().fg(rgb(c)).add_modifier(Modifier::BOLD),
+                        ));
+                    } else {
+                        let g = art::WAVES_FALLBACK[(lcg(&mut rng) as usize) % art::WAVES_FALLBACK.len()];
+                        spans.push(Span::styled(
+                            format!("{g} "),
+                            Style::default().fg(rgb(art::sink(art::ramp(0.3), 0.55))),
+                        ));
+                    }
+                }
+                lines.push(Line::from(spans));
             }
 
-            // the rule under the name draws itself left to right
-            let rule_w = letters.len() * 2 - 1;
-            let grown = (settled * 2).min(rule_w);
-            let rule = format!(
-                "{}{}",
-                "─".repeat(grown),
-                " ".repeat(rule_w.saturating_sub(grown))
-            );
+            // the pool the name rose out of
+            for r in 0..RIPPLE_ROWS {
+                let w = if big { mark_w } else { art::WORD.chars().count() * 2 };
+                let cells = art::ripple(w, ms / 230.0 + r as f64 * 0.8, r as f64 * 2.1);
+                let fade = 0.35 + r as f64 * 0.3;
+                let spans: Vec<Span> = cells
+                    .into_iter()
+                    .map(|(ch, i)| {
+                        if i < 0.42 {
+                            return Span::raw(" ");
+                        }
+                        let c = art::sink(art::ramp(0.16 + i * 0.34), fade);
+                        Span::styled(ch.to_string(), Style::default().fg(rgb(c)))
+                    })
+                    .collect();
+                lines.push(Line::from(spans));
+            }
 
-            // On a warm index the work is over before the first frame, so a
-            // real-progress bar would just be full from the start. When there
-            // is genuine work left the bar reports it; otherwise the bar fills
-            // with the reveal and the counts below state the actual facts.
-            let reveal = (settled as f64 / letters.len() as f64).min(1.0);
-            let candidate = if finished {
-                reveal
-            } else if total > 0 {
-                done as f64 / total as f64
-            } else {
-                0.0
-            };
-            bar_high = bar_high.max(candidate);
-            let pct = bar_high;
-            let bar_w = 22usize;
-            let filled = (pct * bar_w as f64).round() as usize;
-            let bar = format!(
-                "{}{}",
-                "█".repeat(filled.min(bar_w)),
-                "░".repeat(bar_w.saturating_sub(filled))
-            );
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                status.clone(),
+                Style::default().fg(rgb(art::ramp(0.62))),
+            )));
+            lines.push(Line::raw(""));
+            lines.push(bar_line(bar_high));
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                "any key to skip",
+                Style::default()
+                    .fg(rgb(art::sink(art::ramp(0.4), 0.55)))
+                    .add_modifier(Modifier::DIM),
+            )));
 
-            let status = if !finished && total > 0 {
-                showed_counts = true;
-                format!("recalling {done} of {total}")
-            } else if finished && (showed_counts || settled >= letters.len()) {
-                format!("{total} transcripts · {}", human_size(bytes))
-            } else if total > 0 || finished {
-                "recalling…".to_string()
-            } else {
-                "looking for transcripts".to_string()
-            };
-
-            let lines = vec![
-                Line::from(spans),
-                Line::from(Span::styled(rule, Style::default().fg(ACCENT))),
-                Line::raw(""),
-                Line::from(Span::styled(status, Style::default().fg(CHROME))),
-                Line::raw(""),
-                Line::from(Span::styled(
-                    bar,
-                    Style::default().fg(if finished { ACCENT } else { Color::Blue }),
-                )),
-                Line::raw(""),
-                Line::from(Span::styled(
-                    "any key to skip",
-                    Style::default().fg(CHROME).add_modifier(Modifier::DIM),
-                )),
-            ];
+            let h = lines.len() as u16;
+            let w = if big { mark_w as u16 + 2 } else { 44 };
+            let r = centered(area, w.min(area.width), h);
             f.render_widget(
                 Paragraph::new(Text::from(lines)).alignment(Alignment::Center),
                 r,
             );
         })?;
 
-        // a keypress skips, and is consumed here so it cannot act on the list
         if event::poll(FRAME)? {
-            match event::read()? {
-                Event::Key(k) if k.kind == KeyEventKind::Press => {
+            if let Event::Key(k) = event::read()? {
+                if k.kind == KeyEventKind::Press {
                     skipped = true;
-                    if k.code == KeyCode::Char('c')
-                        && k.modifiers.contains(event::KeyModifiers::CONTROL)
-                    {
+                    if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
                         return Ok(true);
                     }
                     break;
                 }
-                _ => {}
             }
         }
 
-        if finished && elapsed >= FLOOR && settled >= letters.len() {
-            // brief beat on the completed frame so it does not just vanish
-            std::thread::sleep(Duration::from_millis(140));
+        if finished && elapsed >= FLOOR && complete {
+            std::thread::sleep(Duration::from_millis(160));
             break;
         }
-        // never hang here if indexing somehow stalls
         if elapsed > Duration::from_secs(30) {
             break;
         }

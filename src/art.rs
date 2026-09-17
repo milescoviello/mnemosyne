@@ -1,0 +1,177 @@
+//! The wordmark, and the colour ramp used to light it.
+//!
+//! Mnemosyne is the spring of memory in the underworld -- the counter-pool to
+//! Lethe, which souls drank to forget. Hence the water motif: the name surfaces
+//! out of a rippling pool, lit by a gradient that runs from deep water to
+//! foam-pale at the crest.
+
+/// Six-row block letters. Every row of a letter is the same width so the
+/// reveal can work in whole columns.
+fn glyph(c: char) -> &'static [&'static str; 6] {
+    match c {
+        'm' => &[
+            "███╗   ███╗",
+            "████╗ ████║",
+            "██╔████╔██║",
+            "██║╚██╔╝██║",
+            "██║ ╚═╝ ██║",
+            "╚═╝     ╚═╝",
+        ],
+        'n' => &[
+            "███╗   ██╗",
+            "████╗  ██║",
+            "██╔██╗ ██║",
+            "██║╚██╗██║",
+            "██║ ╚████║",
+            "╚═╝  ╚═══╝",
+        ],
+        'e' => &[
+            "███████╗",
+            "██╔════╝",
+            "█████╗  ",
+            "██╔══╝  ",
+            "███████╗",
+            "╚══════╝",
+        ],
+        'o' => &[
+            " ██████╗ ",
+            "██╔═══██╗",
+            "██║   ██║",
+            "██║   ██║",
+            "╚██████╔╝",
+            " ╚═════╝ ",
+        ],
+        's' => &[
+            "███████╗",
+            "██╔════╝",
+            "███████╗",
+            "╚════██║",
+            "███████║",
+            "╚══════╝",
+        ],
+        'y' => &[
+            "██╗   ██╗",
+            "╚██╗ ██╔╝",
+            " ╚████╔╝ ",
+            "  ╚██╔╝  ",
+            "   ██║   ",
+            "   ╚═╝   ",
+        ],
+        _ => &["   ", "   ", "   ", "   ", "   ", "   "],
+    }
+}
+
+pub const WORD: &str = "mnemosyne";
+pub const ROWS: usize = 6;
+
+/// The wordmark as six equal-width rows of characters.
+pub fn wordmark() -> Vec<Vec<char>> {
+    let mut rows: Vec<String> = vec![String::new(); ROWS];
+    for ch in WORD.chars() {
+        let g = glyph(ch);
+        for r in 0..ROWS {
+            rows[r].push_str(g[r]);
+        }
+    }
+    rows.into_iter().map(|r| r.chars().collect()).collect()
+}
+
+pub fn wordmark_width() -> usize {
+    WORD.chars().map(|c| glyph(c)[0].chars().count()).sum()
+}
+
+// ---------------------------------------------------------------- gradient
+
+type Rgb = (u8, u8, u8);
+
+/// Deep water to pale foam. Read left to right across the wordmark.
+const RAMP: &[Rgb] = &[
+    (14, 32, 66),    // abyss
+    (21, 72, 132),   // deep
+    (26, 122, 168),  // mid
+    (38, 178, 176),  // shallow
+    (108, 226, 214), // crest
+    (226, 248, 246), // foam
+];
+
+fn lerp(a: Rgb, b: Rgb, t: f64) -> Rgb {
+    let f = |x: u8, y: u8| (x as f64 + (y as f64 - x as f64) * t).round().clamp(0.0, 255.0) as u8;
+    (f(a.0, b.0), f(a.1, b.1), f(a.2, b.2))
+}
+
+/// Sample the ramp at `p` in 0..=1.
+pub fn ramp(p: f64) -> Rgb {
+    let p = p.clamp(0.0, 1.0);
+    let span = (RAMP.len() - 1) as f64;
+    let x = p * span;
+    let i = x.floor() as usize;
+    if i >= RAMP.len() - 1 {
+        return RAMP[RAMP.len() - 1];
+    }
+    lerp(RAMP[i], RAMP[i + 1], x - i as f64)
+}
+
+/// Brighten toward white by `amount` (0..=1), for the travelling shimmer.
+pub fn lift(c: Rgb, amount: f64) -> Rgb {
+    lerp(c, (255, 255, 255), amount.clamp(0.0, 1.0))
+}
+
+/// Dim toward the background, for unrevealed noise.
+pub fn sink(c: Rgb, amount: f64) -> Rgb {
+    lerp(c, (8, 12, 20), amount.clamp(0.0, 1.0))
+}
+
+/// Colour for column `x` of `width`, with a shimmer band centred at `band`
+/// (also in columns) and a vertical shading factor for row `row` of `rows`.
+pub fn column_color(x: usize, width: usize, band: f64, row: usize, rows: usize) -> Rgb {
+    let p = if width > 1 { x as f64 / (width - 1) as f64 } else { 0.0 };
+    // rows lower down sit deeper in the water
+    let depth = 1.0 - (row as f64 / rows.max(1) as f64) * 0.45;
+    let base = ramp(p * depth);
+    let d = (x as f64 - band).abs();
+    let glow = if d < 14.0 {
+        (1.0 - d / 14.0).powf(2.2) * 0.85
+    } else {
+        0.0
+    };
+    lift(base, glow)
+}
+
+// ------------------------------------------------------------------ ripples
+
+// Kept to water-like marks: '⌄' and '‿' read as teeth at this density.
+const WAVES: &[char] = &['-', '∼', '~', '≈'];
+
+/// A single cell of water: the glyph, and how high the surface stands there.
+pub fn ripple_at(x: usize, phase: f64, x0: f64) -> (char, f64) {
+    let t = ((x as f64 * 0.55 + phase + x0).sin() * 0.65
+        + (x as f64 * 0.17 - phase * 0.7 + x0).sin() * 0.35)
+        .clamp(-1.0, 1.0);
+    let n = ((t + 1.0) / 2.0 * (WAVES.len() - 1) as f64).round() as usize;
+    let i = 0.25 + ((t + 1.0) / 2.0) * 0.75;
+    (WAVES[n.min(WAVES.len() - 1)], i)
+}
+
+/// One row of water. `phase` advances with time; `x0` shifts per row so the
+/// rows do not move in lockstep.
+pub fn ripple(width: usize, phase: f64, x0: f64) -> Vec<(char, f64)> {
+    (0..width)
+        .map(|x| {
+            // two summed frequencies, so the surface never falls into the
+            // long uniform runs a single sine produces
+            let t = ((x as f64 * 0.55 + phase + x0).sin() * 0.65
+                + (x as f64 * 0.17 - phase * 0.7 + x0).sin() * 0.35)
+                .clamp(-1.0, 1.0);
+            let n = ((t + 1.0) / 2.0 * (WAVES.len() - 1) as f64).round() as usize;
+            // intensity peaks at the wave crests
+            let i = 0.25 + ((t + 1.0) / 2.0) * 0.75;
+            (WAVES[n.min(WAVES.len() - 1)], i)
+        })
+        .collect()
+}
+
+/// Noise glyphs for the compact fallback reveal.
+pub const WAVES_FALLBACK: &[char] = &['≈', '~', '∼', '#', '%', '*', '?', '0', '4', '7'];
+
+/// Eighth-width blocks, so the progress bar can move in sub-cell steps.
+pub const PARTIALS: &[char] = &['▏', '▎', '▍', '▌', '▋', '▊', '▉'];

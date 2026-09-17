@@ -6,6 +6,7 @@
 //! the calling shell's working directory is something only the shell can do.
 
 mod app;
+mod art;
 mod index;
 mod live;
 mod meta;
