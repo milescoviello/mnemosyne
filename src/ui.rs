@@ -373,7 +373,7 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
         Paragraph::new(Text::from(vec![
             Line::from(vec![
                 Span::raw(" ".repeat(MARGIN)),
-                Span::styled("⌇ ", Style::default().fg(rgb(art::ramp(0.6)))),
+                Span::styled("≈ ", Style::default().fg(rgb(art::ramp(0.6)))),
                 Span::styled(
                     fit(&title, area.width as usize - 12),
                     Style::default()
@@ -420,11 +420,11 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
-/// `⌇ m n e m o s y n e` — the name lit along the water ramp.
+/// `≈ m n e m o s y n e` — the name lit along the water ramp.
 fn draw_wordmark(f: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![
         Span::raw(" ".repeat(MARGIN)),
-        Span::styled("⌇ ", Style::default().fg(rgb(art::ramp(0.55)))),
+        Span::styled("≈ ", Style::default().fg(rgb(art::ramp(0.55)))),
     ];
     let letters: Vec<char> = art::WORD.chars().collect();
     for (i, ch) in letters.iter().enumerate() {
@@ -1100,7 +1100,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     };
     let line = Line::from(vec![
         Span::raw(" ".repeat(MARGIN)),
-        Span::styled("⌇ ", Style::default().fg(rgb(art::ramp(0.6)))),
+        Span::styled("≈ ", Style::default().fg(rgb(art::ramp(0.6)))),
         Span::styled(
             format!("{label} "),
             Style::default()
@@ -1741,5 +1741,52 @@ mod render_tests {
                 + c.tags;
             assert!(used <= w, "width {w}: columns want {used}");
         }
+    }
+}
+
+#[cfg(test)]
+mod glyph_tests {
+    /// Every non-ASCII character the interface is allowed to draw.
+    ///
+    /// Each one has been checked against the fonts a plain `monospace`
+    /// actually resolves to, and against fontconfig's fallback chain. The
+    /// wordmark prefix used to be U+2307, which nothing in that chain
+    /// carries — it rendered as a box and there was no way to tell from a
+    /// text capture, because the codepoint survives whether or not the font
+    /// can draw it.
+    const ALLOWED: &str = "▌❯★●◌◆⌁│└≈~-─—…·“”↵→←↑↓█░▏ ";
+
+    fn ui_source_glyphs() -> Vec<char> {
+        let src = include_str!("ui.rs");
+        // stop before this module so the allowlist does not test itself
+        let body = src.split("mod glyph_tests").next().unwrap();
+        let mut out: Vec<char> = body
+            .chars()
+            .filter(|c| !c.is_ascii() && !c.is_alphabetic())
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
+    }
+
+    #[test]
+    fn the_interface_only_uses_glyphs_fonts_actually_have() {
+        let unknown: Vec<char> = ui_source_glyphs()
+            .into_iter()
+            .filter(|c| !ALLOWED.contains(*c))
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "unvetted glyphs {unknown:?} — check them against `fc-match -s monospace` \
+             before using them, or they will render as boxes"
+        );
+    }
+
+    #[test]
+    fn the_retired_glyph_is_gone() {
+        assert!(
+            !include_str!("ui.rs").contains('\u{2307}'),
+            "U+2307 is back"
+        );
     }
 }
