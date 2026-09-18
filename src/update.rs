@@ -348,17 +348,35 @@ mod asset_tests {
     }
 
     #[test]
-    fn asset_name_matches_what_the_release_workflow_publishes() {
-        // If these drift, the updater 404s on every machine.
-        let yml = include_str!("../.github/workflows/release.yml");
+    fn asset_name_matches_what_the_release_workflows_publish() {
+        // If these drift, the updater 404s on every machine of that shape.
+        // Intel macOS lives in its own workflow because its runners queue for
+        // an hour and would hold up everyone else's release.
+        let main = include_str!("../.github/workflows/release.yml");
+        let intel = include_str!("../.github/workflows/release-intel-mac.yml");
+        let both = format!("{main}{intel}");
         for name in [
             "mnemosyne-x86_64-linux",
             "mnemosyne-aarch64-linux",
             "mnemosyne-x86_64-macos",
             "mnemosyne-aarch64-macos",
         ] {
-            assert!(yml.contains(name), "release workflow never builds {name}");
+            assert!(both.contains(name), "nothing builds {name}");
         }
-        assert!(yml.contains(asset().trim_end_matches(".tar.gz")));
+        assert!(
+            both.contains(asset().trim_end_matches(".tar.gz")),
+            "this platform's own asset is never built"
+        );
+    }
+
+    #[test]
+    fn the_slow_target_cannot_block_the_others() {
+        let main = include_str!("../.github/workflows/release.yml");
+        assert!(
+            !main.contains("macos-13"),
+            "Intel macOS is back in the blocking matrix"
+        );
+        let intel = include_str!("../.github/workflows/release-intel-mac.yml");
+        assert!(intel.contains("continue-on-error: true"));
     }
 }
