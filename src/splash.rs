@@ -85,8 +85,12 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress) -> Result<bool> {
     let mut bar_high = 0.0f64;
     let mut showed_counts = false;
 
-    let marks = art::wordmark();
-    let mark_w = art::wordmark_width();
+    // Pick the largest wordmark this terminal can hold; None means fall back
+    // to the letter reveal.
+    let term_w = term.size().map(|s| s.width as usize).unwrap_or(80);
+    let mark = art::mark_for(term_w.saturating_sub(4));
+    let mark_w = mark.as_ref().map(|m| m.width).unwrap_or(art::WORD.chars().count() * 2);
+    let mark_h = mark.as_ref().map(|m| m.height()).unwrap_or(1);
 
     loop {
         let elapsed = start.elapsed();
@@ -127,28 +131,37 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress) -> Result<bool> {
 
         term.draw(|f| {
             let area = f.area();
-            let big = area.width as usize >= mark_w + 4 && area.height >= 18;
+            let big = mark.is_some() && area.width as usize >= mark_w + 4 && area.height >= 16;
 
             let mut lines: Vec<Line> = Vec::new();
 
             if big {
+                let m = mark.as_ref().unwrap();
                 let revealed = (rev * mark_w as f64) as usize;
-                for (r, row) in marks.iter().enumerate() {
+                for (r, row) in m.rows.iter().enumerate() {
                     let mut spans: Vec<Span> = Vec::with_capacity(mark_w);
                     for (x, ch) in row.iter().enumerate() {
                         if x < revealed {
-                            let c = art::column_color(x, mark_w, band, r, art::ROWS);
-                            spans.push(Span::styled(
-                                ch.to_string(),
-                                Style::default().fg(rgb(c)).add_modifier(Modifier::BOLD),
-                            ));
+                            // Blank cells of the art stay blank; only inked
+                            // ones take colour, so the tone does the drawing.
+                            if *ch == ' ' {
+                                spans.push(Span::raw(" "));
+                            } else {
+                                let c = art::column_color(x, mark_w, band, r, mark_h);
+                                spans.push(Span::styled(
+                                    ch.to_string(),
+                                    Style::default().fg(rgb(c)),
+                                ));
+                            }
                         } else {
                             // Not yet surfaced. Only the crests show, so this
                             // reads as open water instead of a wall of glyphs.
                             let (w, i) =
                                 art::ripple_at(x, ms / 240.0, r as f64 * 1.9);
-                            if i > 0.80 {
-                                let c = art::sink(art::ramp(0.34), 0.55);
+                            // Only the highest crests, and dim: a dense field
+                            // here fights the art instead of framing it.
+                            if i > 0.93 {
+                                let c = art::sink(art::ramp(0.34), 0.68);
                                 spans.push(Span::styled(
                                     w.to_string(),
                                     Style::default().fg(rgb(c)),
@@ -191,7 +204,7 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress) -> Result<bool> {
                 let spans: Vec<Span> = cells
                     .into_iter()
                     .map(|(ch, i)| {
-                        if i < 0.42 {
+                        if i < 0.58 {
                             return Span::raw(" ");
                         }
                         let c = art::sink(art::ramp(0.16 + i * 0.34), fade);

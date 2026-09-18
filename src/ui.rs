@@ -663,31 +663,45 @@ fn draw_help(f: &mut Frame, area: Rect) {
         ("q esc", "^c", "quit"),
     ];
 
-    let art_w = art::wordmark_width() as u16;
-    let want_w = (art_w + 6).max(80);
-    let w = want_w.min(area.width);
-    let show_art = area.width >= art_w + 6 && area.height as usize >= rows.len() + 12;
-    let h = (rows.len() as u16 + if show_art { 12 } else { 4 }).min(area.height);
+    let mark = art::mark_for(area.width.saturating_sub(6) as usize);
+    let art_w = mark.as_ref().map(|m| m.width).unwrap_or(0) as u16;
+    let art_h = mark.as_ref().map(|m| m.height()).unwrap_or(0);
+    let show_art = mark.is_some() && area.height as usize >= rows.len() + art_h + 6;
+    // A centred panel narrower than the terminal leaves the list showing down
+    // both sides, which looks like a rendering fault rather than an overlay.
+    // Help is a screenful of content, so it takes the screen.
+    let (w, h) = if show_art {
+        (area.width, area.height)
+    } else {
+        (
+            80u16.min(area.width),
+            (rows.len() as u16 + 4).min(area.height),
+        )
+    };
     let r = centered(area, w, h);
     f.render_widget(Clear, r);
 
     let mut lines: Vec<Line> = vec![Line::raw("")];
     if show_art {
-        let marks = art::wordmark();
-        for (row, chars) in marks.iter().enumerate() {
-            let mut sp: Vec<Span> = vec![Span::raw("  ")];
+        let m = mark.as_ref().unwrap();
+        let indent = (w as usize).saturating_sub(m.width) / 2;
+        for (row, chars) in m.rows.iter().enumerate() {
+            let mut sp: Vec<Span> = vec![Span::raw(" ".repeat(indent))];
             let glyphs: Vec<Span> = chars
                 .iter()
                 .enumerate()
                 .map(|(x, ch)| {
-                    let c = art::column_color(x, art_w as usize, -99.0, row, art::ROWS);
+                    if *ch == ' ' {
+                        return Span::raw(" ");
+                    }
+                    let c = art::column_color(x, art_w as usize, -99.0, row, art_h);
                     Span::styled(ch.to_string(), Style::default().fg(rgb(c)))
                 })
                 .collect();
             sp.extend(glyphs);
             lines.push(Line::from(sp));
         }
-        lines.push(ripple_line(w as usize, 2, 1.7));
+        lines.push(ripple_line(w as usize, indent.max(2), 1.7));
         lines.push(Line::raw(""));
     }
     for (plain, alt, desc) in rows {

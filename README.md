@@ -190,6 +190,108 @@ and pressing `ctrl+t` creates them all detached, then attaches to the first.
 ## The opening animation
 
 Mnemosyne is the spring of memory in the underworld — the counter-pool to
+Lethe, which souls drank in order to forget. So the name surfaces out of a
+rippling pool, lit by a gradient running from deep water to pale foam with a
+shimmer band that leads the reveal and then keeps sweeping:
+
+```
+    =#**%%#-*%%*.  *#+*%%*:  :*###*-  -##+#%#-+%%#:  :+%%%#+. .*####* -#*   +#+ =#*+%%#-  .+####+
+    +@@=:#@@-:%@*  %@%-:%@* :@@*-=@@+ =@@+:*@@=:#@% .%@+::#@# +@%==-:  #@* :@@: *@@=:*@@. #@#=-%@#
+    +@#  +@#  *@#  %@=  *@# =@@++++++ =@%  =@%  +@% -@@:  =@@. -+*#%#:  #@=#@-  +@#  -@@..@@#++++*.
+    +@%  *@#  #@#  %@+  *@# .*@#==+*- =@@. +@@. +@%  *@%**@@= -*==+@@:  .%@@+   *@%  -@@. +@%+==*=
+    .-:  :-:  :-:  :-.  :-:   :-===-. .-:  .-:  .-:   .-==-.  .-===-.  ..+@#    :-:  .--   .-===-.
+                                                                       =%%*.
+      ~~~~~       ~~~~~     ~~≈≈≈≈~∼   ∼~~~~~∼      ∼~~~~     ∼~~≈≈≈~~   ∼~~≈≈~~       ~~~~
+
+                                  1084 transcripts · 2.4G
+                     ████████████████████████████████████████████████
+                                     any key to skip
+```
+
+The wordmark is **tonal ASCII art** — neither an outline font nor solid
+blocks. The name was rasterised with anti-aliasing and each character cell
+mapped onto the density ramp ` .:-=+*#%@`, so stroke centres land on `@` and
+edges fall away through the mid-tones. That edge falloff is what makes it read
+as art rather than a stencil. It is generated once by `tools/gen-wordmark.py`
+and baked into the source; nothing is rasterised at runtime and there is no
+image dependency in the binary.
+
+Two sizes exist, because tonal art needs resolution: 96 columns and 84. Below
+about 88 columns the letters compress into mush, so narrower terminals get a
+letter-by-letter reveal in the same gradient instead.
+
+Columns that have not surfaced yet show only the highest wave crests — filling
+them densely fought the art instead of framing it. The pool sums two sine
+frequencies, because one alone produces long uniform runs that read as teeth.
+Roughly 3,500 distinct colours are in play per frame.
+
+It is covering real work — the index builds on a background thread while this
+runs — and lasts until indexing finishes or about 1.5s has passed, whichever
+is later. Any key skips, and that keypress is swallowed so it cannot act on
+the session under the cursor. When there is genuine work left the bar reports
+it; on a warm index the bar fills with the reveal and the counts below state
+the real totals. The bar never steps backwards when the source changes under
+it.
+
+Turn it off with `--no-splash` or `MNEMOSYNE_NO_SPLASH=1`. `?` shows the same
+wordmark over the key reference.
+
+## Permissions
+
+A session resumes under the permission mode it was **started** in, read from
+the transcript, the same way the model is restored:
+
+| recorded mode | resumed with |
+|---|---|
+| `bypassPermissions` | `--dangerously-skip-permissions` |
+| `plan`, `acceptEdits`, `auto`, `manual`, `dontAsk` | `--permission-mode <mode>` |
+| `default` | nothing — it started with prompts on, so prompts stay on |
+| *nothing recorded* | `--dangerously-skip-permissions` |
+
+`default` is deliberately absent from the `--permission-mode` column: it is not
+one of that flag's accepted values, and it already means "behave normally".
+The last row covers older transcripts written before the field existed.
+
+Overrides, both of which win over the recorded mode:
+
+```sh
+mn --ask     # resume with permission prompts on, whatever it was started in
+mn --dangerously-skip-permissions   # force bypass
+```
+
+Anything `mn` does not recognise is forwarded to `claude` untouched, so
+`mn --verbose` works. `mn`'s own flags (`--no-splash`, `--subagents`,
+`--no-model`, `--ask`) are filtered out before the rest is handed over.
+
+## tmux
+
+`ctrl+t` resumes a session inside tmux, in a session named `mn-<first 8 of the
+id>`:
+
+```
+  ▶ linux-abi-self-hosting  (tmux mn-026bcdb5)
+```
+
+If that tmux session already exists, `ctrl+t` **attaches to it** rather than
+starting a second client on the same transcript — so you pick up its latest
+state instead of forking it:
+
+```
+  ▶ mn-026bcdb5 already running — resuming where it left off
+```
+
+The browser knows about this too. A session with a tmux session waiting shows
+it in the rail (`tmux mn-026bcdb5`), and pressing `enter` on one refuses and
+points you at `ctrl+t` instead. Attaching works from inside tmux as well —
+`switch-client` is used there, since `attach-session` cannot nest.
+
+The `mn-` prefix is namespaced and matched exactly (`-t =name`), so tmux
+sessions you created yourself are never touched. Selecting several sessions
+and pressing `ctrl+t` creates them all detached, then attaches to the first.
+
+## The opening animation
+
+Mnemosyne is the spring of memory in the underworld — the counter-pool to
 Lethe, which souls drank in order to forget. So the wordmark surfaces out of a
 rippling pool, lit by a gradient running from deep water to pale foam with a
 shimmer band that leads the reveal and then keeps sweeping:

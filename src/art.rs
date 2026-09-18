@@ -5,79 +5,64 @@
 //! out of a rippling pool, lit by a gradient that runs from deep water to
 //! foam-pale at the crest.
 
-/// Six-row block letters. Every row of a letter is the same width so the
-/// reveal can work in whole columns.
-fn glyph(c: char) -> &'static [&'static str; 6] {
-    match c {
-        'm' => &[
-            "███╗   ███╗",
-            "████╗ ████║",
-            "██╔████╔██║",
-            "██║╚██╔╝██║",
-            "██║ ╚═╝ ██║",
-            "╚═╝     ╚═╝",
-        ],
-        'n' => &[
-            "███╗   ██╗",
-            "████╗  ██║",
-            "██╔██╗ ██║",
-            "██║╚██╗██║",
-            "██║ ╚████║",
-            "╚═╝  ╚═══╝",
-        ],
-        'e' => &[
-            "███████╗",
-            "██╔════╝",
-            "█████╗  ",
-            "██╔══╝  ",
-            "███████╗",
-            "╚══════╝",
-        ],
-        'o' => &[
-            " ██████╗ ",
-            "██╔═══██╗",
-            "██║   ██║",
-            "██║   ██║",
-            "╚██████╔╝",
-            " ╚═════╝ ",
-        ],
-        's' => &[
-            "███████╗",
-            "██╔════╝",
-            "███████╗",
-            "╚════██║",
-            "███████║",
-            "╚══════╝",
-        ],
-        'y' => &[
-            "██╗   ██╗",
-            "╚██╗ ██╔╝",
-            " ╚████╔╝ ",
-            "  ╚██╔╝  ",
-            "   ██║   ",
-            "   ╚═╝   ",
-        ],
-        _ => &["   ", "   ", "   ", "   ", "   ", "   "],
-    }
-}
+//! The wordmark is tonal ASCII art rather than an outline font or solid
+//! blocks: the name was rasterised with anti-aliasing and each character cell
+//! mapped onto the density ramp ` .:-=+*#%@`, so stroke centres land on `@`
+//! and edges fall away through the mid-tones. That edge falloff is what makes
+//! it read as art. Generated once and baked in — nothing is rendered at
+//! runtime.
+//!
+//! Two sizes, because tonal art needs resolution: below roughly 84 columns the
+//! letters compress into mush, so narrow terminals get the letter reveal
+//! instead.
+
+/// Tonal ASCII art, 96 columns by 6 rows.
+pub const ART_WIDE: [&str; 6] = [
+    " =#**%%#-*%%*.  *#+*%%*:  :*###*-  -##+#%#-+%%#:  :+%%%#+. .*####* -#*   +#+ =#*+%%#-  .+####+  ",
+    " +@@=:#@@-:%@*  %@%-:%@* :@@*-=@@+ =@@+:*@@=:#@% .%@+::#@# +@%==-:  #@* :@@: *@@=:*@@. #@#=-%@# ",
+    " +@#  +@#  *@#  %@=  *@# =@@++++++ =@%  =@%  +@% -@@:  =@@. -+*#%#:  #@=#@-  +@#  -@@..@@#++++*.",
+    " +@%  *@#  #@#  %@+  *@# .*@#==+*- =@@. +@@. +@%  *@%**@@= -*==+@@:  .%@@+   *@%  -@@. +@%+==*= ",
+    " .-:  :-:  :-:  :-.  :-:   :-===-. .-:  .-:  .-:   .-==-.  .-===-.  ..+@#    :-:  .--   .-===-. ",
+    "                                                                    =%%*.                       ",
+];
+
+/// Tonal ASCII art, 84 columns by 5 rows.
+pub const ART_MED: [&str; 5] = [
+    " +#**%#=*#%=  *#**%#-  =#**#=  *#**%#=*#%=  =###%+. +#*+*= *#:  *#.:#*+#%*. .*#***- ",
+    " *@*.=@%.:@@. %@+.=@# +@%++%@= %@+.+@#.-@% =@#  +@# #@*+=- :@% +@+ -@%:.#@= %@*=+@%.",
+    " #@= =@# .@@. %@: -@% =@%==-+: %@- +@* :@@ -@%::*@* -==*@@. -@#@*  -@%  *@= #@#===+.",
+    " =+: :+= .++. =+. :+=  :=+++=. =+: -+- .++  :+**+-  =++++:   =@#   .+=  -+:  -++++- ",
+    "                                                           .*#*.                    ",
+];
 
 pub const WORD: &str = "mnemosyne";
-pub const ROWS: usize = 6;
 
-/// The wordmark as six equal-width rows of characters.
-pub fn wordmark() -> Vec<Vec<char>> {
-    let mut rows: Vec<String> = vec![String::new(); ROWS];
-    for ch in WORD.chars() {
-        let g = glyph(ch);
-        for r in 0..ROWS {
-            rows[r].push_str(g[r]);
-        }
-    }
-    rows.into_iter().map(|r| r.chars().collect()).collect()
+pub struct Mark {
+    pub rows: Vec<Vec<char>>,
+    pub width: usize,
 }
 
-pub fn wordmark_width() -> usize {
-    WORD.chars().map(|c| glyph(c)[0].chars().count()).sum()
+impl Mark {
+    fn from(src: &[&str]) -> Mark {
+        let rows: Vec<Vec<char>> = src.iter().map(|r| r.chars().collect()).collect();
+        let width = rows.first().map(|r| r.len()).unwrap_or(0);
+        Mark { rows, width }
+    }
+    pub fn height(&self) -> usize {
+        self.rows.len()
+    }
+}
+
+/// The largest wordmark that fits in `width` columns, or None when even the
+/// smaller one would not.
+pub fn mark_for(width: usize) -> Option<Mark> {
+    if width >= ART_WIDE[0].chars().count() {
+        Some(Mark::from(&ART_WIDE))
+    } else if width >= ART_MED[0].chars().count() {
+        Some(Mark::from(&ART_MED))
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------- gradient
