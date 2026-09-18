@@ -35,10 +35,41 @@ struct Cols {
     folder: usize,
     sub: usize,
     title: usize,
+    /// What you last said, dimmed. At wide terminals the title column would
+    /// otherwise leave a 60-column void in the middle of every row; this puts
+    /// the most useful recall cue there instead.
+    preview: usize,
     model: usize,
     msgs: usize,
     tags: usize,
 }
+
+/// Do two strings start the same way, comparing by character?
+///
+/// Byte-offset slicing panics when the cut lands inside a multi-byte
+/// character, and prompts contain plenty of those.
+fn same_prefix(a: &str, b: &str, want: usize) -> bool {
+    let mut ai = a.trim().chars().flat_map(|c| c.to_lowercase());
+    let mut bi = b.trim().chars().flat_map(|c| c.to_lowercase());
+    let mut seen = 0usize;
+    loop {
+        match (ai.next(), bi.next()) {
+            (Some(x), Some(y)) if x == y => {
+                seen += 1;
+                if seen >= want {
+                    return true;
+                }
+            }
+            (None, None) => return seen > 0,
+            _ => return false,
+        }
+    }
+}
+
+/// Past this, a title column is just empty space.
+const TITLE_MAX: usize = 52;
+/// Below this a preview is too clipped to be worth the column.
+const PREVIEW_MIN: usize = 24;
 
 impl Cols {
     fn new(width: usize) -> Cols {
@@ -49,7 +80,8 @@ impl Cols {
         } else {
             12
         };
-        let sub = 4;
+        // wide enough for the busiest session here (349 subagents) plus a gap
+        let sub = 5;
         let model = if width >= 150 { 12 } else if width >= 110 { 10 } else { 0 };
         let msgs = 6;
         // tags trail the right edge, so they need reserved room or they fall
@@ -57,8 +89,13 @@ impl Cols {
         let tags = if width >= 140 { 16 } else { 0 };
         // 4 cursor + 2 marker + 4 age + 2 gap
         let fixed = 4 + 2 + 4 + 2 + folder + 1 + sub + model + msgs + tags;
-        let title = width.saturating_sub(fixed).max(16);
-        Cols { folder, sub, title, model, msgs, tags }
+        let avail = width.saturating_sub(fixed).max(16);
+        let (title, preview) = if avail >= TITLE_MAX + PREVIEW_MIN + 2 {
+            (TITLE_MAX, avail - TITLE_MAX - 2)
+        } else {
+            (avail, 0)
+        };
+        Cols { folder, sub, title, preview, model, msgs, tags }
     }
 }
 
@@ -86,7 +123,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_colheader(f, &cols, rows[2]);
     draw_list(f, app, &cols, rows[3]);
     if rail > 0 {
-        draw_rail(f, app, rows[4]);
+        // When the list carries a LEFT OFF column there is no reason for the
+        // rail to print the same line again; it shows more of the exchange.
+        draw_rail(f, app, rows[4], cols.preview == 0);
     }
     if show_input {
         draw_input(f, app, rows[5]);
@@ -194,6 +233,10 @@ fn draw_colheader(f: &mut Frame, c: &Cols, area: Rect) {
     s.push(' ');
     s.push_str(&" ".repeat(c.sub));
     s.push_str(&format!("{:<w$}", "TITLE", w = c.title));
+    if c.preview > 0 {
+        s.push_str("  ");
+        s.push_str(&format!("{:<w$}", "LEFT OFF", w = c.preview));
+    }
     if c.model > 0 {
         s.push_str(&format!("{:<w$}", "MODEL", w = c.model));
     }
@@ -209,8 +252,20 @@ fn draw_list(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
         .view
         .iter()
         .map(|r| match r {
+            Row::Divider(label) => ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{label} "),
+                    Style::default().fg(CHROME).add_modifier(Modifier::ITALIC),
+                ),
+                Span::styled(
+                    "─".repeat(
+                        (area.width as usize)
+                            .saturating_sub(NOCURSOR.len() + label.chars().count() + 3),
+                    ),
+                    Style::default().fg(Color::Rgb(38, 44, 54)),
+                ),
+            ])),
             Row::Header(dir, n) => ListItem::new(Line::from(vec![
-                Span::raw(NOCURSOR),
                 Span::styled(
                     format!("{dir}  "),
                     Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
@@ -265,7 +320,7 @@ fn draw_list(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
 
                 if s.subagent_count > 0 && !is_sub {
                     sp.push(Span::styled(
-                        format!("{:<w$}", format!("⌁{}", s.subagent_count), w = c.sub),
+                        format!("{:<w$}", fit(&format!("⌁{}", s.subagent_count), c.sub - 1), w = c.sub),
                         Style::default().fg(CHROME),
                     ));
                 } else {
@@ -282,6 +337,26 @@ fn draw_list(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                     tstyle,
                 ));
 
+                if c.preview > 0 {
+                    let mut cue = if !s.last_prompt.is_empty() {
+                        s.last_prompt.as_str()
+                    } else {
+                        s.first_prompt.as_str()
+                    };
+                    // Sessions with no AI title fall back to their opening
+                    // prompt, which is often also the last one. Printing it
+                    // twice in one row just looks like a rendering fault.
+                    if same_prefix(cue, s.title(), 24) {
+                        cue = "";
+                    }
+                    sp.push(Span::raw("  "));
+                    // clip two short of the cell so a long cue can never run
+                    // into the MODEL column
+                    sp.push(Span::styled(
+                        format!("{:<w$}", fit(cue, c.preview.saturating_sub(2)), w = c.preview),
+                        Style::default().fg(CHROME),
+                    ));
+                }
                 if c.model > 0 {
                     sp.push(Span::styled(
                         format!("{:<w$}", fit(s.model_short(), c.model - 1), w = c.model),
@@ -304,7 +379,12 @@ fn draw_list(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
     let list = List::new(items)
         .block(Block::default())
         .highlight_symbol(CURSOR)
-        .highlight_style(Style::default().fg(BRIGHT).add_modifier(Modifier::BOLD));
+        .highlight_style(
+            Style::default()
+                .fg(BRIGHT)
+                .bg(Color::Rgb(22, 38, 52))
+                .add_modifier(Modifier::BOLD),
+        );
 
     let mut st = ListState::default();
     st.select(Some(app.cursor));
@@ -312,7 +392,7 @@ fn draw_list(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
 }
 
 /// The bottom rail: what this session was, and where you left off.
-fn draw_rail(f: &mut Frame, app: &mut App, area: Rect) {
+fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
     let turns = app.preview(8);
     let snippet = app.deep_snippet().cloned();
     let width = area.width as usize;
@@ -406,21 +486,7 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect) {
     // Compare by characters, not bytes: slicing a &str at an arbitrary byte
     // offset panics when it lands inside a multi-byte character, and prompts
     // contain plenty of non-ASCII.
-    let same = |a: &str, b: &str| {
-        let mut ai = a.chars().flat_map(|c| c.to_lowercase());
-        let mut bi = b.chars().flat_map(|c| c.to_lowercase());
-        let mut seen = 0;
-        loop {
-            match (ai.next(), bi.next()) {
-                (Some(x), Some(y)) if x == y => seen += 1,
-                (None, None) => return seen > 0,
-                _ => return seen >= 48,
-            }
-            if seen >= 48 {
-                return true;
-            }
-        }
-    };
+    let same = |a: &str, b: &str| same_prefix(a, b, 48);
 
     if let Some(sn) = snippet {
         body_lines.push(Line::from(vec![
@@ -429,7 +495,7 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect) {
             Span::styled(fit(&sn, body), Style::default().fg(BRIGHT)),
         ]));
     }
-    if !s.last_prompt.is_empty() {
+    if show_cue && !s.last_prompt.is_empty() {
         body_lines.push(Line::from(vec![
             Span::raw(PAD),
             label("left off"),

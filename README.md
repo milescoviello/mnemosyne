@@ -10,23 +10,42 @@ directory you happen to be standing in, so there is no way to see the whole
 picture. `mnemosyne` is that missing view.
 
 ```
-  mnemosyne                                328 sessions · ★12 · 6 live · recency
+  mnemosyne                                              330 sessions · ★12 · 6 live · recency
 
-       AGE  FOLDER           TITLE                              MODEL    MSGS  TAGS
-   →    3s  ~                fix the auth flow                  opus-5   6.3k
-       26s  ~/proj           add rate limiting                  opus-5    412  #api
-    ●  30s  ~/proj           migrate the schema                 opus-5   1.2k
-    ★   4m  ~/site       ⌁27 redesign the landing page          opus-5   8.1k
-        5h  ~/notes          tidy the vault                     sonnet-5  3.4k
+       AGE  FOLDER           TITLE                          LEFT OFF                  MODEL     MSGS  TAGS
+    today ────────────────────────────────────────────────────────────────────────────────────────────────
+  →    7s  ~/proj           fix the auth flow              the redirect drops state   opus-5    6.3k
+      26s  ~/proj       ⌁27 migrate the schema             run it against staging     opus-5     412  #api
+    ●  4m  ~                update the deps                check the lockfile diff    opus-5    1.2k
+    yesterday ────────────────────────────────────────────────────────────────────────────────────────────
+   ★  1d   ~/site           redesign the landing page      make the hero smaller      opus-5    8.1k
+       1d  ~/notes          tidy the vault                 merge the daily notes      sonnet-5  3.4k
 
-  ───────────────────────────────────────────────────────────────────────────────
-  fix the auth flow                  ~/proj · main · 686K · 187 entries · 35m
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────
+  fix the auth flow                  ~/proj · main · 686K · 187 entries · 35m · bypass · tmux mn-a3f21c04
 
-  left off   the redirect still drops the state param
-  claude     Found it — the callback rebuilds the URL and loses the query…
+  claude    Found it — the callback rebuilds the URL and loses the query string…
+  you       does that break the mobile flow too?
 
-  ↑↓ move   enter resume   / filter   F search   f ★   t tag   s sort   ? keys  1/328
+  ↑↓ move   enter resume   / filter   F search   ctrl+t tmux   f ★   t tag   s sort   ? keys        1/330
 ```
+
+No borders; structure comes from alignment and whitespace. Columns are
+computed once per frame from one width table, so the header row cannot drift
+out of step with the rows.
+
+At a wide terminal a title column alone leaves a sixty-column void in the
+middle of every row, so the leftover space becomes a **LEFT OFF** column
+carrying the last thing you said — the best single cue for "which one was
+this". When a session has no AI title its own opening prompt becomes the
+title, and that is often also the last prompt; printing it twice in one row
+looks like a rendering fault, so the duplicate is suppressed. Below about 80
+columns the column is dropped and the rail carries the cue instead.
+
+Sorting by recency adds dim date bands, which give a 300-row list something
+to scan against. They are omitted under any other sort, where they would be
+meaningless, and under grouped mode, which has its own folder headings.
+
 
 No borders, aligned columns, one footer line. The full key list lives behind
 `?` rather than permanently on screen.

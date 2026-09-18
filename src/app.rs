@@ -28,9 +28,39 @@ pub enum InputMode {
 
 #[derive(Clone, Debug)]
 pub enum Row {
+    /// Folder heading, used by grouped mode.
     Header(String, usize),
+    /// Dim date band ("today", "yesterday", …) used when sorting by recency,
+    /// so a 300-row list has some rhythm to scan against.
+    Divider(String),
     Item(usize),
     Sub(usize),
+}
+
+impl Row {
+    /// Rows the cursor is allowed to land on.
+    pub fn selectable(&self) -> bool {
+        matches!(self, Row::Item(_) | Row::Sub(_))
+    }
+}
+
+/// Which date band an mtime falls into, relative to local midnight.
+fn date_band(mtime: i64) -> &'static str {
+    use chrono::{Local, TimeZone};
+    let now = Local::now();
+    let then = match Local.timestamp_opt(mtime, 0) {
+        chrono::offset::LocalResult::Single(t) => t,
+        _ => return "earlier",
+    };
+    let days = (now.date_naive() - then.date_naive()).num_days();
+    match days {
+        d if d <= 0 => "today",
+        1 => "yesterday",
+        2..=6 => "this week",
+        7..=30 => "this month",
+        31..=365 => "this year",
+        _ => "older",
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -323,14 +353,25 @@ impl App {
 
         let mut rows: Vec<Row> = Vec::new();
         if self.group_by_dir {
-            let mut by_dir: Vec<(String, Vec<usize>)> = Vec::new();
+            // Accumulate per directory. Matching only against the previous
+            // group would start a new one every time a folder reappears, and
+            // the list is in time order, so `~` came out five separate times.
+            let mut order: Vec<String> = Vec::new();
+            let mut buckets: HashMap<String, Vec<usize>> = HashMap::new();
             for &i in &idx {
                 let d = crate::model::short_cwd(&self.all[i].cwd);
-                match by_dir.last_mut() {
-                    Some((k, v)) if *k == d => v.push(i),
-                    _ => by_dir.push((d, vec![i])),
+                if !buckets.contains_key(&d) {
+                    order.push(d.clone());
                 }
+                buckets.entry(d).or_default().push(i);
             }
+            let mut by_dir: Vec<(String, Vec<usize>)> = order
+                .into_iter()
+                .map(|d| {
+                    let v = buckets.remove(&d).unwrap_or_default();
+                    (d, v)
+                })
+                .collect();
             // group order: most recently touched folder first
             by_dir.sort_by(|a, b| {
                 let am = a.1.iter().map(|&i| self.all[i].mtime).max().unwrap_or(0);
@@ -345,7 +386,17 @@ impl App {
                 }
             }
         } else {
+            // Date bands only make sense when the list is in time order.
+            let banded = self.sort == Sort::Recency;
+            let mut band = "";
             for &i in &idx {
+                if banded {
+                    let b = date_band(self.all[i].mtime);
+                    if b != band {
+                        band = b;
+                        rows.push(Row::Divider(b.to_string()));
+                    }
+                }
                 rows.push(Row::Item(i));
                 self.push_subs(&mut rows, i);
             }
@@ -395,7 +446,7 @@ impl App {
         if self.cursor >= n {
             self.cursor = n - 1;
         }
-        let is_item = |r: &Row| !matches!(r, Row::Header(..));
+        let is_item = |r: &Row| r.selectable();
         if is_item(&self.view[self.cursor]) {
             return;
         }
@@ -418,7 +469,7 @@ impl App {
     pub fn current_idx(&self) -> Option<usize> {
         match self.view.get(self.cursor)? {
             Row::Item(i) | Row::Sub(i) => Some(*i),
-            Row::Header(..) => None,
+            _ => None,
         }
     }
 
@@ -427,10 +478,7 @@ impl App {
     }
 
     pub fn item_count(&self) -> usize {
-        self.view
-            .iter()
-            .filter(|r| matches!(r, Row::Item(_) | Row::Sub(_)))
-            .count()
+        self.view.iter().filter(|r| r.selectable()).count()
     }
 
     pub fn preview(&mut self, want: usize) -> Vec<Turn> {
@@ -464,7 +512,7 @@ impl App {
         while remaining > 0 {
             let mut next = c + step;
             // skip headers
-            while next >= 0 && next < n && matches!(self.view[next as usize], Row::Header(..)) {
+            while next >= 0 && next < n && !self.view[next as usize].selectable() {
                 next += step;
             }
             if next < 0 || next >= n {
@@ -834,6 +882,10 @@ impl App {
                 self.sort = self.sort.next();
                 self.status = format!("sort: {}", self.sort.label());
                 self.rebuild();
+                // Keeping the cursor on the same session across a re-sort
+                // scrolls you into the middle of the new order, which reads
+                // like the sort did not work. Show the top instead.
+                self.goto_top();
             }
             KeyCode::Char('o') => {
                 self.group_by_dir = !self.group_by_dir;
