@@ -19,13 +19,19 @@ force_build=0
 say() { printf '%s\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Where the shell functions come from. Next to this script when run from a
+# clone; from the downloaded tarball when run via curl, where there is no
+# checkout to read them out of.
+SHELLSRC="$here/shell"
+KEEP=""
+
 fetch_prebuilt() {
     [ "$(uname -s)" = "Linux" ] && [ "$(uname -m)" = "x86_64" ] || return 1
     have curl || return 1
     local url tmp
     url="https://github.com/$REPO/releases/latest/download/mnemosyne-x86_64-linux.tar.gz"
     tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"' RETURN
+    KEEP="$tmp"
     say "fetching the latest release…"
     curl -fsSL "$url" -o "$tmp/m.tar.gz" || return 1
     if curl -fsSL "$url.sha256" -o "$tmp/m.sha256" 2>/dev/null && have sha256sum; then
@@ -35,7 +41,8 @@ fetch_prebuilt() {
     tar -C "$tmp" -xzf "$tmp/m.tar.gz" || return 1
     mkdir -p "$bindir"
     install -m755 "$tmp/mnemosyne" "$bindir/mnemosyne"
-    [ -f "$tmp/mn.fish" ] && cp "$tmp/mn.fish" "$tmp/mn.bash" "$here/shell/" 2>/dev/null || true
+    # the tarball carries the shell functions, so a curl install has them too
+    [ -f "$tmp/mn.fish" ] && SHELLSRC="$tmp"
     return 0
 }
 
@@ -59,13 +66,13 @@ say "installed $bindir/mnemosyne"
 # fish autoloads functions from this directory
 if [ -d "$HOME/.config/fish" ]; then
     mkdir -p "$HOME/.config/fish/functions"
-    install -m644 "$here/shell/mn.fish" "$HOME/.config/fish/functions/mn.fish"
+    install -m644 "$SHELLSRC/mn.fish" "$HOME/.config/fish/functions/mn.fish"
     say "installed ~/.config/fish/functions/mn.fish   -> type: mn"
 fi
 
 # bash/zsh must source it, because the cd has to happen in your shell
 mkdir -p "$HOME/.local/share/mnemosyne"
-install -m644 "$here/shell/mn.bash" "$HOME/.local/share/mnemosyne/mn.bash"
+install -m644 "$SHELLSRC/mn.bash" "$HOME/.local/share/mnemosyne/mn.bash"
 line='source ~/.local/share/mnemosyne/mn.bash'
 for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
     [ -f "$rc" ] || continue
@@ -82,5 +89,7 @@ esac
 say ""
 say "building the index…"
 "$bindir/mnemosyne" --refresh
+[ -n "$KEEP" ] && rm -rf "$KEEP"
+
 say ""
 say "done — run: mn"
