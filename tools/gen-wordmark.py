@@ -1,60 +1,74 @@
 #!/usr/bin/env python3
-"""Render 'mnemosyne' as tonal ASCII art.
+"""Generate the tonal ASCII wordmark baked into src/art.rs.
 
-Not an outline font and not solid blocks: the text is rasterised with
-anti-aliasing, then each character cell is averaged and mapped onto a density
-ramp, so stroke centres come out dense and edges fall away through mid-tones.
-That edge falloff is what makes it read as art rather than a stencil.
+Run: python3 tools/gen-wordmark.py > /tmp/art.rs   (then paste the consts in)
 
-Terminal cells are about twice as tall as they are wide, so cells are sampled
-at 1:2 to keep the proportions right.
+Needs Pillow at authoring time only. The output is static data, so the binary
+has no image dependency and rasterises nothing at runtime.
+
+Two things decide whether the result is readable:
+
+* Vertical resolution. Lowercase "mnemosyne" is about 16:1, so even 96 columns
+  buys only four rows of x-height -- not enough cells to draw a letter with.
+  Uppercase is ~13:1 and every row is cap height, so nothing is spent on
+  ascenders or descenders. That change alone did most of the work.
+* Contrast. Mid-tones scattered through the inside of a stroke read as noise.
+  An S-curve pushes stroke interiors to solid and leaves only the true edges
+  soft, which is where the tonal falloff actually belongs.
 """
 from PIL import Image, ImageDraw, ImageFont
-import sys
 
-RAMPS = {
-    "classic": " .:-=+*#%@",
-    "soft":    " .,:;i1tfLCG08@",
-    "sparse":  "  ..::--==++**##%%@@",
-    "dots":    " ·∶∷⁘⁙▪▫◦●◼",
-}
+WORD = "MNEMOSYNE"
+FONT = "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf"
+RAMP = " .:-+*#@"
+ASPECT = 1.45      # terminal cell height : width, tuned for row count
+CONTRAST = 2.4
+FLOOR = 0.06
+SIZES = [("ART_WIDE", 96), ("ART_MED", 84), ("ART_SMALL", 68)]
 
-def render(text, font_path, cols, ramp=" .:-=+*#%@", weight=1.0, thresh=0.0):
-    # rasterise big, then average down
-    cell_w = 8
-    cell_h = cell_w * 2
-    px_w = cols * cell_w
-    # find a font size whose rendered width lands near px_w
-    size = 10
-    for _ in range(80):
-        f = ImageFont.truetype(font_path, size)
-        bbox = f.getbbox(text)
-        if bbox[2] - bbox[0] >= px_w * 0.98:
+
+def scurve(v, k):
+    """Push values away from the middle, so strokes solidify and edges stay soft."""
+    if k <= 0:
+        return v
+    v = min(1.0, max(0.0, v))
+    return v ** (1.0 / (1.0 + k)) if v > 0.5 else 1.0 - (1.0 - v) ** (1.0 / (1.0 + k))
+
+
+def render(text, cols):
+    size, cell = 10, 8
+    px_w = cols * cell
+    while size < 400:
+        f = ImageFont.truetype(FONT, size)
+        b = f.getbbox(text)
+        if b[2] - b[0] >= px_w * 0.985:
             break
         size += 2
-    f = ImageFont.truetype(font_path, size)
-    bbox = f.getbbox(text)
-    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    img = Image.new("L", (tw + 4, th + 4), 0)
-    ImageDraw.Draw(img).text((2 - bbox[0], 2 - bbox[1]), text, font=f, fill=255)
-
-    rows = max(1, round(img.height / (img.width / cols) / 2))
+    f = ImageFont.truetype(FONT, size)
+    b = f.getbbox(text)
+    img = Image.new("L", (b[2] - b[0] + 4, b[3] - b[1] + 4), 0)
+    ImageDraw.Draw(img).text((2 - b[0], 2 - b[1]), text, font=f, fill=255)
+    rows = max(1, round(img.height / (img.width / cols) / ASPECT))
     small = img.resize((cols, rows), Image.LANCZOS)
-
     out = []
     for y in range(rows):
         line = ""
         for x in range(cols):
-            v = small.getpixel((x, y)) / 255.0
-            v = min(1.0, v * weight)
-            line += " " if v <= thresh else ramp[min(len(ramp) - 1, int(v * (len(ramp) - 1) + 0.5))]
+            v = scurve(small.getpixel((x, y)) / 255.0, CONTRAST)
+            line += " " if v <= FLOOR else RAMP[min(len(RAMP) - 1, int(v * (len(RAMP) - 1) + 0.5))]
         out.append(line.rstrip())
     return [l for l in out if l.strip()]
 
+
 if __name__ == "__main__":
-    FONT = "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf"
-    for name, cols in (("classic", 78),):
-        art = render("mnemosyne", FONT, cols, RAMPS[name])
-        print(f"=== ramp={name} cols={cols} rows={len(art)} ===")
-        for l in art: print("  " + l)
-        print()
+    for name, cols in SIZES:
+        art = render(WORD, cols)
+        w = max(len(l) for l in art)
+        art = [l.ljust(w) for l in art]
+        bad = set("".join(art)) & set('"\\')
+        assert not bad, f"characters unsafe in a Rust literal: {bad}"
+        print(f"/// Tonal ASCII art, {w} columns by {len(art)} rows.")
+        print(f"pub const {name}: [&str; {len(art)}] = [")
+        for l in art:
+            print(f'    "{l}",')
+        print("];\n")
