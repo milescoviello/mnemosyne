@@ -95,7 +95,11 @@ const RAMP: &[Rgb] = &[
 ];
 
 fn lerp(a: Rgb, b: Rgb, t: f64) -> Rgb {
-    let f = |x: u8, y: u8| (x as f64 + (y as f64 - x as f64) * t).round().clamp(0.0, 255.0) as u8;
+    let f = |x: u8, y: u8| {
+        (x as f64 + (y as f64 - x as f64) * t)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
     (f(a.0, b.0), f(a.1, b.1), f(a.2, b.2))
 }
 
@@ -124,7 +128,11 @@ pub fn sink(c: Rgb, amount: f64) -> Rgb {
 /// Colour for column `x` of `width`, with a shimmer band centred at `band`
 /// (also in columns) and a vertical shading factor for row `row` of `rows`.
 pub fn column_color(x: usize, width: usize, band: f64, row: usize, rows: usize) -> Rgb {
-    let p = if width > 1 { x as f64 / (width - 1) as f64 } else { 0.0 };
+    let p = if width > 1 {
+        x as f64 / (width - 1) as f64
+    } else {
+        0.0
+    };
     // rows lower down sit deeper in the water
     let depth = 1.0 - (row as f64 / rows.max(1) as f64) * 0.45;
     let base = ramp(p * depth);

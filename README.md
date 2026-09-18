@@ -69,6 +69,17 @@ It is a pointer-driven list as much as a keyboard one.
 | click a `⌁n` count | open that session's subagents |
 | `M` | mouse off, so the terminal can select text again |
 
+## Tags
+
+Tags are the organising axis, not folders — most sessions tend to share one
+working directory, so the folder column is nearly constant while tags are not.
+
+`t` tags the session under the cursor, or **every session in the selection**
+if you have picked several with `space`. Inside that prompt, `-name` removes a
+tag and `old>new` renames one everywhere it appears, merging if the
+destination already exists. `T` filters to a single tag, with completion over
+the tags you already use.
+
 Everything clickable records its screen span as it draws, and the mouse
 handler tests against what was actually rendered — so the hit areas cannot
 drift out of step with the layout. Clicks and keys both dispatch through one
@@ -337,6 +348,19 @@ changes under it.
 
 Turn it off with `--no-splash` or `MNEMOSYNE_NO_SPLASH=1`.
 
+## Reading a session
+
+`v` opens the conversation full-screen, so you can see what a session actually
+did without resuming it and changing it. Scroll with the arrows, the wheel, or
+page keys; `enter` resumes the session you are reading, `esc` goes back.
+
+It loads from the end of the transcript rather than the start, because the
+recent end is what you want and a session here can be 400 MB — it says so when
+there was more than it showed. Runs of pure tool calls collapse to one line
+(`ran Bash, Write · 45 calls`) instead of pages of `[Bash]`, and replies are
+wrapped with a hanging indent so they stay readable against the speaker
+labels.
+
 ## Non-interactive use
 
 Handy from scripts, and from inside a Claude session that wants to find its own
@@ -435,6 +459,27 @@ There is no literal "never". Already-deleted transcripts are unrecoverable.
 `legacy/` holds the small `fzf` + Python picker this replaced, kept because it
 has no dependencies beyond `fzf` and `python3` and so still works if the binary
 is missing. Install it as `cs-classic` if you want the simple version around.
+
+## Development
+
+```sh
+cargo test          # 36 tests, no network or fixtures on disk
+cargo clippy --all-targets -- -D warnings
+python3 tools/gen-wordmark.py     # regenerate the logo (needs Pillow)
+python3 tools/tui-drive.py '["./target/release/mnemosyne","--no-splash"]' '["DOWN","v"]'
+```
+
+`tools/tui-drive.py` runs the interface in a pseudo-terminal and rebuilds what
+it drew, so the TUI can be exercised in CI or from a script. It speaks
+synthetic mouse events too, and `CLICKFIND:<glyph>` locates a glyph and clicks
+it in the same pass — finding coordinates in one run and clicking in another
+races against a transcript corpus that is being appended to while you look at
+it.
+
+The tests deliberately pin the findings that were expensive to discover: that
+a line cannot be classified by its first `"type":"`, that injected context and
+base64 have to be excluded from search, that permission mode is read from the
+start of a session, and that a scanner change must invalidate the cache.
 
 ## License
 

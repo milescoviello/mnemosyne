@@ -53,6 +53,9 @@ pub struct Session {
     pub subagent_count: u32,
     /// A tmux session named for this one already exists, so we can attach.
     pub has_tmux: bool,
+    /// The directory this session ran in is gone. Resuming still works, but
+    /// lands wherever you happen to be standing, so it is worth seeing first.
+    pub cwd_missing: bool,
 }
 
 impl Session {
@@ -202,7 +205,11 @@ pub fn compact_count(n: u32) -> String {
         format!("{n}")
     } else if n < 1_000_000 {
         let v = n as f64 / 1000.0;
-        if v < 10.0 { format!("{v:.1}k") } else { format!("{v:.0}k") }
+        if v < 10.0 {
+            format!("{v:.1}k")
+        } else {
+            format!("{v:.0}k")
+        }
     } else {
         format!("{:.1}m", n as f64 / 1_000_000.0)
     }
@@ -231,5 +238,80 @@ pub fn short_cwd(cwd: &str) -> String {
         format!("~/{}", &cwd[home.len() + 1..])
     } else {
         cwd.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_read_compactly() {
+        assert_eq!(compact_count(0), "0");
+        assert_eq!(compact_count(999), "999");
+        assert_eq!(compact_count(1_000), "1.0k");
+        assert_eq!(compact_count(6_312), "6.3k");
+        assert_eq!(compact_count(66_810), "67k");
+        assert_eq!(compact_count(1_200_000), "1.2m");
+    }
+
+    #[test]
+    fn fit_never_splits_a_character() {
+        assert_eq!(fit("hello", 10), "hello");
+        assert_eq!(fit("hello", 5), "hello");
+        assert_eq!(fit("hello", 4), "hel…");
+        assert_eq!(fit("hello", 1), "…");
+        // multi-byte input must clip by character, not by byte
+        let s = fit("héllo wörld ≈≈≈", 7);
+        assert_eq!(s.chars().count(), 7);
+    }
+
+    #[test]
+    fn sizes_and_durations() {
+        assert_eq!(human_size(512), "512B");
+        assert_eq!(human_size(2048), "2.0K");
+        assert_eq!(human_size(403_800_000), "385M");
+        assert_eq!(human_dur(0), "-");
+        assert_eq!(human_dur(45), "45s");
+        assert_eq!(human_dur(3_600), "1h0m");
+        assert_eq!(human_dur(90_000), "1d1h");
+    }
+
+    #[test]
+    fn home_is_abbreviated() {
+        std::env::set_var("HOME", "/home/u");
+        assert_eq!(short_cwd("/home/u"), "~");
+        assert_eq!(short_cwd("/home/u/proj"), "~/proj");
+        // a path that merely starts with the same letters is left alone
+        assert_eq!(short_cwd("/home/us2/proj"), "/home/us2/proj");
+        assert_eq!(short_cwd("/etc"), "/etc");
+    }
+
+    #[test]
+    fn sort_cycles_through_every_mode_and_returns() {
+        let mut s = Sort::Recency;
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            seen.push(s.label());
+            s = s.next();
+        }
+        assert_eq!(
+            s,
+            Sort::Recency,
+            "six modes, so six steps returns to the start"
+        );
+        let mut uniq = seen.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), 6, "every mode appears exactly once: {seen:?}");
+    }
+
+    #[test]
+    fn date_ranges_cycle_back_to_all() {
+        let mut d = DateRange::All;
+        for _ in 0..5 {
+            d = d.next();
+        }
+        assert_eq!(d, DateRange::All);
     }
 }

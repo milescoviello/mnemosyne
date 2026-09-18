@@ -24,27 +24,42 @@ pub struct Proc {
 
 fn looks_like_uuid(s: &str) -> bool {
     s.len() == 36
-        && s.as_bytes()
-            .iter()
-            .enumerate()
-            .all(|(i, c)| match i {
-                8 | 13 | 18 | 23 => *c == b'-',
-                _ => c.is_ascii_hexdigit(),
-            })
+        && s.as_bytes().iter().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        })
+}
+
+/// Can this platform tell us which sessions are running?
+///
+/// Detection walks `/proc`, so it is Linux-only. Everywhere else we say so
+/// rather than quietly reporting that nothing is running, which looks
+/// identical to a broken feature.
+pub const fn detection_supported() -> bool {
+    cfg!(target_os = "linux")
 }
 
 pub fn scan_procs() -> Vec<Proc> {
     let mut out = Vec::new();
-    let Ok(rd) = std::fs::read_dir("/proc") else { return out };
+    if !detection_supported() {
+        return out;
+    }
+    let Ok(rd) = std::fs::read_dir("/proc") else {
+        return out;
+    };
     let me = std::process::id() as i32;
     for e in rd.flatten() {
         let name = e.file_name();
-        let Some(pid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else { continue };
+        let Some(pid) = name.to_str().and_then(|s| s.parse::<i32>().ok()) else {
+            continue;
+        };
         if pid == me {
             continue;
         }
         let base = format!("/proc/{pid}");
-        let Ok(raw) = std::fs::read(format!("{base}/cmdline")) else { continue };
+        let Ok(raw) = std::fs::read(format!("{base}/cmdline")) else {
+            continue;
+        };
         if raw.is_empty() {
             continue;
         }
@@ -97,7 +112,12 @@ pub fn scan_procs() -> Vec<Proc> {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
 
-        out.push(Proc { pid, cwd, resume_id, model });
+        out.push(Proc {
+            pid,
+            cwd,
+            resume_id,
+            model,
+        });
     }
     out
 }
@@ -106,6 +126,9 @@ pub struct LiveMap {
     pub by_id: HashMap<String, Proc>,
     pub by_cwd: HashMap<String, Proc>,
     pub count: usize,
+    /// False when the platform cannot tell us, as opposed to there being
+    /// nothing to tell.
+    pub supported: bool,
 }
 
 pub fn live_map() -> LiveMap {
@@ -125,7 +148,12 @@ pub fn live_map() -> LiveMap {
             }
         }
     }
-    LiveMap { by_id, by_cwd, count }
+    LiveMap {
+        by_id,
+        by_cwd,
+        count,
+        supported: detection_supported(),
+    }
 }
 
 /// Prefix for the tmux sessions this tool creates. Short, and namespaced so we
@@ -151,5 +179,28 @@ pub fn tmux_sessions() -> HashSet<String> {
             .filter(|l| !l.is_empty())
             .collect(),
         _ => HashSet::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tmux_names_are_namespaced_and_short() {
+        let n = tmux_name("026bcdb5-8d88-4ad7-9f23-58649bf4f353");
+        assert_eq!(n, "mn-026bcdb5");
+        // the prefix is what keeps us away from sessions the user made
+        assert!(n.starts_with(TMUX_PREFIX));
+    }
+
+    #[test]
+    fn only_real_uuids_are_accepted_as_resume_targets() {
+        assert!(looks_like_uuid("026bcdb5-8d88-4ad7-9f23-58649bf4f353"));
+        assert!(!looks_like_uuid("026bcdb5-8d88-4ad7-9f23-58649bf4f35"));
+        assert!(!looks_like_uuid("not-a-uuid-at-all-really-nope-nope-x"));
+        assert!(!looks_like_uuid(""));
+        // `-r` with no argument must not swallow the next flag
+        assert!(!looks_like_uuid("--dangerously-skip-permissions"));
     }
 }

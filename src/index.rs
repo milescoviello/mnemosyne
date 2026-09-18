@@ -42,7 +42,13 @@ pub struct Index {
 impl Index {
     pub fn open() -> Result<Index> {
         std::fs::create_dir_all(state_dir())?;
-        let conn = Connection::open(db_path())?;
+        Index::open_at(&db_path())
+    }
+
+    /// Open a specific database file. Split out from `open` so tests can use a
+    /// temporary path instead of racing each other over `$HOME`.
+    pub fn open_at(path: &std::path::Path) -> Result<Index> {
+        let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(
@@ -79,9 +85,11 @@ impl Index {
 
         // Discard rows derived by an older scanner rather than trusting them.
         let stored: Option<u32> = conn
-            .query_row("SELECT value FROM meta WHERE key='scanner_version'", [], |r| {
-                r.get::<_, String>(0)
-            })
+            .query_row(
+                "SELECT value FROM meta WHERE key='scanner_version'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
             .ok()
             .and_then(|v| v.parse().ok());
         if stored != Some(SCANNER_VERSION) {
@@ -193,7 +201,10 @@ impl Index {
             v
         };
         let set: std::collections::HashSet<&str> = live_paths.iter().map(|s| s.as_str()).collect();
-        let gone: Vec<&String> = existing.iter().filter(|p| !set.contains(p.as_str())).collect();
+        let gone: Vec<&String> = existing
+            .iter()
+            .filter(|p| !set.contains(p.as_str()))
+            .collect();
         let n = gone.len();
         if n > 0 {
             let tx = self.conn.transaction()?;
@@ -264,4 +275,106 @@ pub fn refresh_with_progress(
     }
 
     Ok(sessions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Session;
+
+    fn sample(path: &str, title: &str) -> Session {
+        Session {
+            id: "11112222-3333-4444-5555-666677778888".into(),
+            path: PathBuf::from(path),
+            ai_title: title.into(),
+            cwd: "/home/u/proj".into(),
+            permission_mode: "default".into(),
+            size: 1234,
+            mtime: 99,
+            entries: 7,
+            scanned_len: 1234,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rows_survive_a_round_trip() {
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("i.db");
+        let mut idx = Index::open_at(&db).unwrap();
+        idx.store(&[sample("/a.jsonl", "hello")]).unwrap();
+
+        let loaded = Index::open_at(&db).unwrap().load().unwrap();
+        let got = loaded.get("/a.jsonl").expect("row is there");
+        assert_eq!(got.ai_title, "hello");
+        assert_eq!(got.permission_mode, "default");
+        assert_eq!(got.scanned_len, 1234);
+    }
+
+    #[test]
+    fn storing_the_same_path_updates_rather_than_duplicates() {
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("i.db");
+        let mut idx = Index::open_at(&db).unwrap();
+        idx.store(&[sample("/a.jsonl", "first")]).unwrap();
+        idx.store(&[sample("/a.jsonl", "second")]).unwrap();
+        let loaded = idx.load().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded["/a.jsonl"].ai_title, "second");
+    }
+
+    #[test]
+    fn prune_drops_rows_whose_transcript_is_gone() {
+        // Claude Code deletes transcripts past cleanupPeriodDays; the cache
+        // must not keep showing them.
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("i.db");
+        let mut idx = Index::open_at(&db).unwrap();
+        idx.store(&[sample("/a.jsonl", "keep"), sample("/b.jsonl", "gone")])
+            .unwrap();
+        let removed = idx.prune(&["/a.jsonl".to_string()]).unwrap();
+        assert_eq!(removed, 1);
+        let loaded = idx.load().unwrap();
+        assert!(loaded.contains_key("/a.jsonl"));
+        assert!(!loaded.contains_key("/b.jsonl"));
+    }
+
+    #[test]
+    fn a_scanner_change_invalidates_the_cache() {
+        // The cache keys on (path, mtime, size), so an unchanged transcript is
+        // never re-read. Without this, a change to what the scanner derives
+        // would keep serving values produced by the old logic forever -- which
+        // is exactly what happened when permission_mode moved from last-seen
+        // to first-seen.
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("i.db");
+        {
+            let mut idx = Index::open_at(&db).unwrap();
+            idx.store(&[sample("/a.jsonl", "derived by the old scanner")])
+                .unwrap();
+        }
+        // pretend the row was written by an earlier version
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute("UPDATE meta SET value='0' WHERE key='scanner_version'", [])
+                .unwrap();
+        }
+        let idx = Index::open_at(&db).unwrap();
+        assert!(
+            idx.load().unwrap().is_empty(),
+            "stale rows are dropped so they get rescanned"
+        );
+    }
+
+    #[test]
+    fn a_matching_version_keeps_the_cache() {
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("i.db");
+        {
+            let mut idx = Index::open_at(&db).unwrap();
+            idx.store(&[sample("/a.jsonl", "still good")]).unwrap();
+        }
+        let idx = Index::open_at(&db).unwrap();
+        assert_eq!(idx.load().unwrap().len(), 1, "no needless rescan");
+    }
 }

@@ -26,7 +26,9 @@ fn extract_turns(bytes: &[u8], drop_first_partial: bool) -> Vec<Turn> {
         if line.is_empty() {
             continue;
         }
-        let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) else { continue };
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue;
+        };
         if v.get("isMeta").and_then(|m| m.as_bool()) == Some(true) {
             continue;
         }
@@ -35,7 +37,9 @@ fn extract_turns(bytes: &[u8], drop_first_partial: bool) -> Vec<Turn> {
             Some("assistant") => "claude",
             _ => continue,
         };
-        let Some(c) = v.get("message").and_then(|m| m.get("content")) else { continue };
+        let Some(c) = v.get("message").and_then(|m| m.get("content")) else {
+            continue;
+        };
         let text = flatten(c);
         let text = crate::scan::squash(&text, 700);
         if text.is_empty() || !crate::scan::is_real_user_text(&text) {
@@ -71,9 +75,47 @@ fn flatten(c: &serde_json::Value) -> String {
     }
 }
 
+/// Load turns for the full-screen viewer.
+///
+/// Reads from the end rather than the start: a session here can be 400 MB and
+/// you almost always want the recent end of it. Returns whether anything was
+/// left off, so the viewer can say so instead of pretending it showed you
+/// everything.
+pub fn load_turns(s: &Session, max_bytes: u64, want: usize) -> (Vec<Turn>, bool) {
+    let Ok(mut f) = std::fs::File::open(&s.path) else {
+        return (Vec::new(), false);
+    };
+    let len = s.size;
+    let (start, partial) = if len > max_bytes {
+        (len - max_bytes, true)
+    } else {
+        (0, false)
+    };
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return (Vec::new(), partial);
+    }
+    let mut buf = Vec::new();
+    if (&mut f)
+        .take(max_bytes + 4096)
+        .read_to_end(&mut buf)
+        .is_err()
+    {
+        return (Vec::new(), partial);
+    }
+    let mut turns = extract_turns(&buf, partial);
+    let clipped = turns.len() > want;
+    if clipped {
+        let n = turns.len();
+        turns.drain(..n - want);
+    }
+    (turns, partial || clipped)
+}
+
 /// The last `want` readable turns of a session.
 pub fn tail_turns(s: &Session, want: usize) -> Vec<Turn> {
-    let Ok(mut f) = std::fs::File::open(&s.path) else { return Vec::new() };
+    let Ok(mut f) = std::fs::File::open(&s.path) else {
+        return Vec::new();
+    };
     let len = s.size;
     let (start, partial) = if len > TAIL_BYTES {
         (len - TAIL_BYTES, true)
@@ -84,7 +126,11 @@ pub fn tail_turns(s: &Session, want: usize) -> Vec<Turn> {
         return Vec::new();
     }
     let mut buf = Vec::new();
-    if (&mut f).take(TAIL_BYTES + 4096).read_to_end(&mut buf).is_err() {
+    if (&mut f)
+        .take(TAIL_BYTES + 4096)
+        .read_to_end(&mut buf)
+        .is_err()
+    {
         return Vec::new();
     }
     let mut turns = extract_turns(&buf, partial);

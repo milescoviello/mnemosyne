@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: format
+        run: cargo fmt --check
+      - name: clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: test
+        run: cargo test
+      - name: build release
+        run: cargo build --release
+      - name: the wordmark generator still reproduces what is committed
+        run: |
+          python3 -m pip install --quiet Pillow
+          sudo apt-get install -y --no-install-recommends fonts-dejavu-core
+          python3 tools/gen-wordmark.py > /tmp/regen.rs
+          # the committed constants must match what the generator produces
+          python3 - <<'EOF'
+          import re
+          src = open("src/art.rs").read()
+          regen = open("/tmp/regen.rs").read()
+          for name in ("ART_WIDE", "ART_MED", "ART_SMALL"):
+              pat = re.compile(rf"pub const {name}: \[&str; \d+\] = \[(.*?)\];", re.S)
+              a = pat.search(src).group(1).strip()
+              b = pat.search(regen).group(1).strip()
+              assert a == b, f"{name} drifted from tools/gen-wordmark.py"
+          print("wordmark matches the generator")
+          EOF

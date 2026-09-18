@@ -87,19 +87,19 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let interactive = !(has("--list")
-        || has("--json")
-        || has("--stats")
-        || args.iter().any(|a| a == "--search"));
-    let use_splash = interactive
-        && !has("--no-splash")
-        && std::env::var_os("MNEMOSYNE_NO_SPLASH").is_none();
+    let interactive =
+        !(has("--list") || has("--json") || has("--stats") || args.iter().any(|a| a == "--search"));
+    let use_splash =
+        interactive && !has("--no-splash") && std::env::var_os("MNEMOSYNE_NO_SPLASH").is_none();
 
     // With the splash on, the real scan happens on a thread behind the
     // animation, so the bar reports actual work instead of finishing before
     // the first frame. Start from the cache, which costs one query.
     let sessions = if use_splash {
-        index::Index::open()?.load()?.into_values().collect::<Vec<_>>()
+        index::Index::open()?
+            .load()?
+            .into_values()
+            .collect::<Vec<_>>()
     } else {
         index::refresh(include_subagents)?
     };
@@ -110,8 +110,14 @@ fn main() -> Result<()> {
         println!("transcripts     {}", main.len());
         println!("subagents       {}", sessions.len() - main.len());
         println!("total size      {}", model::human_size(bytes));
-        println!("with ai title   {}", main.iter().filter(|s| !s.ai_title.is_empty()).count());
-        println!("with git branch {}", main.iter().filter(|s| !s.git_branch.is_empty()).count());
+        println!(
+            "with ai title   {}",
+            main.iter().filter(|s| !s.ai_title.is_empty()).count()
+        );
+        println!(
+            "with git branch {}",
+            main.iter().filter(|s| !s.git_branch.is_empty()).count()
+        );
         println!("running now     {}", live::live_map().count);
         let m = meta::Meta::load();
         println!("favourites      {}", m.favorite_count());
@@ -143,9 +149,11 @@ fn main() -> Result<()> {
             .collect();
         let t = Instant::now();
         let hits = search::run(&pool, q, mode);
-        let mut rows: Vec<&model::Session> =
-            pool.iter().filter(|s| hits.contains_key(&s.path.to_string_lossy().to_string())).collect();
-        rows.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+        let mut rows: Vec<&model::Session> = pool
+            .iter()
+            .filter(|s| hits.contains_key(&s.path.to_string_lossy().to_string()))
+            .collect();
+        rows.sort_by_key(|s| std::cmp::Reverse(s.mtime));
         for s in &rows {
             println!(
                 "{:>4}\t{}\t{}\t{}\t{}",
@@ -153,18 +161,29 @@ fn main() -> Result<()> {
                 model::short_cwd(&s.cwd),
                 s.title(),
                 s.id,
-                hits.get(&s.path.to_string_lossy().to_string()).map(|x| x.as_str()).unwrap_or("")
+                hits.get(&s.path.to_string_lossy().to_string())
+                    .map(|x| x.as_str())
+                    .unwrap_or("")
             );
         }
         eprintln!(
             "{} of {} sessions matched \"{}\" ({}) in {:.2}s",
-            rows.len(), pool.len(), q, mode.label(), t.elapsed().as_secs_f64()
+            rows.len(),
+            pool.len(),
+            q,
+            mode.label(),
+            t.elapsed().as_secs_f64()
         );
         return Ok(());
     }
 
     if has("--list") || has("--json") {
-        let mut app = App::new(sessions, meta::Meta::load(), live::live_map(), restore_model);
+        let mut app = App::new(
+            sessions,
+            meta::Meta::load(),
+            live::live_map(),
+            restore_model,
+        );
         app.show_subagents = has("--subagents");
         app.rebuild();
         if has("--json") {
@@ -213,7 +232,12 @@ fn main() -> Result<()> {
     }
 
     // ---------------- interactive ----------------
-    let mut app = App::new(sessions, meta::Meta::load(), live::live_map(), restore_model);
+    let mut app = App::new(
+        sessions,
+        meta::Meta::load(),
+        live::live_map(),
+        restore_model,
+    );
     app.show_subagents = has("--subagents");
     app.rebuild();
 
@@ -233,7 +257,7 @@ fn main() -> Result<()> {
         let _ = splash::run(&mut term, &p);
         if let Ok(Ok(fresh)) = handle.join() {
             let mut fresh = fresh;
-            fresh.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+            fresh.sort_by_key(|s| std::cmp::Reverse(s.mtime));
             app.all = fresh;
             app.live = live::live_map();
             app.apply_overlay();
@@ -258,7 +282,11 @@ fn main() -> Result<()> {
         };
         let mut out = std::io::stdout().lock();
         for t in targets {
-            writeln!(out, "{mode}\t{}\t{}\t{}\t{}\t{}", t.cwd, t.id, t.model, t.perms, t.title)?;
+            writeln!(
+                out,
+                "{mode}\t{}\t{}\t{}\t{}\t{}",
+                t.cwd, t.id, t.model, t.perms, t.title
+            )?;
         }
     }
     Ok(())
@@ -295,7 +323,7 @@ fn run<B: ratatui::backend::Backend>(term: &mut Terminal<B>, app: &mut App) -> R
             app.want_refresh = false;
             let sessions = index::refresh(true)?;
             let mut fresh = sessions;
-            fresh.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+            fresh.sort_by_key(|s| std::cmp::Reverse(s.mtime));
             app.all = fresh;
             app.meta = meta::Meta::load();
             app.live = live::live_map();

@@ -38,7 +38,9 @@ pub fn discover(include_subagents: bool) -> Vec<(PathBuf, bool, Option<String>)>
         if !pdir.is_dir() {
             continue;
         }
-        let Ok(entries) = fs::read_dir(&pdir) else { continue };
+        let Ok(entries) = fs::read_dir(&pdir) else {
+            continue;
+        };
         for e in entries.flatten() {
             let p = e.path();
             if p.is_file() && p.extension().is_some_and(|x| x == "jsonl") {
@@ -130,10 +132,18 @@ const FRONT: usize = 1 << 16;
 const TAIL: usize = 1 << 13;
 
 fn front(line: &[u8]) -> &[u8] {
-    if line.len() > BIG_LINE { &line[..FRONT] } else { line }
+    if line.len() > BIG_LINE {
+        &line[..FRONT]
+    } else {
+        line
+    }
 }
 fn tail(line: &[u8]) -> &[u8] {
-    if line.len() > BIG_LINE { &line[line.len() - TAIL..] } else { line }
+    if line.len() > BIG_LINE {
+        &line[line.len() - TAIL..]
+    } else {
+        line
+    }
 }
 
 fn process_line(s: &mut Session, line: &[u8]) {
@@ -181,7 +191,9 @@ fn process_line(s: &mut Session, line: &[u8]) {
     // --- metadata lines: exact, they literally start with {"type":" ---
     if line.starts_with(b"{\"type\":\"") {
         let rest = &line[9..];
-        let Some(q) = memchr::memchr(b'"', rest) else { return };
+        let Some(q) = memchr::memchr(b'"', rest) else {
+            return;
+        };
         let kind = &rest[..q];
         match kind {
             b"ai-title" => {
@@ -207,10 +219,10 @@ fn process_line(s: &mut Session, line: &[u8]) {
                 // ignore later ones. Only 1 session in 257 here ever changed
                 // mode mid-run, and first-seen is also stable under the
                 // incremental tail scan.
-                if s.permission_mode.is_empty() {
-                    if let Some(v) = raw_str(f, "permissionMode") {
-                        s.permission_mode = v;
-                    }
+                if let (true, Some(v)) =
+                    (s.permission_mode.is_empty(), raw_str(f, "permissionMode"))
+                {
+                    s.permission_mode = v;
                 }
             }
             _ => {}
@@ -280,9 +292,13 @@ pub fn scan(
         prev.unwrap().clone()
     } else {
         let id = if is_subagent {
-            path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+            path.file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default()
         } else {
-            path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+            path.file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default()
         };
         Session {
             id,
@@ -290,7 +306,11 @@ pub fn scan(
             project_dir: path
                 .parent()
                 .and_then(|p| {
-                    if is_subagent { p.parent().and_then(|q| q.parent()) } else { Some(p) }
+                    if is_subagent {
+                        p.parent().and_then(|q| q.parent())
+                    } else {
+                        Some(p)
+                    }
                 })
                 .and_then(|p| p.file_name())
                 .map(|s| s.to_string_lossy().to_string())
@@ -322,7 +342,11 @@ pub fn scan(
         }
         consumed += n as u64;
         let line = &buf[..n - 1];
-        let line = if line.ends_with(b"\r") { &line[..line.len() - 1] } else { line };
+        let line = if line.ends_with(b"\r") {
+            &line[..line.len() - 1]
+        } else {
+            line
+        };
         process_line(&mut s, line);
         if buf.capacity() > (1 << 20) {
             buf = Vec::with_capacity(1 << 14);
@@ -338,4 +362,146 @@ pub fn scan(
         s.parent = parent;
     }
     Ok(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// A transcript shaped like the real thing. Note the message lines put a
+    /// nested `"type":"text"` content block BEFORE their own top-level
+    /// `"type"` -- that ordering is why classifying a line by its first
+    /// `"type":"` occurrence is wrong.
+    fn fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("11112222-3333-4444-5555-666677778888.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        for line in [
+            r#"{"type":"mode","mode":"normal","sessionId":"s"}"#,
+            r#"{"type":"permission-mode","permissionMode":"default","sessionId":"s"}"#,
+            r#"{"parentUuid":null,"isSidechain":false,"message":{"role":"user","content":[{"type":"text","text":"<system-reminder>ignore me</system-reminder>"}]},"cwd":"/home/u/proj","gitBranch":"main","version":"2.1.0","type":"user","uuid":"u1","timestamp":"2026-09-01T10:00:00.000Z"}"#,
+            r#"{"parentUuid":"u1","isSidechain":false,"message":{"role":"user","content":[{"type":"text","text":"  fix   the   build  "}]},"cwd":"/home/u/proj","type":"user","uuid":"u2","timestamp":"2026-09-01T10:00:05.000Z"}"#,
+            r#"{"parentUuid":"u2","isSidechain":false,"message":{"role":"assistant","model":"claude-opus-5","content":[{"type":"text","text":"on it"}]},"type":"assistant","uuid":"a1","timestamp":"2026-09-01T10:00:09.000Z"}"#,
+            r#"{"type":"permission-mode","permissionMode":"bypassPermissions","sessionId":"s"}"#,
+            r#"{"type":"ai-title","aiTitle":"Fix the build","sessionId":"s"}"#,
+            r#"{"type":"last-prompt","lastPrompt":"ship it","leafUuid":"x","sessionId":"s"}"#,
+        ] {
+            writeln!(f, "{line}").unwrap();
+        }
+        (dir, path)
+    }
+
+    #[test]
+    fn derives_the_fields_we_actually_display() {
+        let (_d, path) = fixture();
+        let s = scan(&path, false, None, None).unwrap();
+        // Claude Code's own title wins over the first user message
+        assert_eq!(s.ai_title, "Fix the build");
+        assert_eq!(s.title(), "Fix the build");
+        assert_eq!(s.last_prompt, "ship it");
+        assert_eq!(s.cwd, "/home/u/proj");
+        assert_eq!(s.git_branch, "main");
+        assert_eq!(s.model, "claude-opus-5");
+        // a <system-reminder> turn is not something the user typed
+        assert_eq!(s.first_prompt, "fix the build");
+    }
+
+    #[test]
+    fn counts_messages_correctly() {
+        // The naive "first \"type\":\" in the line" rule misreads message
+        // lines as `text` blocks; these counts are the regression guard.
+        let (_d, path) = fixture();
+        let s = scan(&path, false, None, None).unwrap();
+        assert_eq!(s.user_msgs, 2);
+        assert_eq!(s.assistant_msgs, 1);
+        assert_eq!(s.entries, 8);
+    }
+
+    #[test]
+    fn permission_mode_is_the_one_it_started_in() {
+        // The fixture starts `default` and later switches to bypass. Resuming
+        // should honour how it began, not how it ended.
+        let (_d, path) = fixture();
+        let s = scan(&path, false, None, None).unwrap();
+        assert_eq!(s.permission_mode, "default");
+    }
+
+    #[test]
+    fn timestamps_span_first_to_last() {
+        let (_d, path) = fixture();
+        let s = scan(&path, false, None, None).unwrap();
+        assert!(s.first_ts > 0 && s.last_ts >= s.first_ts);
+        assert_eq!(s.duration_secs(), 9);
+    }
+
+    #[test]
+    fn appending_only_reads_the_new_tail() {
+        let (_d, path) = fixture();
+        let first = scan(&path, false, None, None).unwrap();
+        let consumed = first.scanned_len;
+        assert_eq!(consumed, std::fs::metadata(&path).unwrap().len());
+
+        // grow the file, then rescan reusing the previous result
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(
+            f,
+            r#"{{"parentUuid":"a1","isSidechain":false,"message":{{"role":"user","content":[{{"type":"text","text":"and again"}}]}},"type":"user","uuid":"u3","timestamp":"2026-09-01T10:05:00.000Z"}}"#
+        )
+        .unwrap();
+        drop(f);
+
+        let second = scan(&path, false, None, Some(&first)).unwrap();
+        assert_eq!(second.user_msgs, 3, "counts accumulate across the delta");
+        assert_eq!(second.entries, 9);
+        assert!(second.scanned_len > consumed);
+        // the head-derived fields survive an incremental pass
+        assert_eq!(second.cwd, "/home/u/proj");
+        assert_eq!(second.permission_mode, "default");
+    }
+
+    #[test]
+    fn unchanged_file_is_not_reread() {
+        let (_d, path) = fixture();
+        let first = scan(&path, false, None, None).unwrap();
+        let again = scan(&path, false, None, Some(&first)).unwrap();
+        assert_eq!(again.entries, first.entries);
+        assert_eq!(again.scanned_len, first.scanned_len);
+    }
+
+    #[test]
+    fn a_partial_trailing_line_is_left_for_next_time() {
+        // Claude may be mid-write; a half-written line must not be consumed.
+        let (_d, path) = fixture();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        write!(f, r#"{{"type":"ai-title","aiTitle":"half"#).unwrap();
+        drop(f);
+        let s = scan(&path, false, None, None).unwrap();
+        assert_eq!(s.ai_title, "Fix the build", "partial line ignored");
+        assert!(s.scanned_len < std::fs::metadata(&path).unwrap().len());
+    }
+
+    #[test]
+    fn squash_collapses_whitespace_and_clips() {
+        assert_eq!(squash("  a \n b\tc  ", 99), "a b c");
+        assert_eq!(squash("abcdef", 3), "abc");
+        // must not panic on multi-byte input
+        assert_eq!(squash("héllo wörld", 5).chars().count(), 5);
+    }
+
+    #[test]
+    fn synthetic_user_turns_are_not_titles() {
+        assert!(!is_real_user_text("<command-name>/foo</command-name>"));
+        assert!(!is_real_user_text("Caveat: the messages below..."));
+        assert!(!is_real_user_text("   "));
+        assert!(is_real_user_text("actually do the thing"));
+    }
 }

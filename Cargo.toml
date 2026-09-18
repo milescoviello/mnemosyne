@@ -21,6 +21,9 @@ rayon = "1"
 anyhow = "1"
 chrono = "0.4"
 
+[dev-dependencies]
+tempfile = "3"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

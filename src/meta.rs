@@ -108,6 +108,26 @@ impl Meta {
         }
     }
 
+    /// Rename a tag everywhere it appears. Returns how many sessions changed.
+    pub fn rename_tag(&mut self, from: &str, to: &str) -> usize {
+        let (from, to) = (normalize_tag(from), normalize_tag(to));
+        if from.is_empty() || to.is_empty() || from == to {
+            return 0;
+        }
+        let mut n = 0;
+        for e in self.sessions.values_mut() {
+            if let Some(pos) = e.tags.iter().position(|t| *t == from) {
+                e.tags.remove(pos);
+                if !e.tags.contains(&to) {
+                    e.tags.push(to.clone());
+                }
+                e.tags.sort();
+                n += 1;
+            }
+        }
+        n
+    }
+
     /// Every tag in use, with counts, most-used first. Drives completion.
     pub fn all_tags(&self) -> Vec<(String, usize)> {
         let mut m: BTreeMap<String, usize> = BTreeMap::new();
@@ -133,4 +153,95 @@ pub fn normalize_tag(t: &str) -> String {
         .map(|c| if c.is_whitespace() { '-' } else { c })
         .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == '/' || *c == '.')
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tags_are_normalised() {
+        assert_eq!(normalize_tag("  HomeLab "), "homelab");
+        assert_eq!(normalize_tag("two words"), "two-words");
+        assert_eq!(normalize_tag("weird!!chars@@"), "weirdchars");
+        assert_eq!(
+            normalize_tag("keep/slash.dot_under-dash"),
+            "keep/slash.dot_under-dash"
+        );
+    }
+
+    #[test]
+    fn entries_disappear_when_they_hold_nothing() {
+        let mut m = Meta::default();
+        assert!(m.toggle_favorite("abc"));
+        assert!(m.get("abc").is_some());
+        assert!(!m.toggle_favorite("abc"));
+        assert!(m.get("abc").is_none(), "an empty entry is not kept");
+    }
+
+    #[test]
+    fn tags_add_dedupe_and_remove() {
+        let mut m = Meta::default();
+        m.add_tag("abc", "Homelab");
+        m.add_tag("abc", "homelab");
+        m.add_tag("abc", "eft");
+        assert_eq!(
+            m.get("abc").unwrap().tags,
+            vec!["eft", "homelab"],
+            "sorted, no dupes"
+        );
+        m.remove_tag("abc", "eft");
+        assert_eq!(m.get("abc").unwrap().tags, vec!["homelab"]);
+        m.remove_tag("abc", "homelab");
+        assert!(m.get("abc").is_none());
+    }
+
+    #[test]
+    fn rename_moves_a_tag_everywhere_and_merges() {
+        let mut m = Meta::default();
+        m.add_tag("a", "homelab");
+        m.add_tag("b", "homelab");
+        m.add_tag("b", "fleet");
+        assert_eq!(m.rename_tag("homelab", "fleet"), 2);
+        // b already had the destination, so it must not end up twice
+        assert_eq!(m.get("b").unwrap().tags, vec!["fleet"]);
+        assert_eq!(m.get("a").unwrap().tags, vec!["fleet"]);
+        // renaming something absent, or onto itself, changes nothing
+        assert_eq!(m.rename_tag("nope", "x"), 0);
+        assert_eq!(m.rename_tag("fleet", "fleet"), 0);
+        assert_eq!(m.rename_tag("fleet", ""), 0);
+    }
+
+    #[test]
+    fn all_tags_counts_most_used_first() {
+        let mut m = Meta::default();
+        m.add_tag("a", "homelab");
+        m.add_tag("b", "homelab");
+        m.add_tag("c", "eft");
+        let t = m.all_tags();
+        assert_eq!(t[0], ("homelab".to_string(), 2));
+        assert_eq!(t[1], ("eft".to_string(), 1));
+    }
+
+    #[test]
+    fn survives_a_round_trip_through_json() {
+        let mut m = Meta::default();
+        m.add_tag("abc", "homelab");
+        m.toggle_favorite("abc");
+        m.set_note("abc", "  the important one  ");
+        let encoded = serde_json::to_vec(&m).unwrap();
+        let back: Meta = serde_json::from_slice(&encoded).unwrap();
+        let e = back.get("abc").unwrap();
+        assert!(e.favorite);
+        assert_eq!(e.tags, vec!["homelab"]);
+        assert_eq!(e.note, "the important one");
+    }
+
+    #[test]
+    fn a_corrupt_file_does_not_take_the_tool_down() {
+        // meta.json is the only unreproducible file; a bad parse must degrade
+        // to empty rather than panicking on startup.
+        let m: Meta = serde_json::from_slice(b"{ this is not json").unwrap_or_default();
+        assert!(m.sessions.is_empty());
+    }
 }

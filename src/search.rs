@@ -79,7 +79,7 @@ fn snippet(line: &[u8], at: usize) -> String {
         .replace("\\t", " ");
     let mut out = crate::scan::squash(&cleaned, 200);
     if lo > 0 {
-        out.insert_str(0, "…");
+        out.insert(0, '…');
     }
     if hi < line.len() {
         out.push('…');
@@ -142,7 +142,9 @@ fn looks_like_blob(line: &[u8], at: usize) -> bool {
     if hi - lo < W {
         return false;
     }
-    !line[lo..hi].iter().any(|c| matches!(c, b' ' | b'\\' | b'\t' | b'>' | b',' | b'.' | b';'))
+    !line[lo..hi]
+        .iter()
+        .any(|c| matches!(c, b' ' | b'\\' | b'\t' | b'>' | b',' | b'.' | b';'))
 }
 
 /// First occurrence of `needle` that is real conversation, not injected context.
@@ -152,9 +154,8 @@ fn content_hit(line: &[u8], needle: &[u8]) -> Option<usize> {
     }
     let first = find_ci(line, needle)?;
     let spans = injected_spans(line);
-    let bad = |at: usize| {
-        spans.iter().any(|(a, b)| at >= *a && at < *b) || looks_like_blob(line, at)
-    };
+    let bad =
+        |at: usize| spans.iter().any(|(a, b)| at >= *a && at < *b) || looks_like_blob(line, at);
     if !bad(first) {
         return Some(first);
     }
@@ -252,8 +253,99 @@ pub fn run(sessions: &[Session], query: &str, mode: Mode) -> HashMap<String, Str
     sessions
         .par_iter()
         .filter_map(|s| {
-            search_file(&s.path, nb, mode)
-                .map(|snip| (s.path.to_string_lossy().to_string(), snip))
+            search_file(&s.path, nb, mode).map(|snip| (s.path.to_string_lossy().to_string(), snip))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A user turn carrying an injected memory block, exactly as Claude Code
+    // writes it: the reminder is inside the message content.
+    const WITH_REMINDER: &str = concat!(
+        r#"{"parentUuid":"a","isSidechain":false,"message":{"role":"user","content":"#,
+        r#"[{"type":"text","text":"<system-reminder>NVENC needs USE=cuda</system-reminder>"#,
+        r#" please check the disk"}]},"type":"user","uuid":"b"}"#
+    );
+    const PLAIN_USER: &str = r#"{"parentUuid":"a","isSidechain":false,"message":{"role":"user","content":[{"type":"text","text":"fix the NVENC build"}]},"type":"user","uuid":"b"}"#;
+    // `attachment` records are where the memory index actually lands.
+    const ATTACHMENT: &str = r#"{"parentUuid":"a","attachment":{"x":1},"rendered":"NVENC and friends","type":"attachment"}"#;
+
+    #[test]
+    fn ci_search_finds_either_case() {
+        assert_eq!(find_ci(b"hello WORLD", b"world"), Some(6));
+        assert_eq!(find_ci(b"hello world", b"world"), Some(6));
+        assert_eq!(find_ci(b"hello", b"world"), None);
+        // must not run past the end when the needle is longer
+        assert_eq!(find_ci(b"ab", b"abc"), None);
+    }
+
+    #[test]
+    fn only_real_conversation_is_searched() {
+        assert!(is_conversation(PLAIN_USER.as_bytes()));
+        // metadata lines begin literally with {"type":"
+        assert!(!is_conversation(
+            br#"{"type":"ai-title","aiTitle":"NVENC work"}"#
+        ));
+        // attachments carry the injected memory index and are not conversation
+        assert!(!is_conversation(ATTACHMENT.as_bytes()));
+    }
+
+    #[test]
+    fn injected_context_does_not_match() {
+        // The word only appears inside a <system-reminder>, so this session
+        // did not actually discuss it. Matching here is what made a query
+        // return every session that had ever run.
+        assert_eq!(content_hit(WITH_REMINDER.as_bytes(), b"nvenc"), None);
+        // but text outside the reminder in the same line still matches
+        assert!(content_hit(WITH_REMINDER.as_bytes(), b"disk").is_some());
+        // and a plain mention matches normally
+        assert!(content_hit(PLAIN_USER.as_bytes(), b"nvenc").is_some());
+    }
+
+    fn wrap(text: &str) -> String {
+        format!(
+            r#"{{"message":{{"role":"user","content":[{{"type":"text","text":"{text}"}}]}},"type":"user"}}"#
+        )
+    }
+
+    #[test]
+    fn base64_blobs_do_not_match() {
+        // A pasted image is thousands of unbroken characters, and base64's
+        // alphabet spells short words by chance. Prose has whitespace; a blob
+        // does not, which is the tell.
+        let pad = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5YWJjZGVm".repeat(4);
+        let blob = wrap(&format!("{pad}nvenc{pad}"));
+        assert_eq!(content_hit(blob.as_bytes(), b"nvenc"), None);
+    }
+
+    #[test]
+    fn short_base64_run_is_not_treated_as_a_blob() {
+        // Documented limit: the test needs a clear window either side, so a
+        // run shorter than that is allowed through. Harmless -- a chance hit
+        // in a few dozen characters is rare, and rejecting it would risk
+        // discarding real prose.
+        let short = wrap("QUJDnvencREVG");
+        assert!(content_hit(short.as_bytes(), b"nvenc").is_some());
+    }
+
+    #[test]
+    fn file_search_matches_tool_paths_not_mentions() {
+        let edit = br#"{"message":{"role":"assistant","content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/etc/portage/make.conf"}}]}}"#;
+        assert!(file_hit(edit, b"make.conf").is_some());
+        // a mere mention in prose is not a file the session touched
+        let chat = br#"{"message":{"role":"user","content":[{"type":"text","text":"what is in make.conf"}]}}"#;
+        assert_eq!(file_hit(chat, b"make.conf"), None);
+    }
+
+    #[test]
+    fn tool_search_needs_a_tool_use_block() {
+        let used = br#"{"message":{"role":"assistant","content":[{"type":"tool_use","name":"WebSearch","input":{}}]}}"#;
+        assert!(tool_hit(used, b"websearch").is_some());
+        let named_only =
+            br#"{"message":{"role":"user","content":[{"type":"text","text":"use WebSearch"}]}}"#;
+        assert_eq!(tool_hit(named_only, b"websearch"), None);
+    }
 }

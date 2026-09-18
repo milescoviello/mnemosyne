@@ -89,7 +89,10 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress) -> Result<bool> {
     // to the letter reveal.
     let term_w = term.size().map(|s| s.width as usize).unwrap_or(80);
     let mark = art::mark_for(term_w.saturating_sub(4));
-    let mark_w = mark.as_ref().map(|m| m.width).unwrap_or(art::WORD.chars().count() * 2);
+    let mark_w = mark
+        .as_ref()
+        .map(|m| m.width)
+        .unwrap_or(art::WORD.chars().count() * 2);
     let mark_h = mark.as_ref().map(|m| m.height()).unwrap_or(1);
 
     loop {
@@ -156,16 +159,13 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress) -> Result<bool> {
                         } else {
                             // Not yet surfaced. Only the crests show, so this
                             // reads as open water instead of a wall of glyphs.
-                            let (w, i) =
-                                art::ripple_at(x, ms / 240.0, r as f64 * 1.9);
+                            let (w, i) = art::ripple_at(x, ms / 240.0, r as f64 * 1.9);
                             // Only the highest crests, and dim: a dense field
                             // here fights the art instead of framing it.
                             if i > 0.93 {
                                 let c = art::sink(art::ramp(0.34), 0.68);
-                                spans.push(Span::styled(
-                                    w.to_string(),
-                                    Style::default().fg(rgb(c)),
-                                ));
+                                spans
+                                    .push(Span::styled(w.to_string(), Style::default().fg(rgb(c))));
                             } else {
                                 spans.push(Span::raw(" "));
                             }
@@ -186,7 +186,8 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress) -> Result<bool> {
                             Style::default().fg(rgb(c)).add_modifier(Modifier::BOLD),
                         ));
                     } else {
-                        let g = art::WAVES_FALLBACK[(lcg(&mut rng) as usize) % art::WAVES_FALLBACK.len()];
+                        let g = art::WAVES_FALLBACK
+                            [(lcg(&mut rng) as usize) % art::WAVES_FALLBACK.len()];
                         spans.push(Span::styled(
                             format!("{g} "),
                             Style::default().fg(rgb(art::sink(art::ramp(0.3), 0.55))),
@@ -198,7 +199,11 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress) -> Result<bool> {
 
             // the pool the name rose out of
             for r in 0..RIPPLE_ROWS {
-                let w = if big { mark_w } else { art::WORD.chars().count() * 2 };
+                let w = if big {
+                    mark_w
+                } else {
+                    art::WORD.chars().count() * 2
+                };
                 let cells = art::ripple(w, ms / 230.0 + r as f64 * 0.8, r as f64 * 2.1);
                 let fade = 0.35 + r as f64 * 0.3;
                 let spans: Vec<Span> = cells

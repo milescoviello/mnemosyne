@@ -18,6 +18,8 @@ use std::sync::mpsc::{Receiver, Sender};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum InputMode {
     Normal,
+    /// Reading a session's conversation without resuming it.
+    Viewer,
     Fuzzy,
     Deep,
     TagAdd,
@@ -68,6 +70,7 @@ fn date_band(mtime: i64) -> &'static str {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     Resume,
+    View,
     Tmux,
     NewWindow,
     Filter,
@@ -139,7 +142,10 @@ impl Target {
 
 #[derive(Clone, Debug)]
 pub enum Outcome {
-    Resume { targets: Vec<ResumeTarget>, target: Target },
+    Resume {
+        targets: Vec<ResumeTarget>,
+        target: Target,
+    },
 }
 
 pub struct DeepResult {
@@ -160,6 +166,10 @@ pub struct App {
     pub deep: String,
     pub deep_mode: search::Mode,
     pub deep_hits: Option<HashMap<String, String>>,
+    /// Parents of subagents that matched a deep search. Without this a hit
+    /// inside a subagent is invisible whenever its parent did not also match,
+    /// because only parents appear at the top level.
+    deep_parent_hits: HashSet<String>,
     pub deep_busy: bool,
     pub deep_generation: u64,
     pub input: String,
@@ -173,6 +183,14 @@ pub struct App {
     pub show_subagents: bool,
     pub show_preview: bool,
     pub expanded: HashSet<String>,
+
+    /// Conversation loaded for the viewer, with a flag for "there was more".
+    pub viewer: Option<(Vec<Turn>, bool)>,
+    pub viewer_scroll: u16,
+    /// Total wrapped height of the viewer, filled in by the renderer so
+    /// scrolling can stop at the bottom instead of running off into blank.
+    pub viewer_height: u16,
+    pub viewer_page: u16,
 
     pub status: String,
     pub outcome: Option<Outcome>,
@@ -210,6 +228,7 @@ impl App {
             deep: String::new(),
             deep_mode: search::Mode::Content,
             deep_hits: None,
+            deep_parent_hits: HashSet::new(),
             deep_busy: false,
             deep_generation: 0,
             input: String::new(),
@@ -222,6 +241,10 @@ impl App {
             show_subagents: false,
             show_preview: true,
             expanded: HashSet::new(),
+            viewer: None,
+            viewer_scroll: 0,
+            viewer_height: 0,
+            viewer_page: 0,
             status: String::new(),
             outcome: None,
             quit: false,
@@ -238,7 +261,7 @@ impl App {
             deep_tx,
             deep_rx,
         };
-        all.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+        all.sort_by_key(|s| std::cmp::Reverse(s.mtime));
         app.all = all;
         app.apply_overlay();
         app.rebuild();
@@ -248,6 +271,14 @@ impl App {
     /// Fold favourites/tags/notes and live-process state onto the sessions.
     pub fn apply_overlay(&mut self) {
         let tmux = crate::live::tmux_sessions();
+        // One stat per distinct directory, not per session: 234 of the
+        // sessions here share a single cwd.
+        let mut dir_exists: HashMap<String, bool> = HashMap::new();
+        for s in &self.all {
+            if !s.cwd.is_empty() && !dir_exists.contains_key(&s.cwd) {
+                dir_exists.insert(s.cwd.clone(), std::path::Path::new(&s.cwd).is_dir());
+            }
+        }
         let mut subcount: HashMap<String, u32> = HashMap::new();
         for s in &self.all {
             if s.is_subagent {
@@ -268,6 +299,7 @@ impl App {
             }
             s.subagent_count = *subcount.get(&s.id).unwrap_or(&0);
             s.has_tmux = tmux.contains(&crate::live::tmux_name(&s.id));
+            s.cwd_missing = !s.cwd.is_empty() && !dir_exists.get(&s.cwd).copied().unwrap_or(true);
             s.live_pid = None;
             s.live_exact = false;
             if let Some(p) = self.live.by_id.get(&s.id) {
@@ -334,22 +366,33 @@ impl App {
             }
         }
         if let Some(hits) = &self.deep_hits {
-            if !hits.contains_key(&s.path.to_string_lossy().to_string()) {
+            let own = hits.contains_key(&s.path.to_string_lossy().to_string());
+            if !own && !self.deep_parent_hits.contains(&s.id) {
                 return false;
             }
         }
         if !self.fuzzy.trim().is_empty() {
+            // The id is in here so you can paste one from a log or a
+            // `--resume` line and land on that session.
             let hay = format!(
-                "{} {} {} {} {}",
+                "{} {} {} {} {} {}",
                 s.title(),
                 crate::model::short_cwd(&s.cwd),
                 s.git_branch,
                 s.tags.join(" "),
-                s.last_prompt
+                s.last_prompt,
+                s.id
             );
-            let pat = Pattern::parse(self.fuzzy.trim(), CaseMatching::Ignore, Normalization::Smart);
+            let pat = Pattern::parse(
+                self.fuzzy.trim(),
+                CaseMatching::Ignore,
+                Normalization::Smart,
+            );
             let mut cbuf = Vec::new();
-            if pat.score(Utf32Str::new(&hay, &mut cbuf), &mut self.matcher).is_none() {
+            if pat
+                .score(Utf32Str::new(&hay, &mut cbuf), &mut self.matcher)
+                .is_none()
+            {
                 return false;
             }
         }
@@ -362,9 +405,14 @@ impl App {
         }
         let s = &self.all[i];
         let hay = format!("{} {}", s.title(), crate::model::short_cwd(&s.cwd));
-        let pat = Pattern::parse(self.fuzzy.trim(), CaseMatching::Ignore, Normalization::Smart);
+        let pat = Pattern::parse(
+            self.fuzzy.trim(),
+            CaseMatching::Ignore,
+            Normalization::Smart,
+        );
         let mut cbuf = Vec::new();
-        pat.score(Utf32Str::new(&hay, &mut cbuf), &mut self.matcher).unwrap_or(0)
+        pat.score(Utf32Str::new(&hay, &mut cbuf), &mut self.matcher)
+            .unwrap_or(0)
     }
 
     pub fn rebuild(&mut self) {
@@ -401,10 +449,7 @@ impl App {
                     Sort::Entries => y.entries.cmp(&x.entries),
                     Sort::Duration => y.duration_secs().cmp(&x.duration_secs()),
                     Sort::Title => x.title().to_lowercase().cmp(&y.title().to_lowercase()),
-                    Sort::Folder => x
-                        .cwd
-                        .cmp(&y.cwd)
-                        .then_with(|| y.mtime.cmp(&x.mtime)),
+                    Sort::Folder => x.cwd.cmp(&y.cwd).then_with(|| y.mtime.cmp(&x.mtime)),
                 })
         });
 
@@ -464,9 +509,7 @@ impl App {
         self.cursor = 0;
         if let Some(p) = keep_path {
             if let Some(pos) = self.view.iter().position(|r| match r {
-                Row::Item(i) | Row::Sub(i) => {
-                    self.all[*i].path.to_string_lossy() == p.as_str()
-                }
+                Row::Item(i) | Row::Sub(i) => self.all[*i].path.to_string_lossy() == p.as_str(),
                 _ => false,
             }) {
                 self.cursor = pos;
@@ -484,7 +527,15 @@ impl App {
             return;
         }
         let mut kids: Vec<usize> = (0..self.all.len())
-            .filter(|&j| self.all[j].is_subagent && self.all[j].parent.as_deref() == Some(pid.as_str()))
+            .filter(|&j| {
+                self.all[j].is_subagent && self.all[j].parent.as_deref() == Some(pid.as_str())
+            })
+            // During a deep search, show the children that matched rather than
+            // burying them among twenty-seven that did not.
+            .filter(|&j| match &self.deep_hits {
+                Some(hits) => hits.contains_key(&self.all[j].path.to_string_lossy().to_string()),
+                None => true,
+            })
             .collect();
         kids.sort_by(|&a, &b| self.all[a].mtime.cmp(&self.all[b].mtime));
         for k in kids {
@@ -539,7 +590,9 @@ impl App {
     }
 
     pub fn preview(&mut self, want: usize) -> Vec<Turn> {
-        let Some(i) = self.current_idx() else { return Vec::new() };
+        let Some(i) = self.current_idx() else {
+            return Vec::new();
+        };
         let key = self.all[i].path.to_string_lossy().to_string();
         if let Some(v) = self.preview_cache.get(&key) {
             return v.clone();
@@ -602,7 +655,11 @@ impl App {
         let now = self.meta.toggle_favorite(&id);
         let _ = self.meta.save();
         self.all[i].favorite = now;
-        self.status = if now { "★ favourited".into() } else { "unfavourited".into() };
+        self.status = if now {
+            "★ favourited".into()
+        } else {
+            "unfavourited".into()
+        };
         self.rebuild();
     }
 
@@ -644,7 +701,11 @@ impl App {
                 s.id.clone()
             },
             cwd: s.cwd.clone(),
-            model: if self.restore_model { s.model.clone() } else { String::new() },
+            model: if self.restore_model {
+                s.model.clone()
+            } else {
+                String::new()
+            },
             perms: s.permission_mode.clone(),
             title: s.title().to_string(),
         };
@@ -703,6 +764,7 @@ impl App {
         let q = self.deep.trim().to_string();
         if q.is_empty() {
             self.deep_hits = None;
+            self.deep_parent_hits.clear();
             self.deep_busy = false;
             self.rebuild();
             return;
@@ -711,12 +773,10 @@ impl App {
         let generation = self.deep_generation;
         let mode = self.deep_mode;
         let tx = self.deep_tx.clone();
-        let sessions: Vec<Session> = self
-            .all
-            .iter()
-            .filter(|s| self.show_subagents || !s.is_subagent)
-            .cloned()
-            .collect();
+        // Always search subagent transcripts. They are the majority of the
+        // corpus, and excluding them by default meant the answer could sit in
+        // a file the search never opened.
+        let sessions: Vec<Session> = self.all.clone();
         self.deep_busy = true;
         std::thread::spawn(move || {
             let hits = search::run(&sessions, &q, mode);
@@ -733,34 +793,101 @@ impl App {
         }
         if let Some(r) = newest {
             let n = r.hits.len();
+            // If the answer was inside a subagent, show it rather than hiding
+            // the match behind a collapsed parent.
+            let mut reveal: HashSet<String> = HashSet::new();
+            for s in &self.all {
+                if s.is_subagent && r.hits.contains_key(&s.path.to_string_lossy().to_string()) {
+                    if let Some(p) = &s.parent {
+                        reveal.insert(p.clone());
+                    }
+                }
+            }
+            self.deep_parent_hits = reveal.clone();
+            if !reveal.is_empty() {
+                self.show_subagents = true;
+                self.expanded.extend(reveal);
+            }
             self.deep_hits = Some(r.hits);
             self.deep_busy = false;
-            self.status = format!("{n} session(s) match “{}” in {}", self.deep, self.deep_mode.label());
+            self.status = format!(
+                "{n} session(s) match “{}” in {}",
+                self.deep,
+                self.deep_mode.label()
+            );
             self.rebuild();
         }
     }
 
+    /// Session ids the next tag operation applies to: the whole selection if
+    /// there is one, otherwise just the row under the cursor.
+    fn tag_targets(&self) -> Vec<String> {
+        if !self.selected.is_empty() {
+            return self
+                .all
+                .iter()
+                .filter(|s| {
+                    self.selected
+                        .contains(&s.path.to_string_lossy().to_string())
+                })
+                .map(|s| s.id.clone())
+                .collect();
+        }
+        self.current().map(|s| s.id.clone()).into_iter().collect()
+    }
+
     fn commit_tag_add(&mut self) {
         let raw = self.input.trim().to_string();
-        let Some(i) = self.current_idx() else { return };
-        let id = self.all[i].id.clone();
+
+        // `old>new` renames a tag everywhere rather than tagging anything.
+        if let Some((from, to)) = raw.split_once('>') {
+            let n = self.meta.rename_tag(from, to);
+            let _ = self.meta.save();
+            if self.tag_filter.as_deref() == Some(crate::meta::normalize_tag(from).as_str()) {
+                self.tag_filter = Some(crate::meta::normalize_tag(to));
+            }
+            self.status = format!(
+                "renamed #{} to #{} on {n} session(s)",
+                from.trim(),
+                to.trim()
+            );
+            self.input.clear();
+            self.input_mode = InputMode::Normal;
+            self.apply_overlay();
+            self.rebuild();
+            return;
+        }
+
+        let targets = self.tag_targets();
+        if targets.is_empty() {
+            self.input.clear();
+            self.input_mode = InputMode::Normal;
+            return;
+        }
+        let many = targets.len();
         if let Some(t) = raw.strip_prefix('-') {
-            self.meta.remove_tag(&id, t);
-            self.status = format!("removed tag {t}");
+            for id in &targets {
+                self.meta.remove_tag(id, t);
+            }
+            self.status = format!("removed #{t} from {many} session(s)");
         } else if !raw.is_empty() {
-            for t in raw.split(|c: char| c == ',' || c.is_whitespace()) {
-                if !t.is_empty() {
-                    self.meta.add_tag(&id, t);
+            for id in &targets {
+                for t in raw.split(|c: char| c == ',' || c.is_whitespace()) {
+                    if !t.is_empty() {
+                        self.meta.add_tag(id, t);
+                    }
                 }
             }
-            self.status = format!("tagged {raw}");
+            self.status = if many == 1 {
+                format!("tagged {raw}")
+            } else {
+                format!("tagged {many} sessions {raw}")
+            };
         }
         let _ = self.meta.save();
-        let e = self.meta.get(&id).cloned().unwrap_or_default();
-        self.all[i].tags = e.tags;
-        self.all[i].favorite = e.favorite;
         self.input.clear();
         self.input_mode = InputMode::Normal;
+        self.apply_overlay();
         self.rebuild();
     }
 
@@ -769,7 +896,11 @@ impl App {
         let id = self.all[i].id.clone();
         self.meta.set_note(&id, &self.input);
         let _ = self.meta.save();
-        self.all[i].note = self.meta.get(&id).map(|e| e.note.clone()).unwrap_or_default();
+        self.all[i].note = self
+            .meta
+            .get(&id)
+            .map(|e| e.note.clone())
+            .unwrap_or_default();
         self.status = "note saved".into();
         self.input.clear();
         self.input_mode = InputMode::Normal;
@@ -804,6 +935,7 @@ impl App {
     pub fn do_action(&mut self, a: Action) {
         match a {
             Action::Resume => self.resume(Target::Here),
+            Action::View => self.open_viewer(),
             Action::Tmux => self.resume(Target::Tmux),
             Action::NewWindow => self.resume(Target::Window),
             Action::Filter => self.input_mode = InputMode::Fuzzy,
@@ -839,12 +971,25 @@ impl App {
             }
             Action::FavOnly => {
                 self.fav_only = !self.fav_only;
-                self.status = if self.fav_only { "favourites only".into() } else { "all sessions".into() };
+                self.status = if self.fav_only {
+                    "favourites only".into()
+                } else {
+                    "all sessions".into()
+                };
                 self.rebuild();
             }
             Action::LiveOnly => {
+                if !self.live.supported {
+                    // Better to say why than to show an empty list.
+                    self.status = "which sessions are running can only be detected on Linux".into();
+                    return;
+                }
                 self.live_only = !self.live_only;
-                self.status = if self.live_only { "running only".into() } else { "all sessions".into() };
+                self.status = if self.live_only {
+                    "running only".into()
+                } else {
+                    "all sessions".into()
+                };
                 self.rebuild();
             }
             Action::Subagents => {
@@ -858,13 +1003,18 @@ impl App {
             }
             Action::Preview => {
                 self.show_preview = !self.show_preview;
-                self.status = if self.show_preview { "preview on".into() } else { "preview off".into() };
+                self.status = if self.show_preview {
+                    "preview on".into()
+                } else {
+                    "preview off".into()
+                };
             }
             Action::Clear => {
                 self.selected.clear();
                 self.fuzzy.clear();
                 self.deep.clear();
                 self.deep_hits = None;
+                self.deep_parent_hits.clear();
                 self.tag_filter = None;
                 self.fav_only = false;
                 self.live_only = false;
@@ -875,6 +1025,27 @@ impl App {
             Action::Help => self.input_mode = InputMode::Help,
             Action::Quit => self.quit = true,
         }
+    }
+
+    /// Load the current session's conversation for reading.
+    fn open_viewer(&mut self) {
+        let Some(i) = self.current_idx() else { return };
+        // 8 MB covers almost every session whole; the biggest here is 400 MB,
+        // where the recent end is what you want anyway.
+        let (turns, more) = preview::load_turns(&self.all[i], 8 << 20, 400);
+        if turns.is_empty() {
+            self.status = "nothing readable in this transcript".into();
+            return;
+        }
+        self.viewer = Some((turns, more));
+        self.viewer_scroll = u16::MAX; // start at the end, then clamp on draw
+        self.input_mode = InputMode::Viewer;
+    }
+
+    fn viewer_scroll_by(&mut self, delta: i32) {
+        let max = self.viewer_height.saturating_sub(self.viewer_page.max(1));
+        let next = self.viewer_scroll as i32 + delta;
+        self.viewer_scroll = next.clamp(0, max as i32) as u16;
     }
 
     /// Set a specific sort (clicking a column header, rather than cycling).
@@ -890,6 +1061,18 @@ impl App {
     pub fn on_mouse(&mut self, m: crossterm::event::MouseEvent) {
         use crossterm::event::{MouseButton, MouseEventKind};
 
+        if self.input_mode == InputMode::Viewer {
+            match m.kind {
+                MouseEventKind::ScrollUp => self.viewer_scroll_by(-3),
+                MouseEventKind::ScrollDown => self.viewer_scroll_by(3),
+                MouseEventKind::Down(_) => {
+                    self.viewer = None;
+                    self.input_mode = InputMode::Normal;
+                }
+                _ => {}
+            }
+            return;
+        }
         // Text entry keeps the keyboard, but clicks should still work.
         if self.input_mode == InputMode::Help {
             if matches!(m.kind, MouseEventKind::Down(_)) {
@@ -993,6 +1176,33 @@ impl App {
                 self.input_mode = InputMode::Normal;
                 return;
             }
+            InputMode::Viewer => {
+                match k.code {
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('v') => {
+                        self.viewer = None;
+                        self.input_mode = InputMode::Normal;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => self.viewer_scroll_by(-1),
+                    KeyCode::Down | KeyCode::Char('j') => self.viewer_scroll_by(1),
+                    KeyCode::PageUp => self.viewer_scroll_by(-(self.viewer_page as i32)),
+                    KeyCode::PageDown => self.viewer_scroll_by(self.viewer_page as i32),
+                    KeyCode::Char('u') if ctrl => {
+                        self.viewer_scroll_by(-(self.viewer_page as i32) / 2)
+                    }
+                    KeyCode::Char('d') if ctrl => {
+                        self.viewer_scroll_by(self.viewer_page as i32 / 2)
+                    }
+                    KeyCode::Home | KeyCode::Char('g') => self.viewer_scroll = 0,
+                    KeyCode::End | KeyCode::Char('G') => self.viewer_scroll_by(i32::MAX / 2),
+                    KeyCode::Enter => {
+                        self.viewer = None;
+                        self.input_mode = InputMode::Normal;
+                        self.do_action(Action::Resume);
+                    }
+                    _ => {}
+                }
+                return;
+            }
             InputMode::Fuzzy => {
                 match k.code {
                     KeyCode::Esc => {
@@ -1020,6 +1230,7 @@ impl App {
                     KeyCode::Esc => {
                         self.deep.clear();
                         self.deep_hits = None;
+                        self.deep_parent_hits.clear();
                         self.deep_busy = false;
                         self.input_mode = InputMode::Normal;
                         self.rebuild();
@@ -1082,9 +1293,11 @@ impl App {
             KeyCode::Home | KeyCode::Char('g') => self.goto_top(),
             KeyCode::End | KeyCode::Char('G') => self.goto_bottom(),
 
-            KeyCode::Enter => {
-                self.do_action(if alt { Action::NewWindow } else { Action::Resume })
-            }
+            KeyCode::Enter => self.do_action(if alt {
+                Action::NewWindow
+            } else {
+                Action::Resume
+            }),
             KeyCode::Char('n') if ctrl => self.do_action(Action::NewWindow),
             KeyCode::Char('t') if ctrl => self.do_action(Action::Tmux),
 
@@ -1114,6 +1327,7 @@ impl App {
             KeyCode::Char('L') => self.do_action(Action::LiveOnly),
             KeyCode::Char('a') => self.do_action(Action::Subagents),
             KeyCode::Char('p') => self.do_action(Action::Preview),
+            KeyCode::Char('v') => self.do_action(Action::View),
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => self.toggle_expand(true),
             KeyCode::Left | KeyCode::Char('h') => self.toggle_expand(false),
 
