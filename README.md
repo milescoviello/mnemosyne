@@ -252,11 +252,17 @@ that are easy to miss:
 
 Together these cut a representative query from 58 hits to 36 real ones.
 
-## Keys
+## Help
+
+`?` opens a help screen with two pages. The first explains how to use the
+thing — how to find a session, how to open one, and what every marker in the
+list means, including the depth gutter and the `⌁` subagent count. The second
+is the full key reference. `tab` moves between them, the arrows scroll, `esc`
+goes back.
 
 Arrow keys, `enter`, `esc` and `tab` are the documented path and are always on
-screen; `?` shows everything. Vim motions (`j k g G h l`) work as silent
-aliases if you want them, and are never required.
+screen. Vim motions (`j k g G h l`) work as silent aliases if you want them,
+and are never required.
 
 ## Files it touches
 

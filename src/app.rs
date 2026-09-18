@@ -15,6 +15,28 @@ use nucleo_matcher::{Config, Matcher, Utf32Str};
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender};
 
+/// Which page of the help screen is showing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HelpPage {
+    Guide,
+    Keys,
+}
+
+impl HelpPage {
+    pub fn next(self) -> HelpPage {
+        match self {
+            HelpPage::Guide => HelpPage::Keys,
+            HelpPage::Keys => HelpPage::Guide,
+        }
+    }
+    pub fn title(self) -> &'static str {
+        match self {
+            HelpPage::Guide => "using it",
+            HelpPage::Keys => "every key",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum InputMode {
     Normal,
@@ -201,6 +223,12 @@ pub struct App {
     /// and a number that moved while you typed would be hard to read.
     pub corpus_tokens: u64,
 
+    pub help_page: HelpPage,
+    pub help_scroll: u16,
+    /// Filled in by the renderer, so scrolling can stop at the end.
+    pub help_height: u16,
+    pub help_rows: u16,
+
     pub status: String,
     pub outcome: Option<Outcome>,
     pub quit: bool,
@@ -253,6 +281,10 @@ impl App {
             show_preview: true,
             expanded: HashSet::new(),
             corpus_tokens: 0,
+            help_page: HelpPage::Guide,
+            help_scroll: 0,
+            help_height: 0,
+            help_rows: 0,
             viewer: None,
             viewer_scroll: 0,
             viewer_height: 0,
@@ -1066,7 +1098,11 @@ impl App {
                 self.status = "filters cleared".into();
                 self.rebuild();
             }
-            Action::Help => self.input_mode = InputMode::Help,
+            Action::Help => {
+                self.help_page = HelpPage::Guide;
+                self.help_scroll = 0;
+                self.input_mode = InputMode::Help;
+            }
             Action::Quit => self.quit = true,
         }
     }
@@ -1084,6 +1120,12 @@ impl App {
         self.viewer = Some((turns, more));
         self.viewer_scroll = u16::MAX; // start at the end, then clamp on draw
         self.input_mode = InputMode::Viewer;
+    }
+
+    fn help_scroll_by(&mut self, delta: i32) {
+        let max = self.help_height.saturating_sub(self.help_rows.max(1));
+        let next = self.help_scroll as i32 + delta;
+        self.help_scroll = next.clamp(0, max as i32) as u16;
     }
 
     fn viewer_scroll_by(&mut self, delta: i32) {
@@ -1117,10 +1159,15 @@ impl App {
             }
             return;
         }
-        // Text entry keeps the keyboard, but clicks should still work.
         if self.input_mode == InputMode::Help {
-            if matches!(m.kind, MouseEventKind::Down(_)) {
-                self.input_mode = InputMode::Normal;
+            match m.kind {
+                MouseEventKind::ScrollUp => self.help_scroll_by(-3),
+                MouseEventKind::ScrollDown => self.help_scroll_by(3),
+                MouseEventKind::Down(_) => {
+                    self.help_scroll = 0;
+                    self.input_mode = InputMode::Normal;
+                }
+                _ => {}
             }
             return;
         }
@@ -1217,7 +1264,29 @@ impl App {
         match self.input_mode {
             InputMode::Normal => {}
             InputMode::Help => {
-                self.input_mode = InputMode::Normal;
+                // Paged and scrollable, so it can say more than a key list.
+                match k.code {
+                    KeyCode::Tab
+                    | KeyCode::Right
+                    | KeyCode::Left
+                    | KeyCode::Char('l')
+                    | KeyCode::Char('h') => {
+                        self.help_page = self.help_page.next();
+                        self.help_scroll = 0;
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => self.help_scroll_by(1),
+                    KeyCode::Up | KeyCode::Char('k') => self.help_scroll_by(-1),
+                    KeyCode::PageDown | KeyCode::Char(' ') => {
+                        self.help_scroll_by(self.help_rows as i32)
+                    }
+                    KeyCode::PageUp => self.help_scroll_by(-(self.help_rows as i32)),
+                    KeyCode::Home | KeyCode::Char('g') => self.help_scroll = 0,
+                    KeyCode::End | KeyCode::Char('G') => self.help_scroll_by(i32::MAX / 2),
+                    _ => {
+                        self.help_scroll = 0;
+                        self.input_mode = InputMode::Normal;
+                    }
+                }
                 return;
             }
             InputMode::Viewer => {

@@ -17,10 +17,10 @@
 use crate::app::{Action, App, InputMode, Row};
 use crate::art;
 use crate::model::{compact_count, fit, human_dur, human_size, reltime, short_cwd, Sort};
-use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph};
 use ratatui::Frame;
 
 /// Resolved once from the config, so the palette can follow a desktop theme
@@ -243,7 +243,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_footer(f, app, rows[6]);
 
     if app.input_mode == InputMode::Help {
-        draw_help(f, area);
+        draw_help(f, app, area);
     }
     if app.input_mode == InputMode::Viewer {
         draw_viewer(f, app, area);
@@ -1111,7 +1111,7 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
             ("f", " ★   ", Some(Action::Favorite)),
             ("t", " tag   ", Some(Action::Tag)),
             ("s", " sort   ", Some(Action::CycleSort)),
-            ("?", " keys", Some(Action::Help)),
+            ("?", " help", Some(Action::Help)),
         ];
         loop {
             let w: usize = hints
@@ -1152,142 +1152,311 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn centered(area: Rect, w: u16, h: u16) -> Rect {
-    Rect {
-        x: area.x + area.width.saturating_sub(w) / 2,
-        y: area.y + area.height.saturating_sub(h) / 2,
-        width: w.min(area.width),
-        height: h.min(area.height),
-    }
+/// One row of the help screen.
+enum H {
+    /// A section heading.
+    Head(&'static str),
+    /// A key or gesture, its vim alias, and what it does.
+    Key(&'static str, &'static str, &'static str),
+    /// A glyph from the interface, and what it means.
+    Mark(&'static str, &'static str),
+    /// Prose.
+    Say(&'static str),
+    Gap,
 }
 
-fn draw_help(f: &mut Frame, area: Rect) {
-    let rows: &[(&str, &str, &str)] = &[
-        ("click", "", "select · click again to resume"),
-        ("right-click", "", "favourite it"),
-        ("wheel", "", "scroll the pool"),
-        ("v", "", "read the conversation without resuming it"),
-        ("click a heading", "", "sort by that column"),
-        ("click ⌁n", "", "open that session's subagents"),
-        ("M", "", "mouse off, so the terminal can select text again"),
-        ("", "", ""),
-        ("↑ ↓", "k j", "move"),
-        ("pgup pgdn", "^u ^d", "jump ten"),
-        ("home end", "g G", "first · last"),
-        ("", "", ""),
-        ("enter", "", "resume here: cd to its folder and reattach"),
-        ("ctrl+n", "alt+enter", "resume in a new terminal window"),
-        (
+/// What the thing is and how you drive it, rather than a list of keys.
+fn guide() -> Vec<H> {
+    use H::*;
+    vec![
+        Say("Every Claude Code session you have ever run, from every folder, in one list."),
+        Say("Claude keeps them all; it just cannot show you across directories. This can."),
+        Gap,
+        Head("finding one"),
+        Key("/", "", "narrow the list by title, folder, branch, tag or id"),
+        Key("F", "^f", "search inside the conversations themselves"),
+        Key("m", "", "switch what that searches: what was said, a file it edited, a tool it ran, or everything"),
+        Say("Content search is indexed and effectively instant. \"everything\" also reads tool"),
+        Say("output, which is slower but misses nothing."),
+        Gap,
+        Head("opening one"),
+        Key("enter", "", "resume it: cd to its folder and pick up where you left off"),
+        Key("v", "", "read it first, without resuming or changing it"),
+        Key("ctrl+t", "", "resume inside tmux, attaching if a session is already waiting"),
+        Key("ctrl+n", "alt+enter", "resume in a new terminal window"),
+        Key("space", "", "choose several, then enter reopens them all at once"),
+        Say("It comes back with the model and the permission mode it started under."),
+        Gap,
+        Head("keeping track"),
+        Key("f", "", "favourite — favourites float to the top"),
+        Key("t", "", "tag it, or tag everything you have selected"),
+        Key("T", "", "show one tag only"),
+        Key("N", "", "attach a private note"),
+        Say("Tags are the useful axis: most sessions share a working directory, so the"),
+        Say("folder column rarely tells them apart."),
+        Gap,
+        Head("reading the list"),
+        Mark("▌", "how long ago — bright at the surface, fading as a session sinks"),
+        Mark("❯", "where you are"),
+        Mark("★", "favourite"),
+        Mark("●", "running right now   ◌ probably running, matched only by folder"),
+        Mark("◆", "picked, for acting on several at once"),
+        Mark("⌁27", "has 27 subagents — → opens them, or click the count"),
+        Mark("│", "a subagent, hanging off its parent"),
+        Gap,
+        Say("LEFT OFF is the last thing you said in that session — usually the fastest"),
+        Say("way to recognise one. A folder in red no longer exists; resuming still"),
+        Say("works, it just starts wherever you are."),
+        Gap,
+        Head("if something looks wrong"),
+        Key("R", "f5", "reread the transcripts"),
+        Key("c", "", "clear every filter and selection"),
+        Say("The index is a cache and is rebuilt whenever it has to be; deleting"),
+        Say("~/.claude/mnemosyne/index.db is always safe. Your favourites, tags and"),
+        Say("notes live beside it in meta.json, which keeps three generations."),
+    ]
+}
+
+fn keys() -> Vec<H> {
+    use H::*;
+    vec![
+        Head("mouse"),
+        Key("click", "", "select · click again to resume"),
+        Key("right-click", "", "favourite it"),
+        Key("wheel", "", "scroll"),
+        Key("click a heading", "", "sort by that column"),
+        Key("click ⌁n", "", "open that session's subagents"),
+        Key("M", "", "mouse off, so the terminal can select text again"),
+        Gap,
+        Head("moving"),
+        Key("↑ ↓", "k j", "move"),
+        Key("pgup pgdn", "^u ^d", "jump ten"),
+        Key("home end", "g G", "first · last"),
+        Gap,
+        Head("opening"),
+        Key("enter", "", "resume here: cd to its folder and reattach"),
+        Key("ctrl+n", "alt+enter", "resume in a new terminal window"),
+        Key(
             "ctrl+t",
             "",
             "resume in tmux — attaches if one is already waiting",
         ),
-        ("space", "", "pick several, then enter reopens them all"),
-        ("", "", ""),
-        ("/", "", "filter titles, folders, branches, tags"),
-        ("F", "^f", "search inside the conversations"),
-        ("m", "", "search mode: content · file touched · tool used"),
-        ("", "", ""),
-        ("f", "", "favourite — favourites float to the surface"),
-        (
+        Key("v", "", "read the conversation without resuming it"),
+        Key("space", "", "pick several, then enter reopens them all"),
+        Gap,
+        Head("searching"),
+        Key("/", "", "filter titles, folders, branches, tags, ids"),
+        Key("F", "^f", "search inside the conversations"),
+        Key(
+            "m",
+            "",
+            "search mode: content · file touched · tool used · everything",
+        ),
+        Gap,
+        Head("marking"),
+        Key("f", "", "favourite"),
+        Key(
             "t",
             "",
-            "tag — applies to the whole selection; -name removes, old>new renames",
+            "tag — applies to the selection; -name removes, old>new renames",
         ),
-        ("T", "", "show one tag only"),
-        ("N", "", "private note"),
-        ("", "", ""),
-        (
+        Key("T", "", "show one tag only"),
+        Key("N", "", "private note"),
+        Gap,
+        Head("arranging"),
+        Key(
             "s",
             "",
-            "sort: recency · size · entries · duration · title · folder",
+            "sort: recency · size · entries · duration · title · folder · tokens",
         ),
-        ("o", "", "group by directory"),
-        ("D", "", "date range"),
-        ("*", "", "favourites only"),
-        ("L", "", "running only"),
-        ("a", "", "reveal subagents"),
-        ("→ ←", "l h", "expand · collapse subagents"),
-        ("p", "", "preview rail"),
-        ("R", "f5", "reindex"),
-        ("c", "", "clear everything"),
-        ("q esc", "^c", "quit"),
-    ];
+        Key("o", "", "group by directory"),
+        Key("D", "", "date range"),
+        Key("*", "", "favourites only"),
+        Key("L", "", "running only"),
+        Key("a", "", "reveal subagents"),
+        Key("→ ←", "l h", "expand · collapse subagents"),
+        Key("p", "", "preview rail"),
+        Gap,
+        Head("other"),
+        Key("R", "f5", "reindex"),
+        Key("c", "", "clear everything"),
+        Key("q esc", "^c", "quit"),
+        Gap,
+        Say("The middle column is a vim-style alias. You never need it."),
+    ]
+}
+
+fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
+    let rows = match app.help_page {
+        crate::app::HelpPage::Guide => guide(),
+        crate::app::HelpPage::Keys => keys(),
+    };
 
     let mark = art::mark_for(area.width.saturating_sub(6) as usize);
-    let art_w = mark.as_ref().map(|m| m.width).unwrap_or(0) as u16;
     let art_h = mark.as_ref().map(|m| m.height()).unwrap_or(0);
-    let show_art = mark.is_some() && area.height as usize >= rows.len() + art_h + 6;
-    // A centred panel narrower than the terminal leaves the list showing down
-    // both sides, which looks like a rendering fault rather than an overlay.
-    // Help is a screenful of content, so it takes the screen.
-    let (w, h) = if show_art {
-        (area.width, area.height)
-    } else {
-        (
-            80u16.min(area.width),
-            (rows.len() as u16 + 4).min(area.height),
-        )
-    };
-    let r = centered(area, w, h);
-    f.render_widget(Clear, r);
+    // The wordmark is decoration; the text is the point. It only appears when
+    // there is room for it on top of everything else.
+    let show_art = mark.is_some() && area.height as usize >= rows.len() + art_h + 8;
 
-    let mut lines: Vec<Line> = vec![Line::raw("")];
+    f.render_widget(Clear, area);
+    let body_w = (area.width as usize).saturating_sub(MARGIN * 2);
+
+    // Key column, narrowed when there is little room to spare.
+    let kw: usize = if body_w > 70 { 16 } else { 12 };
+
+    let mut lines: Vec<Line> = Vec::new();
     if show_art {
         let m = mark.as_ref().unwrap();
-        let indent = (w as usize).saturating_sub(m.width) / 2;
+        let indent = (area.width as usize).saturating_sub(m.width) / 2;
         for (row, chars) in m.rows.iter().enumerate() {
             let mut sp: Vec<Span> = vec![Span::raw(" ".repeat(indent))];
-            let glyphs: Vec<Span> = chars
-                .iter()
-                .enumerate()
-                .map(|(x, ch)| {
-                    if *ch == ' ' {
-                        return Span::raw(" ");
-                    }
-                    let c = art::column_color(x, art_w as usize, -99.0, row, art_h);
-                    Span::styled(ch.to_string(), Style::default().fg(rgb(c)))
-                })
-                .collect();
-            sp.extend(glyphs);
+            sp.extend(chars.iter().enumerate().map(|(x, ch)| {
+                if *ch == ' ' {
+                    return Span::raw(" ");
+                }
+                Span::styled(
+                    ch.to_string(),
+                    Style::default().fg(rgb(art::column_color(x, m.width, -99.0, row, art_h))),
+                )
+            }));
             lines.push(Line::from(sp));
         }
-        lines.push(ripple_line(w as usize, indent.max(2), 1.7));
-        lines.push(Line::raw(""));
-    }
-    for (plain, alt, desc) in rows {
-        if plain.is_empty() {
-            lines.push(Line::raw(""));
-            continue;
-        }
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                format!("{plain:<16}"),
-                Style::default().fg(rgb(art::ramp(0.85))),
-            ),
-            Span::styled(format!("{alt:<11}"), Style::default().fg(th().chrome)),
-            Span::styled(*desc, Style::default().fg(th().text)),
-        ]));
+        lines.push(ripple_line(area.width as usize, indent.max(2), 1.7));
     }
     lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled(
-            "the middle column is a vim-style alias — you never need it",
-            Style::default()
-                .fg(th().chrome)
-                .add_modifier(Modifier::ITALIC),
-        ),
-    ]));
+
+    for r in &rows {
+        match r {
+            H::Gap => lines.push(Line::raw("")),
+            H::Head(t) => lines.push(Line::from(vec![
+                Span::raw(" ".repeat(MARGIN)),
+                Span::styled(
+                    t.to_string(),
+                    Style::default()
+                        .fg(rgb(art::ramp(0.8)))
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])),
+            H::Say(t) => {
+                for chunk in wrap_words(t, body_w.saturating_sub(2)) {
+                    lines.push(Line::from(vec![
+                        Span::raw(" ".repeat(MARGIN)),
+                        Span::styled(chunk, Style::default().fg(th().text)),
+                    ]));
+                }
+            }
+            H::Key(k, alt, desc) => {
+                // Descriptions wrap under themselves rather than running off
+                // the edge; on a narrow terminal the alias column goes first.
+                let aw = if body_w > 58 { 11 } else { 0 };
+                let head = kw + aw;
+                for (n, chunk) in wrap_words(desc, body_w.saturating_sub(head + 2))
+                    .into_iter()
+                    .enumerate()
+                {
+                    let mut sp = vec![Span::raw(" ".repeat(MARGIN + 1))];
+                    if n == 0 {
+                        sp.push(Span::styled(
+                            format!("{k:<kw$}"),
+                            Style::default().fg(rgb(art::ramp(0.9))),
+                        ));
+                        if aw > 0 {
+                            sp.push(Span::styled(
+                                format!("{alt:<aw$}"),
+                                Style::default().fg(th().chrome),
+                            ));
+                        }
+                    } else {
+                        sp.push(Span::raw(" ".repeat(head)));
+                    }
+                    sp.push(Span::styled(chunk, Style::default().fg(th().text)));
+                    lines.push(Line::from(sp));
+                }
+            }
+            H::Mark(g, desc) => {
+                for (n, chunk) in wrap_words(desc, body_w.saturating_sub(kw + 2))
+                    .into_iter()
+                    .enumerate()
+                {
+                    let mut sp = vec![Span::raw(" ".repeat(MARGIN + 1))];
+                    if n == 0 {
+                        sp.push(Span::styled(
+                            format!("{g:<kw$}"),
+                            Style::default()
+                                .fg(rgb(art::ramp(1.0)))
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                    } else {
+                        sp.push(Span::raw(" ".repeat(kw)));
+                    }
+                    sp.push(Span::styled(chunk, Style::default().fg(th().text)));
+                    lines.push(Line::from(sp));
+                }
+            }
+        }
+    }
+
+    let chrome = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    app.help_height = lines.len() as u16;
+    app.help_rows = chrome[0].height;
+    if app.help_scroll > app.help_height.saturating_sub(app.help_rows.max(1)) {
+        app.help_scroll = app.help_height.saturating_sub(app.help_rows.max(1));
+    }
 
     f.render_widget(
         Paragraph::new(Text::from(lines))
-            .alignment(Alignment::Left)
-            .wrap(Wrap { trim: false })
-            // A filled panel, because a centred overlay narrower than the
-            // terminal otherwise shows the list either side of it.
+            .scroll((app.help_scroll, 0))
             .block(Block::default().style(Style::default().bg(th().panel))),
-        r,
+        chrome[0],
+    );
+
+    // tabs, so the other page is discoverable rather than a secret
+    let tab = |p: crate::app::HelpPage| {
+        let on = p == app.help_page;
+        Span::styled(
+            format!(" {} ", p.title()),
+            if on {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(rgb(art::ramp(0.85)))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(th().chrome)
+            },
+        )
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(" ".repeat(MARGIN)),
+            tab(crate::app::HelpPage::Guide),
+            Span::raw(" "),
+            tab(crate::app::HelpPage::Keys),
+        ]))
+        .block(Block::default().style(Style::default().bg(th().panel))),
+        chrome[1],
+    );
+
+    let k = |t: &'static str| Span::styled(t, Style::default().fg(rgb(art::ramp(0.85))));
+    let d = |t: &'static str| Span::styled(t, Style::default().fg(th().chrome));
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(" ".repeat(MARGIN)),
+            k("tab"),
+            d(" other page   "),
+            k("↑↓"),
+            d(" scroll   "),
+            k("esc"),
+            d(" back"),
+        ]))
+        .block(Block::default().style(Style::default().bg(th().panel))),
+        chrome[2],
     );
 }
