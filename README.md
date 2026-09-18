@@ -83,6 +83,59 @@ working directory — no child process can. So the binary draws the interface on
 and performs the `cd` plus `claude --resume` itself. It is a few lines long and
 you can read all of it in `shell/mn.fish`.
 
+## Permissions
+
+A session resumes under the permission mode it was **started** in, read from
+the transcript, the same way the model is restored:
+
+| recorded mode | resumed with |
+|---|---|
+| `bypassPermissions` | `--dangerously-skip-permissions` |
+| `plan`, `acceptEdits`, `auto`, `manual`, `dontAsk` | `--permission-mode <mode>` |
+| `default` | nothing — it started with prompts on, so prompts stay on |
+| *nothing recorded* | `--dangerously-skip-permissions` |
+
+`default` is deliberately absent from the `--permission-mode` column: it is not
+one of that flag's accepted values, and it already means "behave normally".
+The last row covers older transcripts written before the field existed.
+
+Overrides, both of which win over the recorded mode:
+
+```sh
+mn --ask     # resume with permission prompts on, whatever it was started in
+mn --dangerously-skip-permissions   # force bypass
+```
+
+Anything `mn` does not recognise is forwarded to `claude` untouched, so
+`mn --verbose` works. `mn`'s own flags (`--no-splash`, `--subagents`,
+`--no-model`, `--ask`) are filtered out before the rest is handed over.
+
+## tmux
+
+`ctrl+t` resumes a session inside tmux, in a session named `mn-<first 8 of the
+id>`:
+
+```
+  ▶ linux-abi-self-hosting  (tmux mn-026bcdb5)
+```
+
+If that tmux session already exists, `ctrl+t` **attaches to it** rather than
+starting a second client on the same transcript — so you pick up its latest
+state instead of forking it:
+
+```
+  ▶ mn-026bcdb5 already running — resuming where it left off
+```
+
+The browser knows about this too. A session with a tmux session waiting shows
+it in the rail (`tmux mn-026bcdb5`), and pressing `enter` on one refuses and
+points you at `ctrl+t` instead. Attaching works from inside tmux as well —
+`switch-client` is used there, since `attach-session` cannot nest.
+
+The `mn-` prefix is namespaced and matched exactly (`-t =name`), so tmux
+sessions you created yourself are never touched. Selecting several sessions
+and pressing `ctrl+t` creates them all detached, then attaches to the first.
+
 ## The opening animation
 
 Mnemosyne is the spring of memory in the underworld — the counter-pool to

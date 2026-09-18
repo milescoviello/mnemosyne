@@ -51,6 +51,8 @@ pub struct Session {
     /// matched its working directory (so it is a guess).
     pub live_exact: bool,
     pub subagent_count: u32,
+    /// A tmux session named for this one already exists, so we can attach.
+    pub has_tmux: bool,
 }
 
 impl Session {

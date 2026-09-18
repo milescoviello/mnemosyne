@@ -38,12 +38,36 @@ pub struct ResumeTarget {
     pub id: String,
     pub cwd: String,
     pub model: String,
+    pub perms: String,
     pub title: String,
+}
+
+/// Where a resumed session should land.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Target {
+    /// This terminal: the shell cds and reattaches in place.
+    Here,
+    /// A new terminal emulator window.
+    Window,
+    /// A tmux session named for this Claude session. If one already exists we
+    /// attach to it rather than starting a second client on the same
+    /// transcript, so the work continues from its latest state.
+    Tmux,
+}
+
+impl Target {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Target::Here => "here",
+            Target::Window => "window",
+            Target::Tmux => "tmux",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 pub enum Outcome {
-    Resume { targets: Vec<ResumeTarget>, new_window: bool },
+    Resume { targets: Vec<ResumeTarget>, target: Target },
 }
 
 pub struct DeepResult {
@@ -136,6 +160,7 @@ impl App {
 
     /// Fold favourites/tags/notes and live-process state onto the sessions.
     pub fn apply_overlay(&mut self) {
+        let tmux = crate::live::tmux_sessions();
         let mut subcount: HashMap<String, u32> = HashMap::new();
         for s in &self.all {
             if s.is_subagent {
@@ -155,6 +180,7 @@ impl App {
                 s.note.clear();
             }
             s.subagent_count = *subcount.get(&s.id).unwrap_or(&0);
+            s.has_tmux = tmux.contains(&crate::live::tmux_name(&s.id));
             s.live_pid = None;
             s.live_exact = false;
             if let Some(p) = self.live.by_id.get(&s.id) {
@@ -514,6 +540,7 @@ impl App {
             },
             cwd: s.cwd.clone(),
             model: if self.restore_model { s.model.clone() } else { String::new() },
+            perms: s.permission_mode.clone(),
             title: s.title().to_string(),
         };
         if !self.selected.is_empty() {
@@ -533,25 +560,37 @@ impl App {
         self.current().map(mk).into_iter().collect()
     }
 
-    fn resume(&mut self, new_window: bool) {
+    fn resume(&mut self, target: Target) {
         let targets = self.targets();
         if targets.is_empty() {
             self.status = "nothing selected".into();
             return;
         }
-        // guard: refuse to silently double-attach to a session already running
-        if !new_window {
+        // Guard against silently starting a second client on a transcript that
+        // already has one. Tmux is exempt: attaching to the existing session is
+        // exactly the right move there, and is what "resume" should mean.
+        if target == Target::Here {
             if let Some(s) = self.current() {
-                if s.live_exact && self.selected.is_empty() {
-                    let pid = s.live_pid.unwrap_or(0);
-                    self.status = format!(
-                        "already running as pid {pid} — press ctrl+n to open another window anyway"
-                    );
+                // A waiting tmux session is as strong a signal as an exact pid
+                // match: resuming here would fork a second client instead of
+                // picking up where that one left off.
+                if (s.live_exact || s.has_tmux) && self.selected.is_empty() {
+                    self.status = if s.has_tmux {
+                        format!(
+                            "{} is already running in tmux — ctrl+t attaches to it",
+                            crate::live::tmux_name(&s.id)
+                        )
+                    } else {
+                        format!(
+                            "already running as pid {} — ctrl+n opens another window anyway",
+                            s.live_pid.unwrap_or(0)
+                        )
+                    };
                     return;
                 }
             }
         }
-        self.outcome = Some(Outcome::Resume { targets, new_window });
+        self.outcome = Some(Outcome::Resume { targets, target });
         self.quit = true;
     }
 
@@ -762,8 +801,9 @@ impl App {
             KeyCode::Home | KeyCode::Char('g') => self.goto_top(),
             KeyCode::End | KeyCode::Char('G') => self.goto_bottom(),
 
-            KeyCode::Enter => self.resume(alt),
-            KeyCode::Char('n') if ctrl => self.resume(true),
+            KeyCode::Enter => self.resume(if alt { Target::Window } else { Target::Here }),
+            KeyCode::Char('n') if ctrl => self.resume(Target::Window),
+            KeyCode::Char('t') if ctrl => self.resume(Target::Tmux),
 
             KeyCode::Char(' ') => self.toggle_select(),
             KeyCode::Char('f') if ctrl => self.input_mode = InputMode::Deep,

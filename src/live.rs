@@ -12,7 +12,7 @@
 //! Also recovers the `--model` a live process was started with, so resuming a
 //! session doesn't silently drop it back to the default model.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone)]
 pub struct Proc {
@@ -126,4 +126,30 @@ pub fn live_map() -> LiveMap {
         }
     }
     LiveMap { by_id, by_cwd, count }
+}
+
+/// Prefix for the tmux sessions this tool creates. Short, and namespaced so we
+/// never touch a session the user made themselves.
+pub const TMUX_PREFIX: &str = "mn-";
+
+/// A stable, short tmux session name for a Claude session id.
+pub fn tmux_name(session_id: &str) -> String {
+    let short: String = session_id.chars().take(8).collect();
+    format!("{TMUX_PREFIX}{short}")
+}
+
+/// Names of every existing tmux session. Empty when no server is running,
+/// which is the normal case rather than an error.
+pub fn tmux_sessions() -> HashSet<String> {
+    let out = std::process::Command::new("tmux")
+        .args(["list-sessions", "-F", "#{session_name}"])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+        _ => HashSet::new(),
+    }
 }

@@ -203,8 +203,14 @@ fn process_line(s: &mut Session, line: &[u8]) {
                 }
             }
             b"permission-mode" => {
-                if let Some(v) = raw_str(f, "permissionMode") {
-                    s.permission_mode = v;
+                // The mode the session STARTED in: keep the first record and
+                // ignore later ones. Only 1 session in 257 here ever changed
+                // mode mid-run, and first-seen is also stable under the
+                // incremental tail scan.
+                if s.permission_mode.is_empty() {
+                    if let Some(v) = raw_str(f, "permissionMode") {
+                        s.permission_mode = v;
+                    }
                 }
             }
             _ => {}

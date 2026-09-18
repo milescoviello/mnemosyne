@@ -51,8 +51,10 @@ usage: mnemosyne [options]
   -V, --version    version
 
 On exit the browser prints the chosen action to stdout as TSV:
-  <here|window>\\t<cwd>\\t<session-id>\\t<model>\\t<title>
-The shell wrapper (`cs`) turns that into a cd plus `claude --resume`.
+  <here|window|tmux>\\t<cwd>\\t<session-id>\\t<model>\\t<permission-mode>\\t<title>
+The shell function (`mn`) turns that into a cd plus `claude --resume`, or into
+a tmux attach. It restores the model and the permission mode the session
+started in; pass --ask to resume with prompts on instead.
 ";
 
 fn main() -> Result<()> {
@@ -238,11 +240,17 @@ fn main() -> Result<()> {
     term.show_cursor()?;
     res?;
 
-    if let Some(Outcome::Resume { targets, new_window }) = &app.outcome {
-        let mode = if *new_window || targets.len() > 1 { "window" } else { "here" };
+    if let Some(Outcome::Resume { targets, target }) = &app.outcome {
+        // Several selections cannot share this terminal, so they become
+        // windows unless tmux was asked for explicitly.
+        let mode = if *target == app::Target::Here && targets.len() > 1 {
+            "window"
+        } else {
+            target.tag()
+        };
         let mut out = std::io::stdout().lock();
         for t in targets {
-            writeln!(out, "{mode}\t{}\t{}\t{}\t{}", t.cwd, t.id, t.model, t.title)?;
+            writeln!(out, "{mode}\t{}\t{}\t{}\t{}\t{}", t.cwd, t.id, t.model, t.perms, t.title)?;
         }
     }
     Ok(())

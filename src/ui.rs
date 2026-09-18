@@ -345,11 +345,22 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect) {
     if s.duration_secs() > 0 {
         facts.push(human_dur(s.duration_secs()));
     }
+    // Worth seeing at a glance: this is what the session ran under, and it is
+    // not uniform across a history.
+    if !s.permission_mode.is_empty() && s.permission_mode != "default" {
+        facts.push(match s.permission_mode.as_str() {
+            "bypassPermissions" => "bypass".to_string(),
+            other => other.to_string(),
+        });
+    }
     if let Some(pid) = s.live_pid {
         facts.push(format!(
             "{} {pid}",
             if s.live_exact { "running" } else { "likely running" }
         ));
+    }
+    if s.has_tmux {
+        facts.push(format!("tmux {}", crate::live::tmux_name(&s.id)));
     }
     let fact_str = facts.join(" · ");
     let title = fit(s.title(), width.saturating_sub(fact_str.chars().count() + 8));
@@ -517,6 +528,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             ("enter", " resume   "),
             ("/", " filter   "),
             ("F", " search   "),
+            ("ctrl+t", " tmux   "),
             ("f", " ★   "),
             ("t", " tag   "),
             ("s", " sort   "),
@@ -568,6 +580,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
         ("", "", ""),
         ("enter", "", "resume here: cd to its folder and reattach"),
         ("ctrl+n", "alt+enter", "resume in a new terminal window"),
+        ("ctrl+t", "", "resume in tmux — attaches if one is already waiting"),
         ("space", "", "select several, then enter reopens them all"),
         ("", "", ""),
         ("/", "", "filter by title, folder, branch or tag"),

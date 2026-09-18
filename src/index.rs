@@ -22,6 +22,19 @@ pub fn db_path() -> PathBuf {
     state_dir().join("index.db")
 }
 
+/// Bump this whenever the scanner changes what it derives from a transcript.
+///
+/// The cache is keyed on `(path, mtime, size)`, so an unchanged file is never
+/// re-read -- which means a logic change would otherwise keep serving values
+/// produced by the old logic forever. This was not hypothetical: switching
+/// `permission_mode` from last-seen to first-seen left one session still
+/// reporting the old answer until the cache was deleted by hand.
+///
+/// History:
+///   1  initial
+///   2  permission_mode records the mode the session STARTED in
+pub const SCANNER_VERSION: u32 = 2;
+
 pub struct Index {
     conn: Connection,
 }
@@ -60,8 +73,25 @@ impl Index {
             );
             CREATE INDEX IF NOT EXISTS idx_mtime  ON sessions(mtime DESC);
             CREATE INDEX IF NOT EXISTS idx_parent ON sessions(parent);
+            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             "#,
         )?;
+
+        // Discard rows derived by an older scanner rather than trusting them.
+        let stored: Option<u32> = conn
+            .query_row("SELECT value FROM meta WHERE key='scanner_version'", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok()
+            .and_then(|v| v.parse().ok());
+        if stored != Some(SCANNER_VERSION) {
+            conn.execute("DELETE FROM sessions", [])?;
+            conn.execute(
+                "INSERT INTO meta (key,value) VALUES ('scanner_version', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value=?1",
+                [SCANNER_VERSION.to_string()],
+            )?;
+        }
         Ok(Index { conn })
     }
 
