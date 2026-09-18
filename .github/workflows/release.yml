@@ -24,9 +24,10 @@ jobs:
             asset: mnemosyne-aarch64-linux
           # macOS builds are native per architecture; there is no static libc
           # to link against, so these are ordinary dynamic binaries.
-          - os: macos-13
-            target: x86_64-apple-darwin
-            asset: mnemosyne-x86_64-macos
+          #
+          # Intel macOS is built by release-intel-mac.yml instead. GitHub is
+          # winding those runners down and a job can sit queued for an hour,
+          # which would hold up every other platform's release behind it.
           - os: macos-14
             target: aarch64-apple-darwin
             asset: mnemosyne-aarch64-macos

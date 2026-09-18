@@ -1,0 +1,39 @@
+name: release (intel mac)
+
+# Split out of release.yml on purpose. GitHub is retiring the macos-13
+# runners and a job can sit queued for an hour or more; leaving it in the
+# main matrix meant every other platform's release waited behind the one
+# nobody could schedule. This attaches its asset to the release whenever it
+# eventually runs, and if it never does, the other three shipped regardless.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  intel-mac:
+    runs-on: macos-13
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - run: cargo build --release --target x86_64-apple-darwin
+      - name: package
+        run: |
+          mkdir -p dist
+          cp target/x86_64-apple-darwin/release/mnemosyne dist/
+          cp shell/mn.fish shell/mn.bash README.md LICENSE dist/
+          tar -C dist -czf mnemosyne-x86_64-macos.tar.gz .
+          shasum -a 256 mnemosyne-x86_64-macos.tar.gz > mnemosyne-x86_64-macos.tar.gz.sha256
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            mnemosyne-x86_64-macos.tar.gz
+            mnemosyne-x86_64-macos.tar.gz.sha256
