@@ -245,11 +245,21 @@ pub enum Found {
 
 /// The background check.
 pub fn auto(every_hours: u64) -> Option<Found> {
+    auto_with(every_hours, latest_tag)
+}
+
+/// The check, with the network call injectable so the ordering around the
+/// stamp can be tested without one.
+pub fn auto_with(every_hours: u64, fetch: impl FnOnce() -> Option<String>) -> Option<Found> {
     if !check_due(every_hours) {
         return None;
     }
+    // Record the check only once GitHub has actually answered. Stamping
+    // first meant a machine with no network marked itself as checked, and a
+    // session closed mid-download burned the whole window without having
+    // installed anything.
+    let tag = fetch()?;
     touch_stamp();
-    let tag = latest_tag()?;
     if !is_newer(&tag, current()) {
         return None;
     }
@@ -277,6 +287,28 @@ mod tests {
         assert!(is_newer("0.3", "0.2.9"));
         // a tag we cannot parse must never look like an upgrade
         assert!(!is_newer("nightly", "0.2.0"));
+    }
+
+    #[test]
+    fn an_unreachable_github_does_not_count_as_a_check() {
+        // The stamp is what suppresses the next attempt, so writing it for a
+        // check that never reached GitHub would silence retries for the whole
+        // window. Also covers a session closed mid-download.
+        let before = std::fs::metadata(stamp_path())
+            .and_then(|m| m.modified())
+            .ok();
+        let got = auto_with(0, || None);
+        assert_eq!(got, None);
+        let after = std::fs::metadata(stamp_path())
+            .and_then(|m| m.modified())
+            .ok();
+        assert_eq!(before, after, "stamped without hearing back from GitHub");
+    }
+
+    #[test]
+    fn being_current_is_recorded_so_we_do_not_ask_again_immediately() {
+        let v = format!("v{}", current());
+        assert_eq!(auto_with(0, move || Some(v)), None, "nothing to do");
     }
 
     #[test]
