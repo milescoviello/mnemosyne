@@ -196,6 +196,11 @@ pub struct App {
     pub viewer_height: u16,
     pub viewer_page: u16,
 
+    /// Every token on this machine, subagents included. Deliberately does not
+    /// follow the filters: it is a property of the corpus, not of the view,
+    /// and a number that moved while you typed would be hard to read.
+    pub corpus_tokens: u64,
+
     pub status: String,
     pub outcome: Option<Outcome>,
     pub quit: bool,
@@ -247,6 +252,7 @@ impl App {
             show_subagents: false,
             show_preview: true,
             expanded: HashSet::new(),
+            corpus_tokens: 0,
             viewer: None,
             viewer_scroll: 0,
             viewer_height: 0,
@@ -269,9 +275,15 @@ impl App {
         };
         all.sort_by_key(|s| std::cmp::Reverse(s.mtime));
         app.all = all;
+        app.recompute_totals();
         app.apply_overlay();
         app.rebuild();
         app
+    }
+
+    /// Sum the corpus token count. Cheap, and only on a reload.
+    pub fn recompute_totals(&mut self) {
+        self.corpus_tokens = self.all.iter().map(|s| s.total_tokens()).sum();
     }
 
     /// Fold favourites/tags/notes and live-process state onto the sessions.

@@ -362,6 +362,7 @@ fn main() -> Result<()> {
             fresh.sort_by_key(|s| std::cmp::Reverse(s.mtime));
             app.all = fresh;
             app.live = live::live_map();
+            app.recompute_totals();
             app.apply_overlay();
             app.rebuild();
         }
@@ -427,6 +428,7 @@ fn run<B: ratatui::backend::Backend>(term: &mut Terminal<B>, app: &mut App) -> R
             let mut fresh = sessions;
             fresh.sort_by_key(|s| std::cmp::Reverse(s.mtime));
             app.all = fresh;
+            app.recompute_totals();
             app.meta = meta::Meta::load();
             app.live = live::live_map();
             app.apply_overlay();

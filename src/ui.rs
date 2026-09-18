@@ -434,6 +434,13 @@ fn draw_wordmark(f: &mut Frame, app: &App, area: Rect) {
         format!("{} sessions", app.item_count()),
         Style::default().fg(th().text),
     )];
+    if app.corpus_tokens > 0 {
+        right.push(dot());
+        right.push(Span::styled(
+            format!("{} tokens", crate::model::human_count(app.corpus_tokens)),
+            Style::default().fg(th().chrome),
+        ));
+    }
     let favs = app.meta.favorite_count();
     if favs > 0 {
         right.push(dot());

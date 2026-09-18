@@ -283,8 +283,21 @@ There is no literal "never". Already-deleted transcripts are unrecoverable.
 
 ## Tokens
 
-Transcripts record their own token usage, so `mn` reads it: a **TOKENS**
-column at wide terminals, sortable with `s`, and a total for the machine:
+Transcripts record their own token usage, so `mn` reads it. The header
+carries the machine-wide total, there is a **TOKENS** column at wide
+terminals that `s` will sort by, and each session's own count sits in the
+rail:
+
+```
+  ⌇ mnemosyne                      331 sessions · 90.72b tokens · ●2 live · recency
+```
+
+The header total is deliberately **not** filtered — it is a property of the
+corpus rather than of whatever you are looking at, and a figure that moved
+while you typed would be hard to read. Narrowing to one tag changes the
+session count beside it, not the total.
+
+The same numbers, broken down:
 
 ```
 $ mnemosyne --stats
