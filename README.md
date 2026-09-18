@@ -129,7 +129,11 @@ curl -fsSL https://raw.githubusercontent.com/milescoviello/mnemosyne/main/instal
 ```
 
 That fetches a prebuilt static binary (checksum verified), installs it to
-`~/.local/bin/mnemosyne`, and adds the `mn` shell function. No Rust needed.
+`~/.local/bin/mnemosyne`, and wires up the `mn` shell function — dropping it
+into `~/.config/fish/functions/` for fish, and appending one `source` line to
+`.bashrc` / `.zshrc` for bash and zsh, since those have to source it for the
+`cd` to happen in your shell. Re-running is safe; the line is added once. No
+Rust needed.
 
 From a clone, or to build it yourself:
 

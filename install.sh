@@ -70,15 +70,23 @@ if [ -d "$HOME/.config/fish" ]; then
     say "installed ~/.config/fish/functions/mn.fish   -> type: mn"
 fi
 
-# bash/zsh must source it, because the cd has to happen in your shell
+# bash/zsh must source it, because the cd has to happen in your shell.
+# Wiring it up is the install; printing homework and then announcing success
+# leaves you with a command that does not exist.
 mkdir -p "$HOME/.local/share/mnemosyne"
 install -m644 "$SHELLSRC/mn.bash" "$HOME/.local/share/mnemosyne/mn.bash"
 line='source ~/.local/share/mnemosyne/mn.bash'
+wired=""
 for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
     [ -f "$rc" ] || continue
-    if ! grep -qF "$line" "$rc"; then
-        say "add to $(basename "$rc"):  $line"
+    if grep -qF "$line" "$rc"; then
+        wired="yes"
+        continue
     fi
+    printf '\n# mnemosyne: the mn function, which has to run in your shell to cd\n%s\n' \
+        "$line" >> "$rc"
+    say "added to $(basename "$rc"):  $line"
+    wired="yes"
 done
 
 case ":$PATH:" in
@@ -92,4 +100,27 @@ say "building the index…"
 [ -n "$KEEP" ] && rm -rf "$KEEP"
 
 say ""
-say "done — run: mn"
+# Be honest about whether `mn` works in the shell you are standing in.
+case "${SHELL##*/}" in
+    fish)
+        if [ -f "$HOME/.config/fish/functions/mn.fish" ]; then
+            say "done — run: mn"
+        else
+            say "done, but no fish config was found; see shell/mn.fish"
+        fi
+        ;;
+    bash | zsh)
+        if [ -n "$wired" ]; then
+            say "done — open a new shell, or run this once to use it now:"
+            say "    $line"
+        else
+            say "done, but nothing was wired up: no .bashrc or .zshrc found."
+            say "add this to your shell config:  $line"
+        fi
+        ;;
+    *)
+        say "done. mn is a shell function; source the one for your shell:"
+        say "    fish: ~/.config/fish/functions/mn.fish"
+        say "    bash/zsh: $line"
+        ;;
+esac
