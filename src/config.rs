@@ -42,7 +42,9 @@ floor_warm_ms = 420
 # Check GitHub for a newer release and install it in the background. The
 # running session is never swapped out; a new version takes effect next start.
 auto = true
-check_every_hours = 24
+# Hours between checks. 0 is every start, which is the default; nothing waits
+# on the check, so the only cost of asking is the request itself.
+check_every_hours = 0
 
 [start]
 mouse = true           # false is the same as --no-mouse
@@ -85,7 +87,7 @@ impl Default for Update {
     fn default() -> Self {
         Update {
             auto: true,
-            check_every_hours: 24,
+            check_every_hours: 0,
         }
     }
 }
@@ -191,7 +193,7 @@ mod tests {
         assert_eq!(c.ramp.as_ref().unwrap().len(), 6);
         assert!(c.splash.enabled);
         assert!(c.update.auto);
-        assert_eq!(c.update.check_every_hours, 24);
+        assert_eq!(c.update.check_every_hours, 0, "every start by default");
         assert_eq!(c.splash.floor_warm_ms, 420);
         assert!(c.start.mouse);
     }

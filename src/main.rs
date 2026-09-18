@@ -381,14 +381,15 @@ fn main() -> Result<()> {
     // animation rather than following it. Off the main path entirely: a slow
     // or missing network delays nothing, and the result is only ever a line
     // of text the header shows.
-    let updated: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    let updated: std::sync::Arc<std::sync::Mutex<Option<update::Found>>> = Default::default();
     if !has("--no-update") && cfg.update.auto && std::env::var_os("MNEMOSYNE_NO_UPDATE").is_none() {
         let slot = updated.clone();
-        let every = cfg.update.check_every_hours.max(1);
+        // 0 is meaningful here: check on every start.
+        let every = cfg.update.check_every_hours;
         std::thread::spawn(move || {
-            if let Some(v) = update::auto(every) {
+            if let Some(found) = update::auto(every) {
                 if let Ok(mut g) = slot.lock() {
-                    *g = Some(v);
+                    *g = Some(found);
                 }
             }
         });
@@ -440,7 +441,7 @@ fn main() -> Result<()> {
 fn run<B: ratatui::backend::Backend>(
     term: &mut Terminal<B>,
     app: &mut App,
-    updated: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    updated: &std::sync::Arc<std::sync::Mutex<Option<update::Found>>>,
 ) -> Result<()> {
     let mut last_live = Instant::now();
     loop {
@@ -459,8 +460,18 @@ fn run<B: ratatui::backend::Backend>(
 
         if app.update_notice.is_none() {
             if let Ok(g) = updated.try_lock() {
-                if let Some(v) = g.clone() {
-                    app.update_notice = Some(v);
+                if let Some(found) = g.clone() {
+                    // Say it once in the status line as well, so it is not
+                    // just a chip in the corner you might never look at.
+                    app.status = match &found {
+                        update::Found::Installed(v) => {
+                            format!("mnemosyne v{v} installed — restart mn to start using it")
+                        }
+                        update::Found::Available(v) => {
+                            format!("mnemosyne v{v} is available — run: mn --update")
+                        }
+                    };
+                    app.update_notice = Some(found);
                 }
             }
         }

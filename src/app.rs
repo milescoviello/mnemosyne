@@ -222,9 +222,9 @@ pub struct App {
     /// follow the filters: it is a property of the corpus, not of the view,
     /// and a number that moved while you typed would be hard to read.
     pub corpus_tokens: u64,
-    /// Set when a background update has been installed. Shown, not acted on:
-    /// the running process keeps the binary it started with.
-    pub update_notice: Option<String>,
+    /// What the background update check found, if anything. Shown, never
+    /// acted on: the running process keeps the binary it started with.
+    pub update_notice: Option<crate::update::Found>,
 
     pub help_page: HelpPage,
     pub help_scroll: u16,

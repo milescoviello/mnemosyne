@@ -158,13 +158,14 @@ you can read all of it in `shell/mn.fish`.
 
 ## Staying current
 
-It updates itself. On an interactive run it asks GitHub for the latest
-release at most once a day, on a background thread, and installs it if there
-is a newer one. Two things it deliberately does not do: block the interface
+It updates itself. Every interactive start asks GitHub for the latest release
+on a background thread and installs it if there is a newer one. Two things it deliberately does not do: block the interface
 waiting for the network, and swap the binary out from under the process you
 are using. The new one is renamed into place — atomic, and harmless to the
-running image — and takes effect next time you start. When that happens the
-header says so.
+running image — and takes effect next time you start. When that happens the header and the
+status line both say `v0.3.1 installed — restart to update`; if a newer
+release exists but could not be installed, they say so instead rather than
+staying quiet.
 
 ```sh
 mn --check-update     # is there a newer one?
@@ -177,7 +178,7 @@ To turn it off for good, in `~/.claude/mnemosyne/config.toml`:
 ```toml
 [update]
 auto = false
-check_every_hours = 24
+check_every_hours = 0   # 0 is every start; set hours to check less often
 ```
 
 `MNEMOSYNE_NO_UPDATE=1` does the same for one run. Downloads are checksum

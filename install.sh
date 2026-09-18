@@ -89,9 +89,33 @@ for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
     wired="yes"
 done
 
+# An installed binary that is not on PATH is not installed. Warning about it
+# and carrying on leaves `mn` calling a command the shell cannot find.
 case ":$PATH:" in
     *":$bindir:"*) ;;
-    *) say "note: $bindir is not on your PATH" ;;
+    *)
+        pathline="export PATH=\"$bindir:\$PATH\""
+        added=""
+        for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+            [ -f "$rc" ] || continue
+            grep -qF "$bindir" "$rc" && continue
+            printf '\n# mnemosyne: so the binary it installed can be found\n%s\n' \
+                "$pathline" >> "$rc"
+            say "added to $(basename "$rc"):  $pathline"
+            added="yes"
+        done
+        if [ -d "$HOME/.config/fish" ]; then
+            mkdir -p "$HOME/.config/fish/conf.d"
+            fishpath="$HOME/.config/fish/conf.d/mnemosyne-path.fish"
+            if [ ! -f "$fishpath" ]; then
+                printf '# mnemosyne: so the binary it installed can be found\nfish_add_path %s\n' \
+                    "$bindir" > "$fishpath"
+                say "added $bindir to fish's PATH"
+                added="yes"
+            fi
+        fi
+        [ -z "$added" ] && say "note: $bindir is not on your PATH and no shell config was found"
+        ;;
 esac
 
 say ""

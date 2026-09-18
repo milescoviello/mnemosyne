@@ -28,7 +28,13 @@ fn stamp_path() -> PathBuf {
 }
 
 /// Has enough time passed to be worth asking GitHub again?
+///
+/// Zero means every start, which is the default: the check is a background
+/// thread nothing waits on, so the only cost of asking is a request.
 pub fn check_due(every_hours: u64) -> bool {
+    if every_hours == 0 {
+        return true;
+    }
     let Ok(meta) = std::fs::metadata(stamp_path()) else {
         return true;
     };
@@ -193,8 +199,20 @@ fn refresh_shell_files(from: &Path) {
     }
 }
 
-/// The background check. Returns the version it installed, if it installed one.
-pub fn auto(every_hours: u64) -> Option<String> {
+/// What the background check found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Found {
+    /// Downloaded and put in place; it applies on the next start.
+    Installed(String),
+    /// A newer release exists but could not be installed — no network left
+    /// by the time we tried, no permission to write the binary, a checksum
+    /// that did not match. Worth saying so rather than silently doing
+    /// nothing.
+    Available(String),
+}
+
+/// The background check.
+pub fn auto(every_hours: u64) -> Option<Found> {
     if !check_due(every_hours) {
         return None;
     }
@@ -203,7 +221,11 @@ pub fn auto(every_hours: u64) -> Option<String> {
     if !is_newer(&tag, current()) {
         return None;
     }
-    install_latest().ok()
+    let version = tag.trim_start_matches('v').to_string();
+    match install_latest() {
+        Ok(v) => Some(Found::Installed(v)),
+        Err(_) => Some(Found::Available(version)),
+    }
 }
 
 #[cfg(test)]
@@ -223,6 +245,13 @@ mod tests {
         assert!(is_newer("0.3", "0.2.9"));
         // a tag we cannot parse must never look like an upgrade
         assert!(!is_newer("nightly", "0.2.0"));
+    }
+
+    #[test]
+    fn zero_hours_means_every_start() {
+        // the default: no interval to wait out
+        assert!(check_due(0));
+        assert!(check_due(0));
     }
 
     #[test]
