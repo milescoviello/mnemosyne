@@ -124,244 +124,67 @@ normally invisible. `a` reveals them; `→` expands a session's children.
 
 ## Install
 
-Needs a Rust toolchain, and `fish` or `bash`.
+```sh
+curl -fsSL https://raw.githubusercontent.com/milescoviello/mnemosyne/main/install.sh | bash
+```
+
+That fetches a prebuilt static binary (checksum verified), installs it to
+`~/.local/bin/mnemosyne`, and adds the `mn` shell function. No Rust needed.
+
+From a clone, or to build it yourself:
 
 ```sh
 git clone https://github.com/milescoviello/mnemosyne
 cd mnemosyne
-./install.sh
+./install.sh            # prebuilt if available, otherwise builds
+./install.sh --build    # always build from source
 ```
 
-That builds the binary to `~/.local/bin/mnemosyne` and installs the `mn` shell
-function. Then just:
+Then:
 
 ```sh
 mn
 ```
 
 The shell function exists because `mnemosyne` cannot change your shell's
-working directory — no child process can. So the binary draws the interface on
-**stderr** and prints its decision to **stdout**, and the function reads that
-and performs the `cd` plus `claude --resume` itself. It is a few lines long and
+working directory — no child process can. The binary draws the interface on
+**stderr** and prints its decision to **stdout**; the function reads that and
+performs the `cd` plus `claude --resume` itself. It is a few lines long and
 you can read all of it in `shell/mn.fish`.
 
-## Permissions
+## Searching
 
-A session resumes under the permission mode it was **started** in, read from
-the transcript, the same way the model is restored:
+`/` filters the list. `F` searches *inside* the conversations.
 
-| recorded mode | resumed with |
-|---|---|
-| `bypassPermissions` | `--dangerously-skip-permissions` |
-| `plan`, `acceptEdits`, `auto`, `manual`, `dontAsk` | `--permission-mode <mode>` |
-| `default` | nothing — it started with prompts on, so prompts stay on |
-| *nothing recorded* | `--dangerously-skip-permissions` |
+Content search runs against a full-text index, so it answers in
+**milliseconds** rather than re-reading the corpus:
 
-`default` is deliberately absent from the `--permission-mode` column: it is not
-one of that flag's accepted values, and it already means "behave normally".
-The last row covers older transcripts written before the field existed.
+| query over 1,084 transcripts | indexed | exhaustive scan |
+|---|---|---|
+| `checkpatch` | 0.002 s | 0.195 s |
+| `page fault` | 0.006 s | 0.69 s |
+| `the` | 0.03 s | 4.5 s |
 
-Overrides, both of which win over the recorded mode:
+The index is small because a transcript is mostly not prose. Measured over a
+random sample here, **2.2%** of 2.5 GB is anything a person said — the rest is
+tool output, base64 and JSON. So the index holds what was said, thought, and
+run (text blocks, thinking blocks, and shell commands) and comes to about a
+tenth of the corpus.
 
-```sh
-mn --ask     # resume with permission prompts on, whatever it was started in
-mn --dangerously-skip-permissions   # force bypass
-```
+That is a deliberate trade: it does not cover tool *output*, which is the
+other 98%. `m` cycles the search between **content** (indexed), **file
+touched**, **tool used**, and **everything** — the last reads every byte and
+is the slow, complete one. A content search that finds nothing falls back to
+the exhaustive scan automatically rather than claiming there is nothing
+there.
 
-Anything `mn` does not recognise is forwarded to `claude` untouched, so
-`mn --verbose` works. `mn`'s own flags (`--no-splash`, `--subagents`,
-`--no-model`, `--ask`) are filtered out before the rest is handed over.
+Two exclusions make the results worth trusting. Memory files and
+`<system-reminder>` blocks are injected into every session, so indexing them
+would make every session match any word in yours; they are stripped. And
+base64 image payloads spell short words by chance, so the exhaustive scan
+rejects matches inside them.
 
-## tmux
-
-`ctrl+t` resumes a session inside tmux, in a session named `mn-<first 8 of the
-id>`:
-
-```
-  ▶ linux-abi-self-hosting  (tmux mn-026bcdb5)
-```
-
-If that tmux session already exists, `ctrl+t` **attaches to it** rather than
-starting a second client on the same transcript — so you pick up its latest
-state instead of forking it:
-
-```
-  ▶ mn-026bcdb5 already running — resuming where it left off
-```
-
-The browser knows about this too. A session with a tmux session waiting shows
-it in the rail (`tmux mn-026bcdb5`), and pressing `enter` on one refuses and
-points you at `ctrl+t` instead. Attaching works from inside tmux as well —
-`switch-client` is used there, since `attach-session` cannot nest.
-
-The `mn-` prefix is namespaced and matched exactly (`-t =name`), so tmux
-sessions you created yourself are never touched. Selecting several sessions
-and pressing `ctrl+t` creates them all detached, then attaches to the first.
-
-## The opening animation
-
-Mnemosyne is the spring of memory in the underworld — the counter-pool to
-Lethe, which souls drank in order to forget. So the name surfaces out of a
-rippling pool, lit by a gradient running from deep water to pale foam with a
-shimmer band that leads the reveal and then keeps sweeping:
-
-```
-   .###    ###  .##.  .##  .##@@@#  ###.   .###   .#@@@#.    #@@@@#  ##.   ### ###   .#.  ###@@@#
-   #@@@.  @@@@  #@@@  .@@  #@@####  #@@@   @@@@  .@@#.#@@#  #@#..##  #@@. #@@  @@@#  #@#  @@@###.
-   #@@@@ .@#@@  #@@@@ .@@  #@@      #@#@@ #@#@@  @@#    @@. @@#.      .@@#@@   @@@@# #@#  @@#
-   #@#.@#@#.@@  #@#.@#.@@  #@@@@@#  #@#.@#@#.@@ .@@.    @@#  #@@@@#    .@@@    @@.#@.#@#  @@@@@@.
-   #@# #@@ .@@  #@@ #@#@@  #@@      #@# @@@ .@@  @@#    @@.     .@@#    @@.    @@. @@@@#  @@.
-   #@#  .. .@@  #@@  #@@@  #@@####  #@#  .. .@@  .@@#.#@@#  ##...@@.    @@#    @@.  @@@#  @@@###.
-   .@#     .@#  .@#   #@#  .@@@@@@  #@.     .@#   .#@@@#.   .#@@@#.     #@.    #@.  .@@#  #@@@@@#
-    ~~~~~       ~~~~~     ~~≈≈≈~~∼   ~~~~~~∼      ~~~~∼     ∼~≈≈≈~~~   ~~~≈≈~~
-
-                              1084 transcripts · 2.4G
-                 ████████████████████████████████████████████████
-                                 any key to skip
-```
-
-The wordmark is **tonal ASCII art** — neither an outline font nor solid
-blocks. The name is rasterised with anti-aliasing and each character cell
-mapped onto the density ramp ` .:-+*#@`. Generated by `tools/gen-wordmark.py`
-and baked into the source, so nothing is rasterised at runtime and the binary
-has no image dependency.
-
-Getting it *legible* took two things, and the first was the whole game. Set in
-lowercase the word is about 16:1, so even 96 columns bought only four rows of
-x-height — nowhere near enough cells to draw a letter with. Uppercase is
-~13:1 and spends no rows on ascenders or descenders. Second, an S-curve on the
-tone: mid-tones scattered through the inside of a stroke read as noise, so the
-curve solidifies stroke interiors and leaves the falloff where it belongs, on
-the edges.
-
-Three sizes are baked in — 96, 84 and 68 columns — because tonal art needs
-resolution. Below 68 the letters collapse and narrower terminals get a
-letter-by-letter reveal in the same gradient instead.
-
-Columns that have not surfaced yet show only the highest wave crests — filling
-them densely fought the art instead of framing it. The pool sums two sine
-frequencies, because one alone produces long uniform runs that read as teeth.
-Roughly 3,500 distinct colours are in play per frame.
-
-It is covering real work — the index builds on a background thread while this
-runs — and lasts until indexing finishes or about 1.5s has passed, whichever
-is later. Any key skips, and that keypress is swallowed so it cannot act on
-the session under the cursor. When there is genuine work left the bar reports
-it; on a warm index the bar fills with the reveal and the counts below state
-the real totals. The bar never steps backwards when the source changes under
-it.
-
-Turn it off with `--no-splash` or `MNEMOSYNE_NO_SPLASH=1`. `?` shows the same
-wordmark over the key reference.
-
-## Permissions
-
-A session resumes under the permission mode it was **started** in, read from
-the transcript, the same way the model is restored:
-
-| recorded mode | resumed with |
-|---|---|
-| `bypassPermissions` | `--dangerously-skip-permissions` |
-| `plan`, `acceptEdits`, `auto`, `manual`, `dontAsk` | `--permission-mode <mode>` |
-| `default` | nothing — it started with prompts on, so prompts stay on |
-| *nothing recorded* | `--dangerously-skip-permissions` |
-
-`default` is deliberately absent from the `--permission-mode` column: it is not
-one of that flag's accepted values, and it already means "behave normally".
-The last row covers older transcripts written before the field existed.
-
-Overrides, both of which win over the recorded mode:
-
-```sh
-mn --ask     # resume with permission prompts on, whatever it was started in
-mn --dangerously-skip-permissions   # force bypass
-```
-
-Anything `mn` does not recognise is forwarded to `claude` untouched, so
-`mn --verbose` works. `mn`'s own flags (`--no-splash`, `--subagents`,
-`--no-model`, `--ask`) are filtered out before the rest is handed over.
-
-## tmux
-
-`ctrl+t` resumes a session inside tmux, in a session named `mn-<first 8 of the
-id>`:
-
-```
-  ▶ linux-abi-self-hosting  (tmux mn-026bcdb5)
-```
-
-If that tmux session already exists, `ctrl+t` **attaches to it** rather than
-starting a second client on the same transcript — so you pick up its latest
-state instead of forking it:
-
-```
-  ▶ mn-026bcdb5 already running — resuming where it left off
-```
-
-The browser knows about this too. A session with a tmux session waiting shows
-it in the rail (`tmux mn-026bcdb5`), and pressing `enter` on one refuses and
-points you at `ctrl+t` instead. Attaching works from inside tmux as well —
-`switch-client` is used there, since `attach-session` cannot nest.
-
-The `mn-` prefix is namespaced and matched exactly (`-t =name`), so tmux
-sessions you created yourself are never touched. Selecting several sessions
-and pressing `ctrl+t` creates them all detached, then attaches to the first.
-
-## The opening animation
-
-Mnemosyne is the spring of memory in the underworld — the counter-pool to
-Lethe, which souls drank in order to forget. So the wordmark surfaces out of a
-rippling pool, lit by a gradient running from deep water to pale foam with a
-shimmer band that leads the reveal and then keeps sweeping:
-
-```
-   ███╗   ███╗███╗   ██╗███████╗███╗   ███╗ ██████╗ ███████╗██╗   ██╗███╗   ██╗███████╗
-   ████╗ ████║████╗  ██║██╔════╝████╗ ████║██╔═══██╗██╔════╝╚██╗ ██╔╝████╗  ██║██╔════╝
-   ██╔████╔██║██╔██╗ ██║█████╗  ██╔████╔██║██║   ██║███████╗ ╚████╔╝ ██╔██╗ ██║█████╗
-   ██║╚██╔╝██║██║╚██╗██║██╔══╝  ██║╚██╔╝██║██║   ██║╚════██║  ╚██╔╝  ██║╚██╗██║██╔══╝
-   ██║ ╚═╝ ██║██║ ╚████║███████╗██║ ╚═╝ ██║╚██████╔╝███████║   ██║   ██║ ╚████║███████╗
-   ╚═╝     ╚═╝╚═╝  ╚═══╝╚══════╝╚═╝     ╚═╝ ╚═════╝ ╚══════╝   ╚═╝   ╚═══╝  ╚═══╝╚══════╝
-      ∼∼~~~~∼∼    ∼~~≈≈~~∼∼∼∼~~≈≈≈≈~∼∼  ∼∼~~~~∼∼    ∼∼~~~~~∼∼∼∼∼~≈≈≈≈~~∼∼∼∼∼~~~~~∼
-   ~~~~∼∼   ∼~~≈≈≈~~∼∼∼∼~~≈≈≈~~∼    ∼~~~~∼∼   ∼∼~~≈≈~~∼∼∼∼~~≈≈≈~~∼∼  ∼∼~~~~∼∼    ∼~~~~~
-
-                            1080 transcripts · 2.4G
-                ████████████████████████████████████████████████
-                                any key to skip
-```
-
-Columns that have not surfaced yet show only the wave crests, so the
-unrevealed half reads as open water rather than a wall of glyphs. The pool
-uses two summed sine frequencies, because a single one falls into long uniform
-runs that look like teeth. Roughly 3,500 distinct colours are in play per
-frame, from `rgb(10,18,33)` to `rgb(239,251,250)`.
-
-Below about 90 columns it falls back to spaced letters resolving out of noise,
-with the same gradient and pool.
-
-It is covering real work — the index builds on a background thread while this
-runs — and it lasts until indexing finishes or about 1.5s has passed, whichever
-is later. Any key skips straight to the list, and that keypress is swallowed so
-it cannot act on the session under the cursor. When there is genuine work left
-the bar reports it; on a warm index the bar fills with the reveal and the counts
-below state the real totals. The bar never steps backwards when the source
-changes under it.
-
-Turn it off with `--no-splash` or `MNEMOSYNE_NO_SPLASH=1`.
-
-## Reading a session
-
-`v` opens the conversation full-screen, so you can see what a session actually
-did without resuming it and changing it. Scroll with the arrows, the wheel, or
-page keys; `enter` resumes the session you are reading, `esc` goes back.
-
-It loads from the end of the transcript rather than the start, because the
-recent end is what you want and a session here can be 400 MB — it says so when
-there was more than it showed. Runs of pure tool calls collapse to one line
-(`ran Bash, Write · 45 calls`) instead of pages of `[Bash]`, and replies are
-wrapped with a hanging indent so they stay readable against the speaker
-labels.
-
-## Non-interactive use
+## Non-interactive use## Non-interactive use
 
 Handy from scripts, and from inside a Claude session that wants to find its own
 past work.
@@ -374,7 +197,11 @@ mnemosyne --search Cargo.toml --search-mode file   # which sessions edited it
 mnemosyne --search WebSearch --search-mode tool    # which sessions used it
 mnemosyne --stats                     # corpus summary
 mnemosyne --refresh                   # rebuild the index and exit
+mnemosyne --restore 5                 # reopen the 5 most recent, each in a window
 ```
+
+`--restore` skips anything already running or already in a tmux session, and
+anything whose directory has since been deleted.
 
 ## How it stays fast
 
@@ -454,11 +281,26 @@ long history to browse, raise it in `~/.claude/settings.json`:
 
 There is no literal "never". Already-deleted transcripts are unrecoverable.
 
+## Failure modes
+
+The index is derived data, so it is treated that way. A corrupt database is
+deleted and rebuilt rather than reported; if the location cannot be written to
+at all — read-only home, full disk — it falls back to an in-memory index,
+which is slower but works. Neither case stops the tool starting, and both used
+to.
+
+Live-session detection reads `/proc`, so it only works on Linux. Elsewhere it
+says so rather than reporting that nothing is running, which looks identical
+to a broken feature.
+
 ## legacy/
 
-`legacy/` holds the small `fzf` + Python picker this replaced, kept because it
-has no dependencies beyond `fzf` and `python3` and so still works if the binary
-is missing. Install it as `cs-classic` if you want the simple version around.
+`legacy/` holds the tools this replaced — the original `fzf` + Python picker,
+and the two small fish functions for listing and reopening sessions. See
+`legacy/README.md`. The picker needs nothing but `fzf` and `python3`, so it is
+worth keeping as a fallback if the binary is ever missing:
+
+    ./legacy/install-classic.sh
 
 ## Development
 

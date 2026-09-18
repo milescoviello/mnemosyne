@@ -33,22 +33,61 @@ pub fn db_path() -> PathBuf {
 /// History:
 ///   1  initial
 ///   2  permission_mode records the mode the session STARTED in
-pub const SCANNER_VERSION: u32 = 2;
+///   3  conversation prose is harvested into the full-text index
+///   4  thinking blocks and shell commands are harvested too
+pub const SCANNER_VERSION: u32 = 4;
 
 pub struct Index {
     conn: Connection,
+    /// True when we could not use the on-disk cache and fell back to memory.
+    /// Everything still works; it is just rebuilt on every run.
+    pub ephemeral: bool,
 }
 
 impl Index {
+    /// Open the cache, and never let a bad one stop the tool starting.
+    ///
+    /// The index is derived data that can always be rebuilt from the
+    /// transcripts, so a corrupt file is deleted and recreated rather than
+    /// reported. If the location cannot be written to at all -- a read-only
+    /// home, a full disk -- we fall back to an in-memory index, which is
+    /// slower but entirely usable.
     pub fn open() -> Result<Index> {
-        std::fs::create_dir_all(state_dir())?;
-        Index::open_at(&db_path())
+        let _ = std::fs::create_dir_all(state_dir());
+        let path = db_path();
+        match Index::open_at(&path) {
+            Ok(i) => Ok(i),
+            Err(first) => {
+                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_file(path.with_extension("db-wal"));
+                let _ = std::fs::remove_file(path.with_extension("db-shm"));
+                match Index::open_at(&path) {
+                    Ok(i) => Ok(i),
+                    Err(second) => {
+                        eprintln!(
+                            "mnemosyne: cache unusable ({first}; after reset: {second}) — running without it"
+                        );
+                        Index::open_memory()
+                    }
+                }
+            }
+        }
+    }
+
+    /// An index that lives only for this run.
+    pub fn open_memory() -> Result<Index> {
+        let mut i = Index::open_conn(Connection::open_in_memory()?)?;
+        i.ephemeral = true;
+        Ok(i)
     }
 
     /// Open a specific database file. Split out from `open` so tests can use a
     /// temporary path instead of racing each other over `$HOME`.
     pub fn open_at(path: &std::path::Path) -> Result<Index> {
-        let conn = Connection::open(path)?;
+        Index::open_conn(Connection::open(path)?)
+    }
+
+    fn open_conn(conn: Connection) -> Result<Index> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(
@@ -80,6 +119,12 @@ impl Index {
             CREATE INDEX IF NOT EXISTS idx_mtime  ON sessions(mtime DESC);
             CREATE INDEX IF NOT EXISTS idx_parent ON sessions(parent);
             CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            -- Full text of what was actually said. Small, because prose is
+            -- about two per cent of a transcript; searching it beats
+            -- re-reading gigabytes of tool output on every query.
+            CREATE VIRTUAL TABLE IF NOT EXISTS body USING fts5(
+                path UNINDEXED, text, tokenize = 'unicode61'
+            );
             "#,
         )?;
 
@@ -94,13 +139,17 @@ impl Index {
             .and_then(|v| v.parse().ok());
         if stored != Some(SCANNER_VERSION) {
             conn.execute("DELETE FROM sessions", [])?;
+            let _ = conn.execute("DELETE FROM body", []);
             conn.execute(
                 "INSERT INTO meta (key,value) VALUES ('scanner_version', ?1)
                  ON CONFLICT(key) DO UPDATE SET value=?1",
                 [SCANNER_VERSION.to_string()],
             )?;
         }
-        Ok(Index { conn })
+        Ok(Index {
+            conn,
+            ephemeral: false,
+        })
     }
 
     pub fn load(&self) -> Result<HashMap<String, Session>> {
@@ -143,6 +192,66 @@ impl Index {
             map.insert(s.path.to_string_lossy().to_string(), s);
         }
         Ok(map)
+    }
+
+    /// Replace the indexed text for a transcript.
+    pub fn store_text(&mut self, rows: &[(String, String)]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut del = tx.prepare("DELETE FROM body WHERE path = ?1")?;
+            let mut ins = tx.prepare("INSERT INTO body (path, text) VALUES (?1, ?2)")?;
+            for (path, text) in rows {
+                del.execute([path])?;
+                if !text.is_empty() {
+                    ins.execute(params![path, text])?;
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Paths whose conversation matches, with a readable excerpt.
+    ///
+    /// The caller passes an already-escaped FTS5 expression.
+    /// Deliberately does not build excerpts. `snippet()` has to re-locate the
+    /// match inside every hit, which for a common word over a thousand
+    /// documents cost seconds — slower than the brute scan it replaced. The
+    /// excerpt for the row you are actually looking at is fetched on demand.
+    pub fn search_text(&self, expr: &str) -> Result<Vec<String>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT path FROM body WHERE body MATCH ?1")?;
+        let rows = st.query_map([expr], |r| r.get::<_, String>(0))?;
+        Ok(rows.flatten().collect())
+    }
+
+    /// A readable excerpt for one hit.
+    pub fn snippet_for(&self, path: &str, expr: &str) -> Option<String> {
+        self.conn
+            .query_row(
+                "SELECT snippet(body, 1, '', '', '…', 16) FROM body
+                 WHERE path = ?1 AND body MATCH ?2",
+                params![path, expr],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+    }
+
+    pub fn existing_text(&self, path: &str) -> Result<Option<String>> {
+        let mut st = self.conn.prepare("SELECT text FROM body WHERE path = ?1")?;
+        let mut rows = st.query([path])?;
+        Ok(match rows.next()? {
+            Some(r) => Some(r.get(0)?),
+            None => None,
+        })
+    }
+
+    pub fn text_rows(&self) -> Result<usize> {
+        Ok(self
+            .conn
+            .query_row("SELECT count(*) FROM body", [], |r| r.get::<_, i64>(0))
+            .unwrap_or(0) as usize)
     }
 
     pub fn store(&mut self, sessions: &[Session]) -> Result<()> {
@@ -248,21 +357,66 @@ pub fn refresh_with_progress(
         p.total.store(found.len(), Ordering::Relaxed);
     }
 
-    let sessions: Vec<Session> = found
+    let scanned: Vec<(Session, Option<String>)> = found
         .par_iter()
         .filter_map(|(path, is_sub, parent)| {
             let key = path.to_string_lossy().to_string();
             let prev = cached.get(&key);
-            let out = scan::scan(path, *is_sub, parent.clone(), prev).ok();
+            // Only harvest text when the file actually needs reading; an
+            // untouched transcript keeps whatever is already indexed.
+            let unchanged = prev.is_some_and(|p| {
+                std::fs::metadata(path)
+                    .map(|m| {
+                        p.size == m.len()
+                            && p.mtime
+                                == m.modified()
+                                    .ok()
+                                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                    .map(|d| d.as_secs() as i64)
+                                    .unwrap_or(0)
+                    })
+                    .unwrap_or(false)
+            });
+            let out = if unchanged {
+                scan::scan(path, *is_sub, parent.clone(), prev)
+                    .ok()
+                    .map(|s| (s, None))
+            } else {
+                let mut text = String::new();
+                scan::scan_with_text(path, *is_sub, parent.clone(), prev, &mut text)
+                    .ok()
+                    .map(|s| (s, Some(text)))
+            };
             if let Some(p) = &progress {
                 p.done.fetch_add(1, Ordering::Relaxed);
-                if let Some(s) = &out {
+                if let Some((s, _)) = &out {
                     p.bytes.fetch_add(s.size, Ordering::Relaxed);
                 }
             }
             out
         })
         .collect();
+
+    // A transcript that only grew contributes its new tail; one read from
+    // scratch replaces its row outright.
+    let mut text_rows: Vec<(String, String)> = Vec::new();
+    for (s, t) in &scanned {
+        if let Some(t) = t {
+            let key = s.path.to_string_lossy().to_string();
+            let merged = match cached.get(&key) {
+                Some(p) if p.scanned_len > 0 && p.scanned_len < s.scanned_len => {
+                    match idx.existing_text(&key) {
+                        Ok(Some(old)) => format!("{old} {t}"),
+                        _ => t.clone(),
+                    }
+                }
+                _ => t.clone(),
+            };
+            text_rows.push((key, merged));
+        }
+    }
+    let sessions: Vec<Session> = scanned.into_iter().map(|(s, _)| s).collect();
+    let _ = idx.store_text(&text_rows);
 
     idx.store(&sessions)?;
     let paths: Vec<String> = found

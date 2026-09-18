@@ -765,7 +765,7 @@ fn ripple_line(width: usize, indent: usize, phase: f64) -> Line<'static> {
 
 fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
     let turns = app.preview(8);
-    let snippet = app.deep_snippet().cloned();
+    let snippet = app.deep_snippet();
     let width = area.width as usize;
 
     let Some(s) = app.current().cloned() else {

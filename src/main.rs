@@ -43,7 +43,12 @@ usage: mnemosyne [options]
 
   --search TEXT    non-interactively find sessions whose conversations
                    contain TEXT, print matches as TSV, and exit
-  --search-mode M  content (default) | file | tool
+  --search-mode M  content (default, indexed) | file | tool | everything
+                   the last one also reads tool output, which the index
+                   leaves out: slower, but complete
+
+  --restore N      reopen the N most recent sessions, each in its own window,
+                   skipping any already running (replaces claude-restore)
 
   --subagents      start with subagent transcripts revealed
   --no-splash      skip the opening animation (or set MNEMOSYNE_NO_SPLASH=1)
@@ -121,6 +126,9 @@ fn main() -> Result<()> {
         println!("running now     {}", live::live_map().count);
         let m = meta::Meta::load();
         println!("favourites      {}", m.favorite_count());
+        if let Ok(i) = index::Index::open() {
+            println!("indexed bodies  {}", i.text_rows().unwrap_or(0));
+        }
         println!("tags            {}", m.all_tags().len());
         return Ok(());
     }
@@ -140,6 +148,7 @@ fn main() -> Result<()> {
         {
             Some("file") => search::Mode::File,
             Some("tool") => search::Mode::Tool,
+            Some("everything") | Some("all") => search::Mode::Everything,
             _ => search::Mode::Content,
         };
         let pool: Vec<model::Session> = sessions
@@ -148,7 +157,7 @@ fn main() -> Result<()> {
             .cloned()
             .collect();
         let t = Instant::now();
-        let hits = search::run(&pool, q, mode);
+        let (hits, how) = search::run(&pool, q, mode);
         let mut rows: Vec<&model::Session> = pool
             .iter()
             .filter(|s| hits.contains_key(&s.path.to_string_lossy().to_string()))
@@ -167,13 +176,59 @@ fn main() -> Result<()> {
             );
         }
         eprintln!(
-            "{} of {} sessions matched \"{}\" ({}) in {:.2}s",
+            "{} of {} sessions matched \"{}\" ({}, {}) in {:.3}s",
             rows.len(),
             pool.len(),
             q,
             mode.label(),
+            if how == search::How::Indexed {
+                "indexed"
+            } else {
+                "scanned"
+            },
             t.elapsed().as_secs_f64()
         );
+        return Ok(());
+    }
+
+    // Reopen the N most recent sessions without opening the picker. Recency
+    // is the proxy for "what I had open": Claude holds no handle on its
+    // transcript, so there is no general pid-to-session map to consult.
+    if let Some(i) = args.iter().position(|a| a == "--restore") {
+        let n: usize = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(5);
+        let live = live::live_map();
+        let mut app = App::new(sessions, meta::Meta::load(), live, restore_model);
+        app.rebuild();
+        let mut out = std::io::stdout().lock();
+        let mut opened = 0;
+        for r in &app.view {
+            if opened >= n {
+                break;
+            }
+            let app::Row::Item(idx) = r else { continue };
+            let s = &app.all[*idx];
+            // already up, so reopening would just duplicate the window
+            if s.live_exact || s.has_tmux {
+                continue;
+            }
+            if s.cwd.is_empty() || !std::path::Path::new(&s.cwd).is_dir() {
+                continue;
+            }
+            writeln!(
+                out,
+                "window\t{}\t{}\t{}\t{}\t{}",
+                s.cwd,
+                s.id,
+                if restore_model {
+                    s.model.clone()
+                } else {
+                    String::new()
+                },
+                s.permission_mode,
+                s.title()
+            )?;
+            opened += 1;
+        }
         return Ok(());
     }
 

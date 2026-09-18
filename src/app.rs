@@ -170,6 +170,10 @@ pub struct App {
     /// inside a subagent is invisible whenever its parent did not also match,
     /// because only parents appear at the top level.
     deep_parent_hits: HashSet<String>,
+    /// The FTS expression behind the current results, if they came from the
+    /// index. Excerpts are fetched per row rather than for every hit.
+    deep_expr: Option<String>,
+    snippet_cache: HashMap<String, String>,
     pub deep_busy: bool,
     pub deep_generation: u64,
     pub input: String,
@@ -229,6 +233,8 @@ impl App {
             deep_mode: search::Mode::Content,
             deep_hits: None,
             deep_parent_hits: HashSet::new(),
+            deep_expr: None,
+            snippet_cache: HashMap::new(),
             deep_busy: false,
             deep_generation: 0,
             input: String::new(),
@@ -602,11 +608,25 @@ impl App {
         turns
     }
 
-    pub fn deep_snippet(&self) -> Option<&String> {
-        let s = self.current()?;
-        self.deep_hits
-            .as_ref()?
-            .get(&s.path.to_string_lossy().to_string())
+    /// Excerpt for the row under the cursor.
+    ///
+    /// Indexed results arrive without excerpts on purpose, so this fetches the
+    /// one you are looking at and remembers it.
+    pub fn deep_snippet(&mut self) -> Option<String> {
+        let path = self.current()?.path.to_string_lossy().to_string();
+        let stored = self.deep_hits.as_ref()?.get(&path)?.clone();
+        if !stored.is_empty() {
+            return Some(stored);
+        }
+        if let Some(hit) = self.snippet_cache.get(&path) {
+            return Some(hit.clone());
+        }
+        let expr = self.deep_expr.clone()?;
+        let text = crate::index::Index::open()
+            .ok()
+            .and_then(|i| i.snippet_for(&path, &expr))?;
+        self.snippet_cache.insert(path, text.clone());
+        Some(text)
     }
 
     // ---------------- movement ----------------
@@ -777,9 +797,20 @@ impl App {
         // corpus, and excluding them by default meant the answer could sit in
         // a file the search never opened.
         let sessions: Vec<Session> = self.all.clone();
+        self.deep_expr = if mode == search::Mode::Content {
+            let e = search::fts_expr(&q);
+            if e.is_empty() {
+                None
+            } else {
+                Some(e)
+            }
+        } else {
+            None
+        };
+        self.snippet_cache.clear();
         self.deep_busy = true;
         std::thread::spawn(move || {
-            let hits = search::run(&sessions, &q, mode);
+            let (hits, _how) = search::run(&sessions, &q, mode);
             let _ = tx.send(DeepResult { generation, hits });
         });
     }

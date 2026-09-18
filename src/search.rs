@@ -19,6 +19,9 @@ pub enum Mode {
     File,
     /// Sessions that invoked a given tool.
     Tool,
+    /// Every byte of the conversation, including tool output. Slower, and the
+    /// only mode that reads the ~98% of a transcript the index leaves out.
+    Everything,
 }
 
 impl Mode {
@@ -27,13 +30,15 @@ impl Mode {
             Mode::Content => "content",
             Mode::File => "file touched",
             Mode::Tool => "tool used",
+            Mode::Everything => "everything, slow",
         }
     }
     pub fn next(self) -> Mode {
         match self {
             Mode::Content => Mode::File,
             Mode::File => Mode::Tool,
-            Mode::Tool => Mode::Content,
+            Mode::Tool => Mode::Everything,
+            Mode::Everything => Mode::Content,
         }
     }
 }
@@ -216,6 +221,24 @@ fn tool_hit(line: &[u8], needle: &[u8]) -> Option<usize> {
     None
 }
 
+/// Turn a user's words into an FTS5 expression they cannot break.
+///
+/// Several words are treated as a phrase, which is what a substring search
+/// meant before; a single word gets a prefix match so "nvenc" still finds
+/// "nvenc's". Quotes are doubled so no input can be read as syntax.
+pub fn fts_expr(query: &str) -> String {
+    let cleaned: Vec<String> = query
+        .split_whitespace()
+        .map(|w| w.replace('"', "\"\""))
+        .filter(|w| !w.is_empty())
+        .collect();
+    match cleaned.len() {
+        0 => String::new(),
+        1 => format!("\"{}\"*", cleaned[0]),
+        _ => format!("\"{}\"", cleaned.join(" ")),
+    }
+}
+
 /// Scan one file, returning the first readable hit.
 fn search_file(path: &std::path::Path, needle: &[u8], mode: Mode) -> Option<String> {
     use std::io::{BufRead, BufReader};
@@ -230,7 +253,7 @@ fn search_file(path: &std::path::Path, needle: &[u8], mode: Mode) -> Option<Stri
         }
         let line = &buf[..n];
         let hit = match mode {
-            Mode::Content => content_hit(line, needle),
+            Mode::Content | Mode::Everything => content_hit(line, needle),
             Mode::File => file_hit(line, needle),
             Mode::Tool => tool_hit(line, needle),
         };
@@ -244,18 +267,60 @@ fn search_file(path: &std::path::Path, needle: &[u8], mode: Mode) -> Option<Stri
 }
 
 /// Search every session in parallel. Returns path -> snippet for hits only.
-pub fn run(sessions: &[Session], query: &str, mode: Mode) -> HashMap<String, String> {
-    let needle = query.trim().to_lowercase();
-    if needle.is_empty() {
-        return HashMap::new();
-    }
-    let nb = needle.as_bytes();
+fn brute(sessions: &[Session], needle: &[u8], mode: Mode) -> HashMap<String, String> {
     sessions
         .par_iter()
         .filter_map(|s| {
-            search_file(&s.path, nb, mode).map(|snip| (s.path.to_string_lossy().to_string(), snip))
+            search_file(&s.path, needle, mode)
+                .map(|snip| (s.path.to_string_lossy().to_string(), snip))
         })
         .collect()
+}
+
+/// How a set of results was produced, so the interface can say.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum How {
+    Indexed,
+    Scanned,
+}
+
+/// Find sessions matching `query`.
+///
+/// Content searches go through the full-text index, which covers the ~2% of
+/// the corpus that is actually prose and answers in milliseconds instead of
+/// re-reading gigabytes. The index tokenises, so it cannot match the middle of
+/// a word; when it finds nothing we fall back to the exhaustive scan rather
+/// than claiming there is nothing there. File and tool searches always scan,
+/// because they query structure rather than prose.
+pub fn run(sessions: &[Session], query: &str, mode: Mode) -> (HashMap<String, String>, How) {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return (HashMap::new(), How::Indexed);
+    }
+
+    if mode == Mode::Content {
+        let expr = fts_expr(&needle);
+        if !expr.is_empty() {
+            if let Ok(idx) = crate::index::Index::open() {
+                if let Ok(paths) = idx.search_text(&expr) {
+                    let known: std::collections::HashSet<String> = sessions
+                        .iter()
+                        .map(|s| s.path.to_string_lossy().to_string())
+                        .collect();
+                    // Excerpts are filled in one row at a time, on demand.
+                    let kept: HashMap<String, String> = paths
+                        .into_iter()
+                        .filter(|p| known.contains(p))
+                        .map(|p| (p, String::new()))
+                        .collect();
+                    if !kept.is_empty() {
+                        return (kept, How::Indexed);
+                    }
+                }
+            }
+        }
+    }
+    (brute(sessions, needle.as_bytes(), mode), How::Scanned)
 }
 
 #[cfg(test)]
@@ -272,6 +337,33 @@ mod tests {
     const PLAIN_USER: &str = r#"{"parentUuid":"a","isSidechain":false,"message":{"role":"user","content":[{"type":"text","text":"fix the NVENC build"}]},"type":"user","uuid":"b"}"#;
     // `attachment` records are where the memory index actually lands.
     const ATTACHMENT: &str = r#"{"parentUuid":"a","attachment":{"x":1},"rendered":"NVENC and friends","type":"attachment"}"#;
+
+    #[test]
+    fn fts_expressions_cannot_be_broken_by_input() {
+        // one word gets a prefix match, so "nvenc" still finds "nvenc's"
+        assert_eq!(fts_expr("nvenc"), r#""nvenc"*"#);
+        // several words become a phrase, which is what substring meant
+        assert_eq!(fts_expr("page fault"), r#""page fault""#);
+        assert_eq!(fts_expr("  page   fault  "), r#""page fault""#);
+        // quotes are doubled so nothing can be read as FTS syntax
+        assert_eq!(fts_expr(r#"say "hi""#), r#""say ""hi""""#);
+        // operators are inert inside a quoted term
+        assert_eq!(fts_expr("a OR b"), r#""a OR b""#);
+        assert_eq!(fts_expr(""), "");
+        assert_eq!(fts_expr("   "), "");
+    }
+
+    #[test]
+    fn search_modes_cycle_and_include_the_exhaustive_one() {
+        let mut m = Mode::Content;
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            seen.push(m.label());
+            m = m.next();
+        }
+        assert_eq!(m, Mode::Content, "four modes, four steps");
+        assert!(seen.contains(&"everything, slow"));
+    }
 
     #[test]
     fn ci_search_finds_either_case() {

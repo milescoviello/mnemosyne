@@ -1,0 +1,36 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  binary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      # A musl build is statically linked, so the binary runs on any x86-64
+      # Linux without caring which libc or distro is underneath. rusqlite
+      # compiles SQLite from source, hence musl-tools.
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --target x86_64-unknown-linux-musl
+      - name: package
+        run: |
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-musl/release/mnemosyne dist/
+          cp shell/mn.fish shell/mn.bash README.md LICENSE dist/
+          tar -C dist -czf mnemosyne-x86_64-linux.tar.gz .
+          sha256sum mnemosyne-x86_64-linux.tar.gz > mnemosyne-x86_64-linux.tar.gz.sha256
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            mnemosyne-x86_64-linux.tar.gz
+            mnemosyne-x86_64-linux.tar.gz.sha256
+          generate_release_notes: true

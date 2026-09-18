@@ -127,6 +127,113 @@ pub fn squash(s: &str, max: usize) -> String {
     out
 }
 
+/// Pull the prose out of a conversation line for the search index.
+///
+/// Only `{"type":"text"}` content blocks are taken, which is what makes the
+/// index small: the corpus is 2.5 GB but barely two per cent of it is
+/// anything a person said. Tool payloads, base64 images and JSON scaffolding
+/// are skipped by construction rather than by heuristic, and injected
+/// `<system-reminder>` context is dropped so it cannot make every session
+/// match every word in your memory file.
+pub fn harvest_text(line: &[u8], out: &mut String) {
+    harvest_blocks(line, b"\"type\":\"text\"", b"\"text\":\"", out);
+    // Reasoning is part of the conversation and is where a lot of the
+    // substance ends up; leaving it out cost noticeable recall.
+    harvest_blocks(line, b"\"type\":\"thinking\"", b"\"thinking\":\"", out);
+    // The commands that were actually run, so "which session touched zfs"
+    // still finds a shell invocation rather than only chatter about it.
+    harvest_values(line, b"\"command\":\"", out);
+    harvest_values(line, b"\"description\":\"", out);
+}
+
+fn harvest_blocks(line: &[u8], marker: &[u8], value_key: &[u8], out: &mut String) {
+    let mut from = 0usize;
+    while let Some(rel) = memmem::find(&line[from..], marker) {
+        let at = from + rel;
+        from = at + marker.len();
+        // the value key follows within a few bytes in either ordering
+        let window_end = (from + 48).min(line.len());
+        let Some(vrel) = memmem::find(&line[from..window_end], value_key) else {
+            continue;
+        };
+        let mut i = from + vrel + value_key.len();
+        let start = i;
+        // walk the JSON string, honouring escapes
+        while i < line.len() {
+            match line[i] {
+                b'\\' => i += 2,
+                b'"' => break,
+                _ => i += 1,
+            }
+        }
+        if i > line.len() {
+            break;
+        }
+        let raw = String::from_utf8_lossy(&line[start..i.min(line.len())]);
+        push_unescaped(&raw, out);
+        from = i;
+    }
+}
+
+/// Collect every value of a given JSON key, wherever it appears in the line.
+fn harvest_values(line: &[u8], key: &[u8], out: &mut String) {
+    let mut from = 0usize;
+    while let Some(rel) = memmem::find(&line[from..], key) {
+        let mut i = from + rel + key.len();
+        let start = i;
+        while i < line.len() {
+            match line[i] {
+                b'\\' => i += 2,
+                b'"' => break,
+                _ => i += 1,
+            }
+        }
+        let raw = String::from_utf8_lossy(&line[start..i.min(line.len())]);
+        push_unescaped(&raw, out);
+        from = i.max(start + 1);
+    }
+}
+
+/// Minimal JSON string unescaping, with injected context removed.
+fn push_unescaped(raw: &str, out: &mut String) {
+    let cleaned = strip_reminders(raw);
+    let mut chars = cleaned.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') | Some('t') | Some('r') => out.push(' '),
+            Some('u') => {
+                // skip the four hex digits; exact glyphs do not matter to a
+                // tokeniser and decoding them here is not worth the code
+                for _ in 0..4 {
+                    chars.next();
+                }
+                out.push(' ');
+            }
+            Some(other) => out.push(other),
+            None => break,
+        }
+    }
+    out.push(' ');
+}
+
+fn strip_reminders(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find("<system-reminder>") {
+        out.push_str(&rest[..i]);
+        rest = match rest[i..].find("</system-reminder>") {
+            Some(j) => &rest[i + j + "</system-reminder>".len()..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out
+}
+
 const BIG_LINE: usize = 1 << 23; // 8 MiB: base64 attachments live up here
 const FRONT: usize = 1 << 16;
 const TAIL: usize = 1 << 13;
@@ -146,7 +253,7 @@ fn tail(line: &[u8]) -> &[u8] {
     }
 }
 
-fn process_line(s: &mut Session, line: &[u8]) {
+fn process_line(s: &mut Session, line: &[u8], text: &mut Option<&mut String>) {
     if line.is_empty() {
         return;
     }
@@ -234,6 +341,15 @@ fn process_line(s: &mut Session, line: &[u8]) {
     let is_user = memmem::find(f, b"\"role\":\"user\"").is_some();
     let is_asst = !is_user && memmem::find(f, b"\"role\":\"assistant\"").is_some();
 
+    if is_user || is_asst {
+        if let Some(sink) = text.as_deref_mut() {
+            // bounded, so one pathological session cannot eat the index
+            if sink.len() < (8 << 20) {
+                harvest_text(line, sink);
+            }
+        }
+    }
+
     if is_user {
         s.user_msgs += 1;
         if s.first_prompt.is_empty() && memmem::find(f, b"\"isMeta\":true").is_none() {
@@ -266,6 +382,27 @@ pub fn scan(
     is_subagent: bool,
     parent: Option<String>,
     prev: Option<&Session>,
+) -> Result<Session> {
+    scan_inner(path, is_subagent, parent, prev, None)
+}
+
+/// Scan, and also collect the conversation prose for the search index.
+pub fn scan_with_text(
+    path: &Path,
+    is_subagent: bool,
+    parent: Option<String>,
+    prev: Option<&Session>,
+    text: &mut String,
+) -> Result<Session> {
+    scan_inner(path, is_subagent, parent, prev, Some(text))
+}
+
+fn scan_inner(
+    path: &Path,
+    is_subagent: bool,
+    parent: Option<String>,
+    prev: Option<&Session>,
+    mut text: Option<&mut String>,
 ) -> Result<Session> {
     let md = fs::metadata(path)?;
     let size = md.len();
@@ -347,7 +484,7 @@ pub fn scan(
         } else {
             line
         };
-        process_line(&mut s, line);
+        process_line(&mut s, line, &mut text);
         if buf.capacity() > (1 << 20) {
             buf = Vec::with_capacity(1 << 14);
         }
@@ -503,5 +640,53 @@ mod tests {
         assert!(!is_real_user_text("Caveat: the messages below..."));
         assert!(!is_real_user_text("   "));
         assert!(is_real_user_text("actually do the thing"));
+    }
+}
+
+#[cfg(test)]
+mod harvest_tests {
+    use super::*;
+
+    #[test]
+    fn harvest_takes_prose_and_leaves_scaffolding() {
+        let line = br#"{"message":{"role":"assistant","content":[{"type":"text","text":"the disk is full"},{"type":"tool_use","name":"Bash","input":{"command":"zpool status"}}]},"type":"assistant"}"#;
+        let mut out = String::new();
+        harvest_text(line, &mut out);
+        assert!(out.contains("the disk is full"));
+        // the command that ran is worth finding, the JSON around it is not
+        assert!(out.contains("zpool status"));
+        assert!(!out.contains("tool_use"));
+        assert!(!out.contains("role"));
+    }
+
+    #[test]
+    fn harvest_drops_injected_context() {
+        // Otherwise every session matches every word in the memory file.
+        let line = br#"{"message":{"role":"user","content":[{"type":"text","text":"<system-reminder>NVENC needs cuda</system-reminder>check the disk"}]},"type":"user"}"#;
+        let mut out = String::new();
+        harvest_text(line, &mut out);
+        assert!(out.contains("check the disk"));
+        assert!(!out.to_lowercase().contains("nvenc"));
+    }
+
+    #[test]
+    fn harvest_takes_thinking() {
+        let line = br#"{"message":{"role":"assistant","content":[{"type":"thinking","thinking":"maybe the pool is degraded"}]},"type":"assistant"}"#;
+        let mut out = String::new();
+        harvest_text(line, &mut out);
+        assert!(out.contains("degraded"));
+    }
+
+    #[test]
+    fn harvest_unescapes_enough_to_tokenise() {
+        let line = br#"{"message":{"role":"user","content":[{"type":"text","text":"line one\nline two\ttabbed \"quoted\""}]},"type":"user"}"#;
+        let mut out = String::new();
+        harvest_text(line, &mut out);
+        assert!(
+            out.contains("line one line two"),
+            "escapes became spaces: {out:?}"
+        );
+        assert!(out.contains("tabbed"));
+        assert!(out.contains("quoted"));
     }
 }

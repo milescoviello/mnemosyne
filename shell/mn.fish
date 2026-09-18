@@ -8,10 +8,20 @@ function mn --description 'Browse, search, tag and resume Claude Code sessions (
     set -l mine
     set -l fwd
     set -l no_bypass 0
+    set -l take_value 0
     for a in $argv
+        if test $take_value -eq 1
+            set -a mine $a
+            set take_value 0
+            continue
+        end
         switch $a
             case --no-splash --subagents --no-model
                 set -a mine $a
+            case --restore
+                # takes a count, which belongs to mnemosyne and not to claude
+                set -a mine $a
+                set take_value 1
             case --ask --no-bypass
                 set no_bypass 1
             case '*'
