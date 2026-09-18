@@ -17,7 +17,23 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const REPO: &str = "milescoviello/mnemosyne";
-const ASSET: &str = "mnemosyne-x86_64-linux.tar.gz";
+/// The release asset for the platform this binary was built for.
+///
+/// Hardcoding one of these is a quiet way to hand an aarch64 machine an
+/// x86-64 binary, so it is derived from the build target.
+pub const fn asset() -> &'static str {
+    if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") {
+            "mnemosyne-aarch64-macos.tar.gz"
+        } else {
+            "mnemosyne-x86_64-macos.tar.gz"
+        }
+    } else if cfg!(target_arch = "aarch64") {
+        "mnemosyne-aarch64-linux.tar.gz"
+    } else {
+        "mnemosyne-x86_64-linux.tar.gz"
+    }
+}
 
 pub fn current() -> &'static str {
     env!("CARGO_PKG_VERSION")
@@ -100,6 +116,24 @@ pub fn latest_tag() -> Option<String> {
     v.get("tag_name")?.as_str().map(|s| s.to_string())
 }
 
+/// Hash a file, using whichever tool this platform ships: coreutils calls it
+/// sha256sum, macOS calls it shasum.
+fn sha256_of(path: &Path) -> Option<String> {
+    for (bin, args) in [("sha256sum", vec![]), ("shasum", vec!["-a", "256"])] {
+        if let Ok(out) = Command::new(bin).args(&args).arg(path).output() {
+            if out.status.success() {
+                if let Some(h) = String::from_utf8_lossy(&out.stdout)
+                    .split_whitespace()
+                    .next()
+                {
+                    return Some(h.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Where this binary lives, resolving symlinks so we replace the real file.
 fn own_path() -> Result<PathBuf> {
     let p = std::env::current_exe()?;
@@ -118,8 +152,11 @@ pub fn install_latest() -> Result<String> {
 
     let dir = std::env::temp_dir().join(format!("mnemosyne-update-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
-    let tarball = dir.join(ASSET);
-    let base = format!("https://github.com/{REPO}/releases/latest/download/{ASSET}");
+    let tarball = dir.join(asset());
+    let base = format!(
+        "https://github.com/{REPO}/releases/latest/download/{}",
+        asset()
+    );
 
     let bytes = curl(&[&base])?;
     std::fs::write(&tarball, &bytes)?;
@@ -132,12 +169,7 @@ pub fn install_latest() -> Result<String> {
         .next()
         .unwrap_or("")
         .to_string();
-    let got = Command::new("sha256sum").arg(&tarball).output()?;
-    let got = String::from_utf8_lossy(&got.stdout)
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_string();
+    let got = sha256_of(&tarball).unwrap_or_default();
     if want.is_empty() || want != got {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(anyhow!("checksum did not match — refusing to install"));
@@ -260,5 +292,41 @@ mod tests {
         let missing = std::env::temp_dir().join("mnemosyne-no-such-stamp-xyz");
         let _ = std::fs::remove_file(&missing);
         assert!(check_due(24));
+    }
+}
+
+#[cfg(test)]
+mod asset_tests {
+    use super::*;
+
+    #[test]
+    fn asset_matches_the_platform_it_was_built_for() {
+        let a = asset();
+        assert!(a.ends_with(".tar.gz"));
+        if cfg!(target_os = "macos") {
+            assert!(a.contains("macos"), "{a}");
+        } else {
+            assert!(a.contains("linux"), "{a}");
+        }
+        if cfg!(target_arch = "aarch64") {
+            assert!(a.contains("aarch64"), "{a}");
+        } else if cfg!(target_arch = "x86_64") {
+            assert!(a.contains("x86_64"), "{a}");
+        }
+    }
+
+    #[test]
+    fn asset_name_matches_what_the_release_workflow_publishes() {
+        // If these drift, the updater 404s on every machine.
+        let yml = include_str!("../.github/workflows/release.yml");
+        for name in [
+            "mnemosyne-x86_64-linux",
+            "mnemosyne-aarch64-linux",
+            "mnemosyne-x86_64-macos",
+            "mnemosyne-aarch64-macos",
+        ] {
+            assert!(yml.contains(name), "release workflow never builds {name}");
+        }
+        assert!(yml.contains(asset().trim_end_matches(".tar.gz")));
     }
 }

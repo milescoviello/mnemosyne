@@ -757,3 +757,181 @@ mod diag {
         assert!(s.entries > 0);
     }
 }
+
+#[cfg(test)]
+mod robustness_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn scan_lines(lines: &[&str]) -> Session {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("11112222-3333-4444-5555-666677778888.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        for l in lines {
+            writeln!(f, "{l}").unwrap();
+        }
+        drop(f);
+        scan(&path, false, None, None).unwrap()
+    }
+
+    #[test]
+    fn an_empty_transcript_scans_to_nothing() {
+        let s = scan_lines(&[]);
+        assert_eq!(s.entries, 0);
+        assert_eq!(s.title(), "(untitled session)");
+        assert_eq!(s.duration_secs(), 0);
+    }
+
+    #[test]
+    fn junk_lines_do_not_derail_the_scan() {
+        let s = scan_lines(&[
+            "not json",
+            "",
+            "{\"unterminated\": ",
+            r#"{"type":"ai-title","aiTitle":"survived","sessionId":"s"}"#,
+        ]);
+        assert_eq!(s.ai_title, "survived");
+    }
+
+    #[test]
+    fn carriage_returns_are_not_part_of_the_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        let line = r#"{"type":"ai-title","aiTitle":"windows line","sessionId":"s"}"#;
+        write!(f, "{line}\r\n").unwrap();
+        drop(f);
+        let s = scan(&path, false, None, None).unwrap();
+        assert_eq!(s.ai_title, "windows line");
+    }
+
+    #[test]
+    fn a_file_with_no_trailing_newline_still_gets_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"ai-title","aiTitle":"no newline","sessionId":"s"}"#,
+        )
+        .unwrap();
+        let s = scan(&path, false, None, None).unwrap();
+        // deliberately left unconsumed: a line without its terminator may be
+        // a write in progress
+        assert_eq!(s.ai_title, "");
+        assert_eq!(s.scanned_len, 0);
+    }
+
+    #[test]
+    fn unicode_survives_the_round_trip() {
+        let s = scan_lines(&[
+            r#"{"type":"ai-title","aiTitle":"Чёрный альбом — 日本語 ≈","sessionId":"s"}"#,
+        ]);
+        assert_eq!(s.ai_title, "Чёрный альбом — 日本語 ≈");
+    }
+
+    #[test]
+    fn the_latest_title_wins() {
+        let s = scan_lines(&[
+            r#"{"type":"ai-title","aiTitle":"first guess","sessionId":"s"}"#,
+            r#"{"type":"ai-title","aiTitle":"better title","sessionId":"s"}"#,
+        ]);
+        assert_eq!(s.ai_title, "better title");
+    }
+
+    #[test]
+    fn placeholder_models_are_not_recorded() {
+        for bogus in ["<synthetic>", "inherit", "sniff"] {
+            let line = format!(
+                r#"{{"message":{{"role":"assistant","model":"{bogus}","content":[]}},"type":"assistant"}}"#
+            );
+            let s = scan_lines(&[&line]);
+            assert_eq!(s.model, "", "{bogus} should not be treated as a model");
+        }
+    }
+
+    #[test]
+    fn the_last_real_model_is_the_one_kept() {
+        let s = scan_lines(&[
+            r#"{"message":{"role":"assistant","model":"claude-opus-4-8","content":[]},"type":"assistant"}"#,
+            r#"{"message":{"role":"assistant","model":"<synthetic>","content":[]},"type":"assistant"}"#,
+            r#"{"message":{"role":"assistant","model":"claude-opus-5","content":[]},"type":"assistant"}"#,
+        ]);
+        assert_eq!(s.model, "claude-opus-5");
+    }
+
+    #[test]
+    fn a_title_falls_back_to_the_opening_prompt_then_to_a_placeholder() {
+        let s = scan_lines(&[
+            r#"{"message":{"role":"user","content":[{"type":"text","text":"just do the thing"}]},"type":"user"}"#,
+        ]);
+        assert_eq!(s.title(), "just do the thing");
+
+        let empty = scan_lines(&[r#"{"type":"mode","mode":"normal","sessionId":"s"}"#]);
+        assert_eq!(empty.title(), "(untitled session)");
+    }
+
+    #[test]
+    fn token_counts_accumulate_over_many_turns() {
+        let turn = r#"{"message":{"role":"assistant","model":"claude-opus-5","content":[],"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":1}},"type":"assistant"}"#;
+        let s = scan_lines(&[turn, turn, turn]);
+        assert_eq!(s.in_tokens, 30);
+        assert_eq!(s.out_tokens, 15);
+        assert_eq!(s.cache_read, 300);
+        assert_eq!(s.cache_write, 3);
+        assert_eq!(s.total_tokens(), 348);
+    }
+
+    #[test]
+    fn a_turn_without_usage_contributes_nothing() {
+        let s = scan_lines(&[
+            r#"{"message":{"role":"assistant","model":"claude-opus-5","content":[]},"type":"assistant"}"#,
+        ]);
+        assert_eq!(s.total_tokens(), 0);
+    }
+
+    #[test]
+    fn subagents_know_who_their_parent_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent-abc.jsonl");
+        std::fs::write(&path, "{\"type\":\"mode\",\"mode\":\"normal\"}\n").unwrap();
+        let s = scan(&path, true, Some("parent-id".into()), None).unwrap();
+        assert!(s.is_subagent);
+        assert_eq!(s.parent.as_deref(), Some("parent-id"));
+        assert_eq!(s.title(), "(subagent)");
+    }
+
+    #[test]
+    fn a_shrinking_file_is_rescanned_from_scratch() {
+        // Truncation means our byte offset is meaningless.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.jsonl");
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                r#"{"type":"ai-title","aiTitle":"long version","sessionId":"s"}"#,
+                r#"{"message":{"role":"user","content":[{"type":"text","text":"hello"}]},"type":"user"}"#
+            ),
+        )
+        .unwrap();
+        let first = scan(&path, false, None, None).unwrap();
+        assert_eq!(first.entries, 2);
+
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                r#"{"type":"ai-title","aiTitle":"short","sessionId":"s"}"#
+            ),
+        )
+        .unwrap();
+        let second = scan(&path, false, None, Some(&first)).unwrap();
+        assert_eq!(
+            second.entries, 1,
+            "counted fresh, not added to the old total"
+        );
+        assert_eq!(second.ai_title, "short");
+    }
+}

@@ -151,3 +151,126 @@ pub fn tail_turns(s: &Session, want: usize) -> Vec<Turn> {
     }
     turns
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Session;
+    use std::io::Write;
+
+    fn write_transcript(lines: &[String]) -> (tempfile::TempDir, Session) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        for l in lines {
+            writeln!(f, "{l}").unwrap();
+        }
+        drop(f);
+        let size = std::fs::metadata(&path).unwrap().len();
+        let s = Session {
+            path,
+            size,
+            ..Default::default()
+        };
+        (dir, s)
+    }
+
+    fn user(text: &str) -> String {
+        format!(
+            r#"{{"parentUuid":"p","message":{{"role":"user","content":[{{"type":"text","text":"{text}"}}]}},"type":"user"}}"#
+        )
+    }
+    fn asst(text: &str) -> String {
+        format!(
+            r#"{{"parentUuid":"p","message":{{"role":"assistant","content":[{{"type":"text","text":"{text}"}}]}},"type":"assistant"}}"#
+        )
+    }
+
+    #[test]
+    fn reads_the_last_turns_in_order() {
+        let (_d, s) = write_transcript(&[user("one"), asst("two"), user("three")]);
+        let t = tail_turns(&s, 8);
+        assert_eq!(t.len(), 3);
+        assert_eq!(t[0].role, "you");
+        assert_eq!(t[2].text, "three");
+    }
+
+    #[test]
+    fn asking_for_fewer_gives_the_most_recent() {
+        let (_d, s) = write_transcript(&[user("one"), asst("two"), user("three")]);
+        let t = tail_turns(&s, 1);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].text, "three");
+    }
+
+    #[test]
+    fn tool_calls_are_named_not_dumped() {
+        let line = r#"{"parentUuid":"p","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"ls -la /very/long/path"}}]},"type":"assistant"}"#;
+        let (_d, s) = write_transcript(&[line.to_string()]);
+        let t = tail_turns(&s, 4);
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].text, "[Bash]");
+    }
+
+    #[test]
+    fn injected_and_meta_turns_are_skipped() {
+        let meta = r#"{"isMeta":true,"message":{"role":"user","content":[{"type":"text","text":"bookkeeping"}]},"type":"user"}"#;
+        let reminder = user("<system-reminder>not something you said</system-reminder>");
+        let (_d, s) = write_transcript(&[meta.to_string(), reminder, user("real question")]);
+        let t = tail_turns(&s, 8);
+        assert_eq!(t.len(), 1, "got {t:?}");
+        assert_eq!(t[0].text, "real question");
+    }
+
+    #[test]
+    fn malformed_lines_are_stepped_over() {
+        let (_d, s) = write_transcript(&[
+            user("before"),
+            "{not json at all".into(),
+            String::new(),
+            asst("after"),
+        ]);
+        let t = tail_turns(&s, 8);
+        assert_eq!(t.len(), 2);
+        assert_eq!(t[1].text, "after");
+    }
+
+    #[test]
+    fn an_empty_transcript_yields_nothing_rather_than_panicking() {
+        let (_d, s) = write_transcript(&[]);
+        assert!(tail_turns(&s, 8).is_empty());
+    }
+
+    #[test]
+    fn a_missing_file_yields_nothing() {
+        let s = Session {
+            path: "/definitely/not/here.jsonl".into(),
+            size: 999,
+            ..Default::default()
+        };
+        assert!(tail_turns(&s, 8).is_empty());
+        assert_eq!(load_turns(&s, 1 << 20, 10).0.len(), 0);
+    }
+
+    #[test]
+    fn load_turns_reports_when_it_left_something_out() {
+        let many: Vec<String> = (0..40).map(|i| user(&format!("line {i}"))).collect();
+        let (_d, s) = write_transcript(&many);
+        let (turns, more) = load_turns(&s, 1 << 20, 10);
+        assert_eq!(turns.len(), 10);
+        assert!(more, "it clipped, so it must say so");
+        let (all, more) = load_turns(&s, 1 << 20, 500);
+        assert_eq!(all.len(), 40);
+        assert!(!more, "nothing was left out");
+    }
+
+    #[test]
+    fn a_tiny_byte_budget_still_returns_something_readable() {
+        let many: Vec<String> = (0..200).map(|i| user(&format!("line {i}"))).collect();
+        let (_d, s) = write_transcript(&many);
+        let (turns, more) = load_turns(&s, 2048, 500);
+        assert!(!turns.is_empty(), "the tail should still parse");
+        assert!(more, "reading only the tail means there was more");
+        assert!(turns.last().unwrap().text.contains("199"));
+    }
+}

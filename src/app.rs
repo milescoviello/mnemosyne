@@ -1467,3 +1467,556 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+pub mod fixtures {
+    use super::*;
+    use crate::live::LiveMap;
+    use crate::model::Session;
+    use std::path::PathBuf;
+
+    pub fn session(id: &str, title: &str, cwd: &str, age_days: i64) -> Session {
+        let now = chrono::Utc::now().timestamp();
+        Session {
+            id: id.into(),
+            path: PathBuf::from(format!("/p/{id}.jsonl")),
+            cwd: cwd.into(),
+            ai_title: title.into(),
+            last_prompt: format!("last thing said in {title}"),
+            model: "claude-opus-5".into(),
+            permission_mode: "bypassPermissions".into(),
+            size: 1_000 * (age_days as u64 + 1),
+            mtime: now - age_days * 86_400,
+            first_ts: now - age_days * 86_400 - 600,
+            last_ts: now - age_days * 86_400,
+            entries: 10 * (age_days as u32 + 1),
+            user_msgs: 5,
+            assistant_msgs: 5,
+            in_tokens: 1_000,
+            out_tokens: 2_000,
+            cache_read: 3_000_000,
+            ..Default::default()
+        }
+    }
+
+    pub fn subagent(id: &str, parent: &str) -> Session {
+        let mut s = session(id, "", "/home/u/proj", 1);
+        s.is_subagent = true;
+        s.parent = Some(parent.into());
+        s.first_prompt = format!("subagent work for {parent}");
+        s
+    }
+
+    /// A corpus with a bit of everything the interface has to cope with.
+    pub fn corpus() -> Vec<Session> {
+        let mut v = vec![
+            session("aaaaaaaa-1", "today's work", "/home/u", 0),
+            session("bbbbbbbb-2", "yesterday's thing", "/home/u/proj", 1),
+            session("cccccccc-3", "last week", "/home/u/proj", 5),
+            session("dddddddd-4", "last month", "/home/u/other", 20),
+            session("eeeeeeee-5", "ancient", "/home/u", 300),
+            session("ffffffff-6", "", "", 2), // no title, no cwd
+        ];
+        v[2].tags = vec!["eft".into()];
+        v[3].cwd_missing = true;
+        v.push(subagent("agent-a1", "aaaaaaaa-1"));
+        v.push(subagent("agent-a2", "aaaaaaaa-1"));
+        v
+    }
+
+    pub fn app() -> App {
+        // Favourites and tags belong to the overlay, not the scanned session:
+        // apply_overlay rewrites those fields from Meta every time.
+        let mut meta = crate::meta::Meta::default();
+        meta.toggle_favorite("aaaaaaaa-1");
+        meta.add_tag("cccccccc-3", "eft");
+        app_with(meta, true)
+    }
+
+    pub fn app_with(meta: crate::meta::Meta, restore_model: bool) -> App {
+        let live = LiveMap {
+            by_id: Default::default(),
+            by_cwd: Default::default(),
+            count: 0,
+            supported: true,
+        };
+        App::new(corpus(), meta, live, restore_model)
+    }
+}
+
+#[cfg(test)]
+mod logic_tests {
+    use super::fixtures::*;
+    use super::*;
+
+    /// The cursor must always be on something you can act on.
+    fn assert_cursor_valid(a: &App) {
+        if a.item_count() == 0 {
+            return;
+        }
+        let row = a.view.get(a.cursor);
+        assert!(
+            row.map(|r| r.selectable()).unwrap_or(false),
+            "cursor landed on {:?} (index {} of {})",
+            row,
+            a.cursor,
+            a.view.len()
+        );
+    }
+
+    #[test]
+    fn subagents_are_children_not_entries() {
+        let a = app();
+        assert_eq!(a.item_count(), 6, "the two subagents are not top-level");
+        assert_cursor_valid(&a);
+    }
+
+    #[test]
+    fn favourites_float_to_the_top() {
+        let a = app();
+        let first = a.current().unwrap();
+        assert!(first.favorite, "got {:?}", first.title());
+    }
+
+    #[test]
+    fn every_sort_leaves_the_cursor_somewhere_valid() {
+        let mut a = app();
+        for _ in 0..8 {
+            a.do_action(Action::CycleSort);
+            assert_cursor_valid(&a);
+            assert!(a.item_count() > 0);
+        }
+    }
+
+    #[test]
+    fn sorting_by_tokens_orders_by_tokens() {
+        let mut a = app();
+        a.all[2].cache_read = 9_000_000_000;
+        a.set_sort(Sort::Tokens);
+        // favourites still float, so check the rest is descending
+        let got: Vec<u64> = a
+            .view
+            .iter()
+            .filter_map(|r| match r {
+                Row::Item(i) => Some(a.all[*i].total_tokens()),
+                _ => None,
+            })
+            .skip(1)
+            .collect();
+        let mut sorted = got.clone();
+        sorted.sort_unstable_by(|x, y| y.cmp(x));
+        assert_eq!(got, sorted);
+    }
+
+    #[test]
+    fn date_bands_appear_only_under_recency() {
+        let mut a = app();
+        let bands = |a: &App| {
+            a.view
+                .iter()
+                .filter(|r| matches!(r, Row::Divider(_)))
+                .count()
+        };
+        assert!(bands(&a) > 1, "recency view is banded");
+        a.set_sort(Sort::Size);
+        assert_eq!(bands(&a), 0, "bands mean nothing outside time order");
+        a.do_action(Action::GroupByDir);
+        assert_eq!(bands(&a), 0, "grouped mode has its own headings");
+    }
+
+    #[test]
+    fn grouping_makes_one_heading_per_directory() {
+        let mut a = app();
+        a.do_action(Action::GroupByDir);
+        let mut heads: Vec<String> = a
+            .view
+            .iter()
+            .filter_map(|r| match r {
+                Row::Header(d, _) => Some(d.clone()),
+                _ => None,
+            })
+            .collect();
+        let before = heads.len();
+        heads.sort();
+        heads.dedup();
+        assert_eq!(before, heads.len(), "a folder appeared twice: {heads:?}");
+        assert_cursor_valid(&a);
+    }
+
+    #[test]
+    fn filtering_narrows_and_clearing_restores() {
+        let mut a = app();
+        let all = a.item_count();
+        a.fuzzy = "ancient".into();
+        a.rebuild();
+        assert_eq!(a.item_count(), 1);
+        assert_cursor_valid(&a);
+        a.do_action(Action::Clear);
+        assert_eq!(a.item_count(), all);
+    }
+
+    #[test]
+    fn a_filter_matching_nothing_is_survivable() {
+        let mut a = app();
+        a.fuzzy = "zzzzzzzzzzzz-no-such-thing".into();
+        a.rebuild();
+        assert_eq!(a.item_count(), 0);
+        assert!(a.current().is_none());
+        // and none of these may panic with an empty view
+        a.do_action(Action::CycleSort);
+        a.do_action(Action::Favorite);
+        a.do_action(Action::Resume);
+        a.preview(3);
+    }
+
+    #[test]
+    fn sessions_are_findable_by_id() {
+        let mut a = app();
+        a.fuzzy = "eeeeeeee".into();
+        a.rebuild();
+        assert_eq!(a.item_count(), 1);
+        assert_eq!(a.current().unwrap().title(), "ancient");
+    }
+
+    #[test]
+    fn favourites_only_shows_just_those() {
+        let mut a = app();
+        a.do_action(Action::FavOnly);
+        assert_eq!(a.item_count(), 1);
+        assert!(a.current().unwrap().favorite);
+    }
+
+    #[test]
+    fn date_range_excludes_the_old() {
+        let mut a = app();
+        a.date = DateRange::Days(7);
+        a.rebuild();
+        let titles: Vec<&str> = a
+            .view
+            .iter()
+            .filter_map(|r| match r {
+                Row::Item(i) => Some(a.all[*i].title()),
+                _ => None,
+            })
+            .collect();
+        assert!(!titles.contains(&"ancient"), "{titles:?}");
+        assert!(titles.contains(&"today's work"));
+    }
+
+    #[test]
+    fn expanding_reveals_subagents_and_collapsing_hides_them() {
+        let mut a = app();
+        a.do_action(Action::Subagents);
+        let subs = |a: &App| a.view.iter().filter(|r| matches!(r, Row::Sub(_))).count();
+        assert_eq!(subs(&a), 0, "collapsed to begin with");
+        a.expanded.insert("aaaaaaaa-1".into());
+        a.rebuild();
+        assert_eq!(subs(&a), 2);
+        assert_cursor_valid(&a);
+        a.expanded.clear();
+        a.rebuild();
+        assert_eq!(subs(&a), 0);
+    }
+
+    #[test]
+    fn tagging_applies_to_a_selection_and_not_beyond_it() {
+        let mut a = app();
+        let first = a.all[0].path.to_string_lossy().to_string();
+        let second = a.all[1].path.to_string_lossy().to_string();
+        a.selected.insert(first);
+        a.selected.insert(second);
+        assert_eq!(a.tag_targets().len(), 2);
+        a.selected.clear();
+        assert_eq!(
+            a.tag_targets().len(),
+            1,
+            "no selection means the cursor row"
+        );
+    }
+
+    #[test]
+    fn resuming_something_already_running_is_refused() {
+        let mut a = app();
+        a.all[0].live_exact = true;
+        a.all[0].live_pid = Some(4242);
+        a.apply_overlay();
+        a.all[0].live_exact = true;
+        a.all[0].live_pid = Some(4242);
+        a.cursor = a
+            .view
+            .iter()
+            .position(|r| matches!(r, Row::Item(0)))
+            .unwrap_or(0);
+        a.do_action(Action::Resume);
+        assert!(a.outcome.is_none(), "should not have resumed");
+        assert!(a.status.contains("4242"), "status was {:?}", a.status);
+    }
+
+    #[test]
+    fn a_tmux_session_redirects_you_to_ctrl_t() {
+        let mut a = app();
+        a.all[0].has_tmux = true;
+        a.cursor = a
+            .view
+            .iter()
+            .position(|r| matches!(r, Row::Item(0)))
+            .unwrap_or(0);
+        a.do_action(Action::Resume);
+        assert!(a.outcome.is_none());
+        assert!(a.status.contains("ctrl+t"), "status was {:?}", a.status);
+    }
+
+    #[test]
+    fn resuming_in_tmux_is_never_refused() {
+        let mut a = app();
+        a.all[0].has_tmux = true;
+        a.all[0].live_exact = true;
+        a.do_action(Action::Tmux);
+        assert!(
+            a.outcome.is_some(),
+            "tmux attach is the right move, not a clash"
+        );
+    }
+
+    #[test]
+    fn a_resume_target_carries_what_the_shell_needs() {
+        let mut a = app();
+        a.do_action(Action::Resume);
+        let Some(Outcome::Resume { targets, .. }) = &a.outcome else {
+            panic!("no outcome");
+        };
+        let t = &targets[0];
+        assert!(!t.id.is_empty());
+        assert_eq!(t.model, "claude-opus-5");
+        assert_eq!(t.perms, "bypassPermissions");
+    }
+
+    #[test]
+    fn no_model_restoration_means_no_model_flag() {
+        let mut a = app_with(crate::meta::Meta::default(), false);
+        a.do_action(Action::Resume);
+        let Some(Outcome::Resume { targets, .. }) = &a.outcome else {
+            panic!("no outcome");
+        };
+        assert!(targets[0].model.is_empty());
+    }
+
+    #[test]
+    fn moving_stays_in_bounds_however_hard_you_push() {
+        let mut a = app();
+        for _ in 0..200 {
+            a.on_key(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Down,
+            ));
+        }
+        assert_cursor_valid(&a);
+        for _ in 0..200 {
+            a.on_key(crossterm::event::KeyEvent::from(
+                crossterm::event::KeyCode::Up,
+            ));
+        }
+        assert_cursor_valid(&a);
+        let first_selectable = a.view.iter().position(|r| r.selectable()).unwrap();
+        assert_eq!(
+            a.cursor, first_selectable,
+            "the top of the list, skipping the date band above it"
+        );
+    }
+
+    #[test]
+    fn corpus_tokens_counts_everything_including_subagents() {
+        let a = app();
+        let expected: u64 = a.all.iter().map(|s| s.total_tokens()).sum();
+        assert_eq!(a.corpus_tokens, expected);
+        assert!(a.corpus_tokens > 0);
+    }
+}
+
+#[cfg(test)]
+mod mouse_tests {
+    use super::fixtures::*;
+    use super::*;
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+
+    fn at(kind: MouseEventKind, x: u16, y: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+    fn click(x: u16, y: u16) -> MouseEvent {
+        at(MouseEventKind::Down(MouseButton::Left), x, y)
+    }
+
+    /// Screen row of the nth selectable entry. Hardcoding a row number lands
+    /// on a date band as soon as the fixture shifts.
+    fn row_y(a: &App, nth: usize) -> u16 {
+        let idx = a
+            .view
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.selectable())
+            .map(|(i, _)| i)
+            .nth(nth)
+            .expect("that many rows");
+        a.hits.list.y + idx as u16
+    }
+
+    /// Stand in for what the renderer would have recorded.
+    fn laid_out(a: &mut App) {
+        a.hits.list = Rect::new(0, 3, 120, 10);
+        a.hits.list_offset = 0;
+        a.hits.colhead_y = 2;
+        a.hits.footer_y = 20;
+        a.hits.columns = vec![(8, 12, Sort::Recency), (20, 26, Sort::Title)];
+        a.hits.footer = vec![(2, 10, Action::Resume), (12, 20, Action::Help)];
+        a.sub_span = (35, 40);
+    }
+
+    #[test]
+    fn clicking_a_row_moves_the_cursor_there() {
+        let mut a = app();
+        laid_out(&mut a);
+        let y = row_y(&a, 2);
+        a.on_mouse(click(60, y));
+        assert_eq!(a.cursor as u16 + a.hits.list.y, y);
+        assert!(a.view[a.cursor].selectable());
+    }
+
+    #[test]
+    fn clicking_a_date_band_does_nothing() {
+        let mut a = app();
+        laid_out(&mut a);
+        let band = a
+            .view
+            .iter()
+            .position(|r| matches!(r, Row::Divider(_)))
+            .expect("a band");
+        let before = a.cursor;
+        a.on_mouse(click(60, 3 + band as u16));
+        assert_eq!(a.cursor, before, "bands are not selectable");
+    }
+
+    #[test]
+    fn clicking_below_the_list_is_ignored() {
+        let mut a = app();
+        laid_out(&mut a);
+        let before = a.cursor;
+        a.on_mouse(click(60, 19));
+        assert_eq!(a.cursor, before);
+    }
+
+    #[test]
+    fn a_column_heading_sorts_by_that_column() {
+        let mut a = app();
+        laid_out(&mut a);
+        a.on_mouse(click(22, 2));
+        assert_eq!(a.sort, Sort::Title);
+    }
+
+    #[test]
+    fn a_footer_hint_only_fires_on_the_footer_row() {
+        // The bug this guards: the footer used to claim any click sharing its
+        // column, so clicking a list row silently did something else.
+        let mut a = app();
+        laid_out(&mut a);
+        a.on_mouse(click(14, 6));
+        assert_ne!(a.input_mode, InputMode::Help, "a list click opened help");
+
+        a.on_mouse(click(14, 20));
+        assert_eq!(
+            a.input_mode,
+            InputMode::Help,
+            "the footer hint did not fire"
+        );
+    }
+
+    #[test]
+    fn right_click_toggles_the_favourite_under_it() {
+        let mut a = app();
+        laid_out(&mut a);
+        let y = row_y(&a, 1); // not the one already favourited
+        a.on_mouse(click(60, y));
+        let id = a.current().unwrap().id.clone();
+        let before = a.meta.get(&id).map(|e| e.favorite).unwrap_or(false);
+        a.on_mouse(at(MouseEventKind::Down(MouseButton::Right), 60, y));
+        let after = a.meta.get(&id).map(|e| e.favorite).unwrap_or(false);
+        assert_ne!(before, after, "right-click did not toggle {id}");
+    }
+
+    #[test]
+    fn the_wheel_moves_through_the_list() {
+        let mut a = app();
+        laid_out(&mut a);
+        let before = a.cursor;
+        a.on_mouse(at(MouseEventKind::ScrollDown, 60, 6));
+        assert!(a.cursor > before);
+        a.on_mouse(at(MouseEventKind::ScrollUp, 60, 6));
+        a.on_mouse(at(MouseEventKind::ScrollUp, 60, 6));
+        assert!(a.cursor <= before);
+    }
+
+    #[test]
+    fn two_clicks_on_one_row_resume_it() {
+        let mut a = app();
+        laid_out(&mut a);
+        let y = row_y(&a, 1);
+        a.on_mouse(click(60, y));
+        assert!(a.outcome.is_none(), "one click only selects");
+        a.on_mouse(click(60, y));
+        assert!(a.outcome.is_some(), "the second click should resume");
+    }
+
+    #[test]
+    fn clicking_two_different_rows_is_not_a_double_click() {
+        let mut a = app();
+        laid_out(&mut a);
+        a.on_mouse(click(60, row_y(&a, 1)));
+        a.on_mouse(click(60, row_y(&a, 2)));
+        assert!(a.outcome.is_none(), "different rows must not resume");
+    }
+
+    #[test]
+    fn clicking_the_subagent_count_expands_it() {
+        let mut a = app();
+        a.do_action(Action::Subagents);
+        a.all[0].subagent_count = 2;
+        laid_out(&mut a);
+        let row = a
+            .view
+            .iter()
+            .position(|r| matches!(r, Row::Item(0)))
+            .expect("the parent row");
+        a.on_mouse(click(37, 3 + row as u16));
+        assert!(
+            a.expanded.contains("aaaaaaaa-1"),
+            "the ⌁ cell did not expand"
+        );
+    }
+
+    #[test]
+    fn a_click_closes_the_help_rather_than_acting_on_the_list() {
+        let mut a = app();
+        laid_out(&mut a);
+        a.input_mode = InputMode::Help;
+        a.on_mouse(click(60, 6));
+        assert_eq!(a.input_mode, InputMode::Normal);
+        assert!(a.outcome.is_none());
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_viewer_not_the_list() {
+        let mut a = app();
+        laid_out(&mut a);
+        a.input_mode = InputMode::Viewer;
+        a.viewer_height = 100;
+        a.viewer_page = 10;
+        let cursor = a.cursor;
+        a.on_mouse(at(MouseEventKind::ScrollDown, 60, 6));
+        assert_eq!(a.cursor, cursor, "the list must not move");
+        assert!(a.viewer_scroll > 0);
+    }
+}

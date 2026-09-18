@@ -39,6 +39,44 @@ pub const fn detection_supported() -> bool {
     cfg!(target_os = "linux")
 }
 
+/// Pull `--resume` and `--model` out of a claude command line.
+///
+/// `-r` with no argument is normal (it opens Claude's own picker), so a value
+/// is only taken when it actually looks like a session id — otherwise the
+/// next flag would be swallowed as one.
+pub fn parse_claude_args(args: &[String]) -> (Option<String>, Option<String>) {
+    let mut resume_id = None;
+    let mut model = None;
+    for (i, a) in args.iter().enumerate() {
+        let a = a.as_str();
+        let next = args.get(i + 1).map(|s| s.as_str());
+        match a {
+            "--resume" | "-r" => {
+                if let Some(v) = next {
+                    if looks_like_uuid(v) {
+                        resume_id = Some(v.to_string());
+                    }
+                }
+            }
+            "--model" => {
+                if let Some(v) = next {
+                    model = Some(v.to_string());
+                }
+            }
+            _ => {
+                if let Some(v) = a.strip_prefix("--resume=") {
+                    if looks_like_uuid(v) {
+                        resume_id = Some(v.to_string());
+                    }
+                } else if let Some(v) = a.strip_prefix("--model=") {
+                    model = Some(v.to_string());
+                }
+            }
+        }
+    }
+    (resume_id, model)
+}
+
 pub fn scan_procs() -> Vec<Proc> {
     let mut out = Vec::new();
     if !detection_supported() {
@@ -76,37 +114,7 @@ pub fn scan_procs() -> Vec<Proc> {
             continue;
         }
 
-        let mut resume_id = None;
-        let mut model = None;
-        let mut i = 0;
-        while i < args.len() {
-            let a = args[i].as_str();
-            let next = args.get(i + 1).map(|s| s.as_str());
-            match a {
-                "--resume" | "-r" => {
-                    if let Some(v) = next {
-                        if looks_like_uuid(v) {
-                            resume_id = Some(v.to_string());
-                        }
-                    }
-                }
-                "--model" => {
-                    if let Some(v) = next {
-                        model = Some(v.to_string());
-                    }
-                }
-                _ => {
-                    if let Some(v) = a.strip_prefix("--resume=") {
-                        if looks_like_uuid(v) {
-                            resume_id = Some(v.to_string());
-                        }
-                    } else if let Some(v) = a.strip_prefix("--model=") {
-                        model = Some(v.to_string());
-                    }
-                }
-            }
-            i += 1;
-        }
+        let (resume_id, model) = parse_claude_args(&args);
 
         let cwd = std::fs::read_link(format!("{base}/cwd"))
             .map(|p| p.to_string_lossy().into_owned())
@@ -192,6 +200,44 @@ mod tests {
         assert_eq!(n, "mn-026bcdb5");
         // the prefix is what keeps us away from sessions the user made
         assert!(n.starts_with(TMUX_PREFIX));
+    }
+
+    fn argv(s: &str) -> Vec<String> {
+        s.split_whitespace().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn a_resumed_session_is_identified_exactly() {
+        let (id, model) = parse_claude_args(&argv(
+            "claude --resume 026bcdb5-8d88-4ad7-9f23-58649bf4f353 --model claude-opus-5",
+        ));
+        assert_eq!(id.as_deref(), Some("026bcdb5-8d88-4ad7-9f23-58649bf4f353"));
+        assert_eq!(model.as_deref(), Some("claude-opus-5"));
+    }
+
+    #[test]
+    fn the_equals_form_works_too() {
+        let (id, model) = parse_claude_args(&argv(
+            "claude --resume=026bcdb5-8d88-4ad7-9f23-58649bf4f353 --model=qwen3.8-27b",
+        ));
+        assert!(id.is_some());
+        assert_eq!(model.as_deref(), Some("qwen3.8-27b"));
+    }
+
+    #[test]
+    fn a_bare_dash_r_does_not_swallow_the_next_flag() {
+        // `claude -r` on its own opens Claude's own picker; the flag after it
+        // is a flag, not a session.
+        let (id, _) = parse_claude_args(&argv("claude --dangerously-skip-permissions -r"));
+        assert_eq!(id, None);
+        let (id, _) = parse_claude_args(&argv("claude -r --dangerously-skip-permissions"));
+        assert_eq!(id, None, "swallowed a flag as a session id");
+    }
+
+    #[test]
+    fn a_plain_claude_has_nothing_to_identify_it() {
+        let (id, model) = parse_claude_args(&argv("claude"));
+        assert!(id.is_none() && model.is_none());
     }
 
     #[test]

@@ -410,7 +410,7 @@ worth keeping as a fallback if the binary is ever missing:
 ## Development
 
 ```sh
-cargo test          # 36 tests, no network or fixtures on disk
+cargo test          # 134 tests, no network and no fixtures on disk
 cargo clippy --all-targets -- -D warnings
 python3 tools/gen-wordmark.py     # regenerate the logo (needs Pillow)
 python3 tools/tui-drive.py '["./target/release/mnemosyne","--no-splash"]' '["DOWN","v"]'
@@ -423,10 +423,25 @@ it in the same pass — finding coordinates in one run and clicking in another
 races against a transcript corpus that is being appended to while you look at
 it.
 
-The tests deliberately pin the findings that were expensive to discover: that
-a line cannot be classified by its first `"type":"`, that injected context and
-base64 have to be excluded from search, that permission mode is read from the
-start of a session, and that a scanner change must invalidate the cache.
+The tests pin the findings that were expensive to discover — that a line
+cannot be classified by its first `"type":"`, that injected context and base64
+have to be excluded from search, that permission mode is read from the start
+of a session, that a scanner change must invalidate the cache — and the bugs
+that actually shipped.
+
+The interface is rendered into a `TestBackend` at 189 terminal sizes, from
+20×4 to 240×50, in every mode: filtered, grouped, searching, mid-typing, help
+on both pages, the viewer, and with nothing matching at all. That suite caught
+two real bugs the first time it ran: a header that still collided at twenty
+columns, and a word-wrapper that silently widened the width it was handed.
+Anything to do with layout arithmetic has broken here before, always at a size
+nobody tried by hand.
+
+Alongside that: the scan-to-index-to-search pipeline end to end on synthetic
+transcripts, mouse hit-testing against a recorded layout, and the cases that
+tend to be skipped — an empty transcript, malformed JSON mid-file, CRLF, a
+file with no trailing newline, a transcript that shrank, unicode titles, and
+a search query made of FTS5 syntax.
 
 ## License
 

@@ -25,18 +25,47 @@ have() { command -v "$1" >/dev/null 2>&1; }
 SHELLSRC="$here/shell"
 KEEP=""
 
+# Which release asset matches this machine, if any.
+asset_for_platform() {
+    local os arch
+    case "$(uname -s)" in
+        Linux) os=linux ;;
+        Darwin) os=macos ;;
+        *) return 1 ;;
+    esac
+    case "$(uname -m)" in
+        x86_64 | amd64) arch=x86_64 ;;
+        aarch64 | arm64) arch=aarch64 ;;
+        *) return 1 ;;
+    esac
+    printf 'mnemosyne-%s-%s.tar.gz' "$arch" "$os"
+}
+
+# coreutils calls it sha256sum; macOS calls it shasum.
+sha256_of() {
+    if have sha256sum; then
+        sha256sum "$1" | awk '{print $1}'
+    elif have shasum; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
 fetch_prebuilt() {
-    [ "$(uname -s)" = "Linux" ] && [ "$(uname -m)" = "x86_64" ] || return 1
     have curl || return 1
-    local url tmp
-    url="https://github.com/$REPO/releases/latest/download/mnemosyne-x86_64-linux.tar.gz"
+    local url tmp name
+    name="$(asset_for_platform)" || return 1
+    url="https://github.com/$REPO/releases/latest/download/$name"
     tmp="$(mktemp -d)"
     KEEP="$tmp"
-    say "fetching the latest release…"
+    say "fetching the latest release for $(uname -s) $(uname -m)…"
     curl -fsSL "$url" -o "$tmp/m.tar.gz" || return 1
-    if curl -fsSL "$url.sha256" -o "$tmp/m.sha256" 2>/dev/null && have sha256sum; then
-        ( cd "$tmp" && sed "s|  .*|  m.tar.gz|" m.sha256 | sha256sum -c - >/dev/null ) \
-            || { say "checksum did not match — falling back to building"; return 1; }
+    if curl -fsSL "$url.sha256" -o "$tmp/m.sha256" 2>/dev/null; then
+        want="$(awk '{print $1}' "$tmp/m.sha256")"
+        got="$(sha256_of "$tmp/m.tar.gz")"
+        if [ -n "$want" ] && [ -n "$got" ] && [ "$want" != "$got" ]; then
+            say "checksum did not match — falling back to building"
+            return 1
+        fi
     fi
     tar -C "$tmp" -xzf "$tmp/m.tar.gz" || return 1
     mkdir -p "$bindir"
@@ -48,8 +77,9 @@ fetch_prebuilt() {
 
 build_from_source() {
     have cargo || {
-        say "no prebuilt binary for this platform and no cargo to build with."
-        say "install rust from https://rustup.rs and re-run."
+        say "no prebuilt binary for $(uname -s) $(uname -m), and no cargo to build with."
+        say "install rust from https://rustup.rs and re-run, or open an issue"
+        say "asking for this platform to be added to the release build."
         exit 1
     }
     say "building…"

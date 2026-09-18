@@ -101,14 +101,19 @@ const PREVIEW_MIN: usize = 20;
 
 impl Cols {
     fn new(width: usize) -> Cols {
+        // Each column has to earn its place. Below these widths there is not
+        // enough room for the table to be worth more than the title, so they
+        // are dropped rather than allowed to overflow.
         let folder = if width >= 150 {
             20
         } else if width >= 120 {
             16
-        } else {
+        } else if width >= 56 {
             12
+        } else {
+            0
         };
-        let sub = 5;
+        let sub = if width >= 50 { 5 } else { 0 };
         let model = if width >= 150 {
             12
         } else if width >= 110 {
@@ -116,11 +121,12 @@ impl Cols {
         } else {
             0
         };
-        let msgs = 6;
+        let msgs = if width >= 44 { 6 } else { 0 };
         let tokens = if width >= 168 { 8 } else { 0 };
         let tags = if width >= 140 { 16 } else { 0 };
-        let fixed = PREFIX + 4 + 2 + folder + 1 + sub + model + msgs + tokens + tags;
-        let avail = width.saturating_sub(fixed).max(16);
+        let gap = if folder > 0 { 1 } else { 0 };
+        let fixed = PREFIX + 4 + 2 + folder + gap + sub + model + msgs + tokens + tags;
+        let avail = width.saturating_sub(fixed).max(8);
         let (title, preview) = if avail >= TITLE_MAX + PREVIEW_MIN + 2 {
             (TITLE_MAX, avail - TITLE_MAX - 2)
         } else {
@@ -143,7 +149,9 @@ impl Cols {
 /// line. ratatui's own wrapping cannot hang-indent continuations, and a reply
 /// that wraps back to column zero is hard to read against the speaker labels.
 fn wrap_words(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(8);
+    // Honour the width asked for. Clamping it upward produced lines wider
+    // than the caller had room for, which is the one thing wrapping is for.
+    let width = width.max(1);
     let mut out: Vec<String> = Vec::new();
     let mut line = String::new();
     let mut len = 0usize;
@@ -526,7 +534,7 @@ fn draw_wordmark(f: &mut Frame, app: &App, area: Rect) {
     loop {
         let joined: usize =
             segs.iter().map(|(_, v)| seg_len(v)).sum::<usize>() + 3 * segs.len().saturating_sub(1);
-        if lw + joined + MARGIN + 2 <= width || segs.len() <= 1 {
+        if lw + joined + MARGIN + 2 <= width || segs.is_empty() {
             break;
         }
         let worst = segs
@@ -587,15 +595,19 @@ fn draw_colheads(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
         Some(Sort::Recency),
         hits,
     );
-    head(
-        &mut spans,
-        &mut x,
-        format!("{:<w$} ", "FOLDER", w = c.folder),
-        c.folder + 1,
-        Some(Sort::Folder),
-        hits,
-    );
-    head(&mut spans, &mut x, " ".repeat(c.sub), c.sub, None, hits);
+    if c.folder > 0 {
+        head(
+            &mut spans,
+            &mut x,
+            format!("{:<w$} ", "FOLDER", w = c.folder),
+            c.folder + 1,
+            Some(Sort::Folder),
+            hits,
+        );
+    }
+    if c.sub > 0 {
+        head(&mut spans, &mut x, " ".repeat(c.sub), c.sub, None, hits);
+    }
     head(
         &mut spans,
         &mut x,
@@ -622,14 +634,16 @@ fn draw_colheads(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
         None,
         hits,
     );
-    head(
-        &mut spans,
-        &mut x,
-        format!("{:>w$}", "MSGS", w = c.msgs),
-        c.msgs,
-        Some(Sort::Entries),
-        hits,
-    );
+    if c.msgs > 0 {
+        head(
+            &mut spans,
+            &mut x,
+            format!("{:>w$}", "MSGS", w = c.msgs),
+            c.msgs,
+            Some(Sort::Entries),
+            hits,
+        );
+    }
     if c.tokens > 0 {
         head(
             &mut spans,
@@ -743,7 +757,9 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                 ));
                 sp.push(Span::raw("  "));
 
-                if is_sub {
+                if c.folder == 0 {
+                    // dropped on a narrow terminal
+                } else if is_sub {
                     sp.push(Span::styled(
                         format!("{:<w$} ", "└ subagent", w = c.folder),
                         Style::default().fg(th().chrome),
@@ -767,7 +783,9 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                     ));
                 }
 
-                if s.subagent_count > 0 && !is_sub {
+                if c.sub == 0 {
+                    // dropped on a narrow terminal
+                } else if s.subagent_count > 0 && !is_sub {
                     sp.push(Span::styled(
                         format!(
                             "{:<w$}",
@@ -816,10 +834,12 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                         Style::default().fg(th().chrome),
                     ));
                 }
-                sp.push(Span::styled(
-                    format!("{:>w$}", compact_count(s.entries), w = c.msgs),
-                    Style::default().fg(th().chrome),
-                ));
+                if c.msgs > 0 {
+                    sp.push(Span::styled(
+                        format!("{:>w$}", compact_count(s.entries), w = c.msgs),
+                        Style::default().fg(th().chrome),
+                    ));
+                }
                 if c.tokens > 0 {
                     // Token totals run into the billions, well past u32;
                     // clamping to it made every large session read 4295.0m.
@@ -1473,4 +1493,253 @@ fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
         .block(Block::default().style(Style::default().bg(th().panel))),
         chrome[2],
     );
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use crate::app::fixtures::app;
+    use crate::app::{App, HelpPage, InputMode};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    /// Render once and hand back the screen as text rows.
+    fn render(app: &mut App, w: u16, h: u16) -> Vec<String> {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| {
+                (0..w)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// Sizes worth caring about, from silly to wide.
+    fn sizes() -> Vec<(u16, u16)> {
+        let mut v = Vec::new();
+        for w in [
+            20u16, 24, 32, 40, 44, 50, 55, 58, 64, 70, 80, 90, 100, 110, 120, 140, 150, 164, 178,
+            200, 240,
+        ] {
+            for h in [4u16, 6, 8, 10, 14, 20, 26, 34, 50] {
+                v.push((w, h));
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn renders_at_every_size_without_panicking() {
+        // Layout arithmetic is where this has broken before, always at a size
+        // nobody tried by hand.
+        let mut a = app();
+        for (w, h) in sizes() {
+            let _ = render(&mut a, w, h);
+        }
+    }
+
+    #[test]
+    fn the_wordmark_never_collides_with_the_counts() {
+        // The header used to read "mnemosyne331 sessions" once the token
+        // total made the right-hand side too long to fit.
+        let mut a = app();
+        for (w, h) in sizes() {
+            if h < 4 {
+                continue;
+            }
+            let rows = render(&mut a, w, h);
+            let top = &rows[0];
+            if let Some(i) = top.find("mnemosyne") {
+                let after = &top[i + "mnemosyne".len()..];
+                assert!(
+                    after.is_empty() || after.starts_with(' '),
+                    "{w}x{h}: header ran together: {top:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_mode_renders_at_every_size() {
+        for (w, h) in sizes() {
+            let mut a = app();
+            // grouped, filtered, searched, selected — all at once
+            a.do_action(crate::app::Action::GroupByDir);
+            a.fuzzy = "e".into();
+            a.deep = "thing".into();
+            a.deep_hits = Some(Default::default());
+            a.selected.insert("/p/aaaaaaaa-1.jsonl".into());
+            a.rebuild();
+            let _ = render(&mut a, w, h);
+
+            for mode in [
+                InputMode::Fuzzy,
+                InputMode::Deep,
+                InputMode::TagAdd,
+                InputMode::TagFilter,
+                InputMode::Note,
+                InputMode::Help,
+            ] {
+                a.input_mode = mode;
+                a.input = "some typed text".into();
+                let _ = render(&mut a, w, h);
+            }
+            a.input_mode = InputMode::Help;
+            a.help_page = HelpPage::Keys;
+            let _ = render(&mut a, w, h);
+            a.input_mode = InputMode::Normal;
+        }
+    }
+
+    #[test]
+    fn the_viewer_renders_and_scrolls_within_bounds() {
+        let mut a = app();
+        a.viewer = Some((
+            (0..60)
+                .map(|i| crate::preview::Turn {
+                    role: if i % 2 == 0 { "you" } else { "claude" },
+                    text: format!("turn {i} ").repeat(20),
+                })
+                .collect(),
+            true,
+        ));
+        a.input_mode = InputMode::Viewer;
+        for (w, h) in sizes() {
+            if h < 6 {
+                continue;
+            }
+            let _ = render(&mut a, w, h);
+            assert!(
+                a.viewer_scroll <= a.viewer_height,
+                "{w}x{h}: scrolled past the end"
+            );
+        }
+    }
+
+    #[test]
+    fn help_scroll_is_clamped_to_its_content() {
+        let mut a = app();
+        a.input_mode = InputMode::Help;
+        a.help_scroll = u16::MAX;
+        for (w, h) in sizes() {
+            let _ = render(&mut a, w, h);
+            assert!(
+                a.help_scroll <= a.help_height,
+                "{w}x{h}: help scrolled into nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_list_still_draws() {
+        let mut a = app();
+        a.fuzzy = "no-such-session-anywhere".into();
+        a.rebuild();
+        assert_eq!(a.item_count(), 0);
+        for (w, h) in sizes() {
+            let rows = render(&mut a, w, h);
+            assert_eq!(rows.len(), h as usize);
+        }
+    }
+
+    #[test]
+    fn a_wide_terminal_shows_the_columns_it_promises() {
+        let mut a = app();
+        let rows = render(&mut a, 178, 24);
+        let head = rows
+            .iter()
+            .find(|r| r.contains("AGE"))
+            .expect("column head");
+        for col in [
+            "AGE", "FOLDER", "TITLE", "LEFT OFF", "MODEL", "MSGS", "TOKENS", "TAGS",
+        ] {
+            assert!(head.contains(col), "missing {col} in {head:?}");
+        }
+    }
+
+    #[test]
+    fn columns_are_dropped_in_order_as_it_narrows() {
+        let mut a = app();
+        let has = |a: &mut App, w: u16, col: &str| {
+            render(a, w, 20)
+                .iter()
+                .any(|r| r.contains("AGE") && r.contains(col))
+        };
+        assert!(has(&mut a, 178, "TOKENS"));
+        assert!(!has(&mut a, 120, "TOKENS"), "tokens go before tags");
+        assert!(has(&mut a, 150, "TAGS"));
+        assert!(!has(&mut a, 100, "TAGS"));
+        assert!(has(&mut a, 120, "MODEL"));
+        assert!(!has(&mut a, 90, "MODEL"));
+        // the ones that always survive
+        for w in [60u16, 80, 100, 140, 200] {
+            assert!(has(&mut a, w, "TITLE"), "TITLE missing at {w}");
+            assert!(has(&mut a, w, "AGE"), "AGE missing at {w}");
+        }
+    }
+
+    #[test]
+    fn wrapping_never_loses_or_splits_a_word() {
+        for width in [8usize, 12, 20, 40, 80] {
+            let text = "the quick brown fox jumps over the lazy dog";
+            let out = wrap_words(text, width);
+            for line in &out {
+                assert!(line.chars().count() <= width, "{width}: {line:?}");
+            }
+            assert_eq!(
+                out.join(" ").split_whitespace().collect::<Vec<_>>(),
+                text.split_whitespace().collect::<Vec<_>>(),
+                "words changed at width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrapping_hard_breaks_something_longer_than_a_line() {
+        let out = wrap_words("supercalifragilistic", 6);
+        assert!(out.len() > 1);
+        assert!(out.iter().all(|l| l.chars().count() <= 6));
+        assert_eq!(out.concat(), "supercalifragilistic");
+    }
+
+    #[test]
+    fn wrapping_copes_with_nothing() {
+        assert_eq!(wrap_words("", 10), vec![String::new()]);
+        assert_eq!(wrap_words("   ", 10), vec![String::new()]);
+    }
+
+    #[test]
+    fn shared_prefix_compares_by_character() {
+        assert!(same_prefix("hello there", "hello there", 5));
+        assert!(!same_prefix("hello", "goodbye", 3));
+        // multi-byte input must not panic or mis-slice
+        assert!(same_prefix("héllo wörld ≈≈", "héllo wörld ≈≈", 4));
+        assert!(!same_prefix("héllo", "hello", 3));
+    }
+
+    #[test]
+    fn column_widths_always_fit_the_terminal() {
+        // 44 is the narrowest width the table still claims to be a table;
+        // below that the columns are shed and only the title remains.
+        for w in 44usize..=300 {
+            let c = Cols::new(w);
+            let gap = if c.folder > 0 { 1 } else { 0 };
+            let used = PREFIX
+                + 4
+                + 2
+                + c.folder
+                + gap
+                + c.sub
+                + c.title
+                + if c.preview > 0 { c.preview + 2 } else { 0 }
+                + c.model
+                + c.msgs
+                + c.tokens
+                + c.tags;
+            assert!(used <= w, "width {w}: columns want {used}");
+        }
+    }
 }

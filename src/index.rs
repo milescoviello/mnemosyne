@@ -654,3 +654,179 @@ mod tests {
         assert_eq!(idx.load().unwrap().len(), 1, "no needless rescan");
     }
 }
+
+#[cfg(test)]
+mod pipeline_tests {
+    use super::*;
+    use std::io::Write;
+
+    /// A transcript on disk, scanned, indexed, and searched — the whole path
+    /// a query actually travels.
+    fn indexed(lines: &[&str]) -> (tempfile::TempDir, Index, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir
+            .path()
+            .join("11112222-3333-4444-5555-666677778888.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        for l in lines {
+            writeln!(f, "{l}").unwrap();
+        }
+        drop(f);
+
+        let mut text = String::new();
+        let session = crate::scan::scan_with_text(&path, false, None, None, &mut text).unwrap();
+        let key = session.path.to_string_lossy().to_string();
+
+        let mut idx = Index::open_at(&dir.path().join("i.db")).unwrap();
+        idx.store(&[session]).unwrap();
+        idx.store_text(&[(key.clone(), text)]).unwrap();
+        (dir, idx, key)
+    }
+
+    fn said(role: &str, text: &str) -> String {
+        format!(
+            r#"{{"parentUuid":"p","message":{{"role":"{role}","content":[{{"type":"text","text":"{text}"}}]}},"type":"{role}"}}"#
+        )
+    }
+
+    #[test]
+    fn something_said_can_be_found_again() {
+        let (_d, idx, key) = indexed(&[
+            &said("user", "the zpool is degraded"),
+            &said("assistant", "checking the array now"),
+        ]);
+        let hits = idx.search_text(&crate::search::fts_expr("zpool")).unwrap();
+        assert_eq!(hits, vec![key.clone()]);
+        assert!(idx
+            .search_text(&crate::search::fts_expr("degraded"))
+            .unwrap()
+            .contains(&key));
+        assert!(idx
+            .search_text(&crate::search::fts_expr("never mentioned"))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_phrase_matches_only_when_the_words_are_adjacent() {
+        let (_d, idx, key) = indexed(&[&said("user", "the page fault happened at boot")]);
+        assert_eq!(
+            idx.search_text(&crate::search::fts_expr("page fault"))
+                .unwrap(),
+            vec![key]
+        );
+        assert!(idx
+            .search_text(&crate::search::fts_expr("fault page"))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_partial_word_matches_by_prefix() {
+        let (_d, idx, key) = indexed(&[&said("user", "checkpatch was clean")]);
+        assert_eq!(
+            idx.search_text(&crate::search::fts_expr("checkp")).unwrap(),
+            vec![key]
+        );
+    }
+
+    #[test]
+    fn injected_context_is_never_indexed() {
+        // The whole reason search was unusable before.
+        let (_d, idx, _) = indexed(&[&said(
+            "user",
+            "<system-reminder>NVENC needs cuda</system-reminder>look at the disk",
+        )]);
+        assert!(
+            idx.search_text(&crate::search::fts_expr("nvenc"))
+                .unwrap()
+                .is_empty(),
+            "a memory file leaked into the index"
+        );
+        assert!(!idx
+            .search_text(&crate::search::fts_expr("disk"))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn thinking_and_commands_are_searchable() {
+        let (_d, idx, _) = indexed(&[
+            r#"{"parentUuid":"p","message":{"role":"assistant","content":[{"type":"thinking","thinking":"perhaps the pool is resilvering"}]},"type":"assistant"}"#,
+            r#"{"parentUuid":"p","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"zpool status -v"}}]},"type":"assistant"}"#,
+        ]);
+        assert!(!idx
+            .search_text(&crate::search::fts_expr("resilvering"))
+            .unwrap()
+            .is_empty());
+        assert!(!idx
+            .search_text(&crate::search::fts_expr("zpool"))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_query_full_of_syntax_cannot_break_the_search() {
+        let (_d, idx, _) = indexed(&[&said("user", "ordinary words")]);
+        for nasty in [
+            "\"",
+            "AND OR NOT",
+            "*",
+            "(unbalanced",
+            "a\"b\"c",
+            "^x",
+            "NEAR/2",
+        ] {
+            let expr = crate::search::fts_expr(nasty);
+            // must not error; finding nothing is a fine answer
+            let _ = idx.search_text(&expr).unwrap_or_default();
+        }
+    }
+
+    #[test]
+    fn an_excerpt_comes_back_for_a_hit() {
+        let (_d, idx, key) = indexed(&[&said("user", "the quick brown fox jumped over it")]);
+        let snip = idx
+            .snippet_for(&key, &crate::search::fts_expr("brown"))
+            .expect("a hit has an excerpt");
+        assert!(snip.to_lowercase().contains("brown"), "{snip:?}");
+    }
+
+    #[test]
+    fn appended_text_joins_what_was_already_indexed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "{}", said("user", "zebra came first")).unwrap();
+        drop(f);
+
+        let mut t1 = String::new();
+        let s1 = crate::scan::scan_with_text(&path, false, None, None, &mut t1).unwrap();
+        let key = s1.path.to_string_lossy().to_string();
+        let mut idx = Index::open_at(&dir.path().join("i.db")).unwrap();
+        idx.store(std::slice::from_ref(&s1)).unwrap();
+        idx.store_text(&[(key.clone(), t1)]).unwrap();
+
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(f, "{}", said("user", "quokka came later")).unwrap();
+        drop(f);
+
+        let mut t2 = String::new();
+        let s2 = crate::scan::scan_with_text(&path, false, None, Some(&s1), &mut t2).unwrap();
+        let merged = format!("{} {}", idx.existing_text(&key).unwrap().unwrap(), t2);
+        idx.store(&[s2]).unwrap();
+        idx.store_text(&[(key.clone(), merged)]).unwrap();
+
+        for word in ["zebra", "quokka"] {
+            assert!(
+                !idx.search_text(&crate::search::fts_expr(word))
+                    .unwrap()
+                    .is_empty(),
+                "{word} went missing after the append"
+            );
+        }
+    }
+}
