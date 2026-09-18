@@ -23,18 +23,48 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-const CHROME: Color = Color::DarkGray;
-const FAV: Color = Color::Yellow;
-const LIVE: Color = Color::Green;
-const TAG: Color = Color::Magenta;
-/// A path that has since been deleted.
-const GONE: Color = Color::Rgb(150, 84, 84);
-const TEXT: Color = Color::Gray;
-const BRIGHT: Color = Color::White;
-/// The selected row's band: a shallow pool lit from below.
-const BAND: Color = Color::Rgb(18, 42, 58);
-/// Overlay panels sit on still, deep water so the list cannot bleed through.
-const PANEL: Color = Color::Rgb(9, 17, 28);
+/// Resolved once from the config, so the palette can follow a desktop theme
+/// without a rebuild. Missing keys keep the values the tool shipped with.
+struct Theme {
+    chrome: Color,
+    fav: Color,
+    live: Color,
+    tag: Color,
+    text: Color,
+    bright: Color,
+    gone: Color,
+    band: Color,
+    panel: Color,
+}
+
+static THEME: std::sync::OnceLock<Theme> = std::sync::OnceLock::new();
+
+fn th() -> &'static Theme {
+    THEME.get_or_init(|| Theme::from_config(&crate::config::Config::load()))
+}
+
+impl Theme {
+    fn from_config(c: &crate::config::Config) -> Theme {
+        let pick = |given: &Option<String>, fallback: Color| -> Color {
+            given
+                .as_deref()
+                .and_then(crate::config::parse_color)
+                .map(|(r, g, b)| Color::Rgb(r, g, b))
+                .unwrap_or(fallback)
+        };
+        Theme {
+            chrome: pick(&c.chrome, Color::DarkGray),
+            fav: pick(&c.favorite, Color::Yellow),
+            live: pick(&c.live, Color::Green),
+            tag: pick(&c.tag, Color::Magenta),
+            text: pick(&c.text, Color::Gray),
+            bright: pick(&c.bright, Color::White),
+            gone: pick(&c.gone, Color::Rgb(150, 84, 84)),
+            band: pick(&c.band, Color::Rgb(18, 42, 58)),
+            panel: pick(&c.panel, Color::Rgb(9, 17, 28)),
+        }
+    }
+}
 
 const MARGIN: usize = 2;
 /// margin + gutter + gap + cursor + gap + marker + gap
@@ -59,6 +89,7 @@ struct Cols {
     preview: usize,
     model: usize,
     msgs: usize,
+    tokens: usize,
     tags: usize,
 }
 
@@ -86,8 +117,9 @@ impl Cols {
             0
         };
         let msgs = 6;
+        let tokens = if width >= 168 { 8 } else { 0 };
         let tags = if width >= 140 { 16 } else { 0 };
-        let fixed = PREFIX + 4 + 2 + folder + 1 + sub + model + msgs + tags;
+        let fixed = PREFIX + 4 + 2 + folder + 1 + sub + model + msgs + tokens + tags;
         let avail = width.saturating_sub(fixed).max(16);
         let (title, preview) = if avail >= TITLE_MAX + PREVIEW_MIN + 2 {
             (TITLE_MAX, avail - TITLE_MAX - 2)
@@ -101,6 +133,7 @@ impl Cols {
             preview,
             model,
             msgs,
+            tokens,
             tags,
         }
     }
@@ -235,7 +268,9 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
             Span::raw(" ".repeat(MARGIN)),
             Span::styled(
                 "…earlier of this conversation not shown",
-                Style::default().fg(CHROME).add_modifier(Modifier::ITALIC),
+                Style::default()
+                    .fg(th().chrome)
+                    .add_modifier(Modifier::ITALIC),
             ),
         ]));
         lines.push(Line::raw(""));
@@ -274,7 +309,9 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled("        ", Style::default()),
                 Span::styled(
                     summary,
-                    Style::default().fg(CHROME).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(th().chrome)
+                        .add_modifier(Modifier::ITALIC),
                 ),
             ]));
             lines.push(Line::raw(""));
@@ -284,7 +321,7 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
         let (label, colour) = if t.role == "you" {
             ("you", rgb(art::ramp(0.85)))
         } else {
-            ("claude", FAV)
+            ("claude", th().fav)
         };
         for (n, chunk) in wrap_words(&t.text, body_w).into_iter().enumerate() {
             lines.push(Line::from(vec![
@@ -297,7 +334,7 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     Span::raw("        ")
                 },
-                Span::styled(chunk, Style::default().fg(TEXT)),
+                Span::styled(chunk, Style::default().fg(th().text)),
             ]));
         }
         lines.push(Line::raw(""));
@@ -331,19 +368,21 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled("⌇ ", Style::default().fg(rgb(art::ramp(0.6)))),
                 Span::styled(
                     fit(&title, area.width as usize - 12),
-                    Style::default().fg(BRIGHT).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(th().bright)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]),
             ripple_line(area.width as usize, MARGIN, 1.7),
         ]))
-        .block(Block::default().style(Style::default().bg(PANEL))),
+        .block(Block::default().style(Style::default().bg(th().panel))),
         head[0],
     );
 
     f.render_widget(
         Paragraph::new(Text::from(lines))
             .scroll((app.viewer_scroll, 0))
-            .block(Block::default().style(Style::default().bg(PANEL))),
+            .block(Block::default().style(Style::default().bg(th().panel))),
         head[1],
     );
 
@@ -353,7 +392,7 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
         100
     };
     let k = |t: &'static str| Span::styled(t, Style::default().fg(rgb(art::ramp(0.85))));
-    let d = |t: &'static str| Span::styled(t, Style::default().fg(CHROME));
+    let d = |t: &'static str| Span::styled(t, Style::default().fg(th().chrome));
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::raw(" ".repeat(MARGIN)),
@@ -365,10 +404,10 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
             d(" back   "),
             Span::styled(
                 format!("{} turns · {pct}%", turns.len()),
-                Style::default().fg(CHROME),
+                Style::default().fg(th().chrome),
             ),
         ]))
-        .block(Block::default().style(Style::default().bg(PANEL))),
+        .block(Block::default().style(Style::default().bg(th().panel))),
         head[2],
     );
 }
@@ -390,25 +429,31 @@ fn draw_wordmark(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
-    let dot = || Span::styled(" · ", Style::default().fg(CHROME));
+    let dot = || Span::styled(" · ", Style::default().fg(th().chrome));
     let mut right: Vec<Span> = vec![Span::styled(
         format!("{} sessions", app.item_count()),
-        Style::default().fg(TEXT),
+        Style::default().fg(th().text),
     )];
     let favs = app.meta.favorite_count();
     if favs > 0 {
         right.push(dot());
-        right.push(Span::styled(format!("★{favs}"), Style::default().fg(FAV)));
+        right.push(Span::styled(
+            format!("★{favs}"),
+            Style::default().fg(th().fav),
+        ));
     }
     if app.live.count > 0 {
         right.push(dot());
         right.push(Span::styled(
             format!("●{} live", app.live.count),
-            Style::default().fg(LIVE),
+            Style::default().fg(th().live),
         ));
     }
     right.push(dot());
-    right.push(Span::styled(app.sort.label(), Style::default().fg(CHROME)));
+    right.push(Span::styled(
+        app.sort.label(),
+        Style::default().fg(th().chrome),
+    ));
     for (on, label, col) in [
         (
             app.group_by_dir,
@@ -420,12 +465,12 @@ fn draw_wordmark(f: &mut Frame, app: &App, area: Rect) {
             app.date.label(),
             rgb(art::ramp(0.75)),
         ),
-        (app.fav_only, "★ only".to_string(), FAV),
-        (app.live_only, "live only".to_string(), LIVE),
+        (app.fav_only, "★ only".to_string(), th().fav),
+        (app.live_only, "live only".to_string(), th().live),
         (
             app.tag_filter.is_some(),
             format!("#{}", app.tag_filter.clone().unwrap_or_default()),
-            TAG,
+            th().tag,
         ),
         (
             !app.fuzzy.trim().is_empty(),
@@ -447,7 +492,7 @@ fn draw_wordmark(f: &mut Frame, app: &App, area: Rect) {
             format!("{} picked", app.selected.len()),
             rgb(art::ramp(0.9)),
         ),
-        (!app.mouse_on, "mouse off".to_string(), CHROME),
+        (!app.mouse_on, "mouse off".to_string(), th().chrome),
     ] {
         if on {
             right.push(dot());
@@ -484,7 +529,7 @@ fn draw_colheads(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
             hits.push((*x, *x + text.trim().chars().count() as u16, s));
         }
         *x += w as u16;
-        spans.push(Span::styled(text, Style::default().fg(CHROME)));
+        spans.push(Span::styled(text, Style::default().fg(th().chrome)));
     };
 
     let hits = &mut app.hits.columns;
@@ -539,6 +584,16 @@ fn draw_colheads(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
         Some(Sort::Entries),
         hits,
     );
+    if c.tokens > 0 {
+        head(
+            &mut spans,
+            &mut x,
+            format!("{:>w$}", "TOKENS", w = c.tokens),
+            c.tokens,
+            Some(Sort::Tokens),
+            hits,
+        );
+    }
     if c.tags > 0 {
         head(&mut spans, &mut x, "  TAGS".to_string(), 6, None, hits);
     }
@@ -587,7 +642,7 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                         .fg(rgb(art::ramp(0.8)))
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(format!("{n}"), Style::default().fg(CHROME)),
+                Span::styled(format!("{n}"), Style::default().fg(th().chrome)),
             ])),
             Row::Item(i) | Row::Sub(i) => {
                 let s = &app.all[*i];
@@ -623,11 +678,11 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                             .add_modifier(Modifier::BOLD),
                     )
                 } else if s.favorite {
-                    ("★", Style::default().fg(FAV))
+                    ("★", Style::default().fg(th().fav))
                 } else if s.is_live() {
                     (
                         if s.live_exact { "●" } else { "◌" },
-                        Style::default().fg(LIVE),
+                        Style::default().fg(th().live),
                     )
                 } else {
                     (" ", Style::default())
@@ -645,7 +700,7 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                 if is_sub {
                     sp.push(Span::styled(
                         format!("{:<w$} ", "└ subagent", w = c.folder),
-                        Style::default().fg(CHROME),
+                        Style::default().fg(th().chrome),
                     ));
                 } else {
                     let folder = if s.cwd.is_empty() {
@@ -656,7 +711,7 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                     // A directory that no longer exists is worth seeing here
                     // rather than discovering at resume time.
                     let fstyle = if s.cwd_missing {
-                        Style::default().fg(GONE)
+                        Style::default().fg(th().gone)
                     } else {
                         Style::default().fg(rgb(art::ramp(0.45 + d * 0.2)))
                     };
@@ -682,7 +737,7 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                 sp.push(Span::styled(
                     format!("{:<w$}", fit(s.title(), c.title), w = c.title),
                     Style::default()
-                        .fg(if s.is_live() { BRIGHT } else { TEXT })
+                        .fg(if s.is_live() { th().bright } else { th().text })
                         .add_modifier(if row_i == cursor {
                             Modifier::BOLD
                         } else {
@@ -706,21 +761,41 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                             fit(cue, c.preview.saturating_sub(2)),
                             w = c.preview
                         ),
-                        Style::default().fg(CHROME),
+                        Style::default().fg(th().chrome),
                     ));
                 }
                 if c.model > 0 {
                     sp.push(Span::styled(
                         format!("{:<w$}", fit(s.model_short(), c.model - 1), w = c.model),
-                        Style::default().fg(CHROME),
+                        Style::default().fg(th().chrome),
                     ));
                 }
                 sp.push(Span::styled(
                     format!("{:>w$}", compact_count(s.entries), w = c.msgs),
-                    Style::default().fg(CHROME),
+                    Style::default().fg(th().chrome),
                 ));
+                if c.tokens > 0 {
+                    // Token totals run into the billions, well past u32;
+                    // clamping to it made every large session read 4295.0m.
+                    let t = s.total_tokens();
+                    sp.push(Span::styled(
+                        format!(
+                            "{:>w$}",
+                            if t == 0 {
+                                String::new()
+                            } else {
+                                crate::model::human_count(t)
+                            },
+                            w = c.tokens
+                        ),
+                        Style::default().fg(th().chrome),
+                    ));
+                }
                 for t in &s.tags {
-                    sp.push(Span::styled(format!("  #{t}"), Style::default().fg(TAG)));
+                    sp.push(Span::styled(
+                        format!("  #{t}"),
+                        Style::default().fg(th().tag),
+                    ));
                 }
                 ListItem::new(Line::from(sp))
             }
@@ -729,7 +804,7 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
 
     let list = List::new(items)
         .block(Block::default())
-        .highlight_style(Style::default().bg(BAND));
+        .highlight_style(Style::default().bg(th().band));
 
     app.list_state.select(Some(app.cursor));
     f.render_stateful_widget(list, area, &mut app.list_state);
@@ -774,10 +849,10 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
             Span::raw(" ".repeat(MARGIN)),
             Span::styled(
                 "still water — nothing matches. ",
-                Style::default().fg(CHROME),
+                Style::default().fg(th().chrome),
             ),
             Span::styled("c", Style::default().fg(rgb(art::ramp(0.85)))),
-            Span::styled(" clears the filters", Style::default().fg(CHROME)),
+            Span::styled(" clears the filters", Style::default().fg(th().chrome)),
         ]));
         f.render_widget(Paragraph::new(Text::from(lines)), area);
         return;
@@ -795,6 +870,12 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
     }
     facts.push(human_size(s.size));
     facts.push(format!("{} entries", s.entries));
+    if s.total_tokens() > 0 {
+        facts.push(format!(
+            "{} tokens",
+            crate::model::human_count(s.total_tokens())
+        ));
+    }
     if s.duration_secs() > 0 {
         facts.push(human_dur(s.duration_secs()));
     }
@@ -829,21 +910,26 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
         Span::raw(" ".repeat(MARGIN)),
         Span::styled(
             title,
-            Style::default().fg(BRIGHT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(th().bright)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" ".repeat(gap)),
-        Span::styled(fact_str, Style::default().fg(CHROME)),
+        Span::styled(fact_str, Style::default().fg(th().chrome)),
     ]));
 
     if !s.tags.is_empty() || !s.note.is_empty() {
         let mut sp = vec![Span::raw(" ".repeat(MARGIN))];
         for t in &s.tags {
-            sp.push(Span::styled(format!("#{t} "), Style::default().fg(TAG)));
+            sp.push(Span::styled(
+                format!("#{t} "),
+                Style::default().fg(th().tag),
+            ));
         }
         if !s.note.is_empty() {
             sp.push(Span::styled(
                 fit(&s.note, width.saturating_sub(30)),
-                Style::default().fg(FAV).add_modifier(Modifier::ITALIC),
+                Style::default().fg(th().fav).add_modifier(Modifier::ITALIC),
             ));
         }
         lines.push(Line::from(sp));
@@ -864,14 +950,14 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
         body_lines.push(Line::from(vec![
             Span::raw(" ".repeat(MARGIN)),
             label("match"),
-            Span::styled(fit(&sn, body), Style::default().fg(BRIGHT)),
+            Span::styled(fit(&sn, body), Style::default().fg(th().bright)),
         ]));
     }
     if show_cue && !s.last_prompt.is_empty() {
         body_lines.push(Line::from(vec![
             Span::raw(" ".repeat(MARGIN)),
             label("left off"),
-            Span::styled(fit(&s.last_prompt, body), Style::default().fg(BRIGHT)),
+            Span::styled(fit(&s.last_prompt, body), Style::default().fg(th().bright)),
         ]));
     }
     let only_tools = |t: &str| {
@@ -899,10 +985,10 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
                     Style::default().fg(if t.role == "you" {
                         rgb(art::ramp(0.8))
                     } else {
-                        FAV
+                        th().fav
                     }),
                 ),
-                Span::styled(fit(&t.text, body), Style::default().fg(TEXT)),
+                Span::styled(fit(&t.text, body), Style::default().fg(th().text)),
             ]),
         );
     }
@@ -957,10 +1043,12 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         ),
         Span::styled(
             value,
-            Style::default().fg(BRIGHT).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(th().bright)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled("▏", Style::default().fg(rgb(art::ramp(1.0)))),
-        Span::styled(format!("   {hint}"), Style::default().fg(CHROME)),
+        Span::styled(format!("   {hint}"), Style::default().fg(th().chrome)),
     ]);
     f.render_widget(Paragraph::new(Text::from(vec![Line::raw(""), line])), area);
 }
@@ -1011,7 +1099,7 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
                     .push((x, x + kw + d.trim_end().chars().count() as u16, a));
             }
             spans.push(Span::styled(k, Style::default().fg(rgb(art::ramp(0.85)))));
-            spans.push(Span::styled(d, Style::default().fg(CHROME)));
+            spans.push(Span::styled(d, Style::default().fg(th().chrome)));
             x += kw + d.chars().count() as u16;
         }
     } else {
@@ -1020,7 +1108,7 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
                 &app.status,
                 (area.width as usize).saturating_sub(pos.chars().count() + 6),
             ),
-            Style::default().fg(FAV),
+            Style::default().fg(th().fav),
         ));
     }
 
@@ -1028,7 +1116,7 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
     spans.push(Span::raw(" ".repeat(
         (area.width as usize).saturating_sub(used + pos.chars().count() + MARGIN),
     )));
-    spans.push(Span::styled(pos, Style::default().fg(CHROME)));
+    spans.push(Span::styled(pos, Style::default().fg(th().chrome)));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -1146,8 +1234,8 @@ fn draw_help(f: &mut Frame, area: Rect) {
                 format!("{plain:<16}"),
                 Style::default().fg(rgb(art::ramp(0.85))),
             ),
-            Span::styled(format!("{alt:<11}"), Style::default().fg(CHROME)),
-            Span::styled(*desc, Style::default().fg(TEXT)),
+            Span::styled(format!("{alt:<11}"), Style::default().fg(th().chrome)),
+            Span::styled(*desc, Style::default().fg(th().text)),
         ]));
     }
     lines.push(Line::raw(""));
@@ -1155,7 +1243,9 @@ fn draw_help(f: &mut Frame, area: Rect) {
         Span::raw("  "),
         Span::styled(
             "the middle column is a vim-style alias — you never need it",
-            Style::default().fg(CHROME).add_modifier(Modifier::ITALIC),
+            Style::default()
+                .fg(th().chrome)
+                .add_modifier(Modifier::ITALIC),
         ),
     ]));
 
@@ -1165,7 +1255,7 @@ fn draw_help(f: &mut Frame, area: Rect) {
             .wrap(Wrap { trim: false })
             // A filled panel, because a centred overlay narrower than the
             // terminal otherwise shows the list either side of it.
-            .block(Block::default().style(Style::default().bg(PANEL))),
+            .block(Block::default().style(Style::default().bg(th().panel))),
         r,
     );
 }

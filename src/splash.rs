@@ -23,9 +23,24 @@ use ratatui::{backend::Backend, Terminal};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-const FLOOR: Duration = Duration::from_millis(1500);
+/// How long the animation lingers once there is nothing left to wait for.
+///
+/// Two speeds, because the animation exists to cover real work. A cold index
+/// genuinely takes a second or so and the full reveal fits inside it. A warm
+/// one is done in about twenty milliseconds, and holding a screen for one and
+/// a half seconds over eighty milliseconds of work is just a delay wearing a
+/// costume — so it plays a brief version instead.
+/// Floors, from the config. Its defaults are the values these always were.
+fn floors() -> (Duration, Duration) {
+    let c = crate::config::Config::load();
+    (
+        Duration::from_millis(c.splash.floor_cold_ms),
+        Duration::from_millis(c.splash.floor_warm_ms),
+    )
+}
 const FRAME: Duration = Duration::from_millis(28);
-const REVEAL_MS: f64 = 780.0;
+const REVEAL_COLD_MS: f64 = 780.0;
+const REVEAL_WARM_MS: f64 = 300.0;
 const SWEEP_MS: f64 = 1500.0;
 
 const BAR_W: usize = 48;
@@ -84,6 +99,13 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress) -> Result<bool> {
     let mut skipped = false;
     let mut bar_high = 0.0f64;
     let mut showed_counts = false;
+    // Resolved once we know whether there was real work to cover. Deciding on
+    // the first frame does not work: the frame happens before even a warm
+    // refresh has finished, so everything looked cold.
+    let mut speed: Option<(Duration, f64)> = None;
+    let (floor_cold, floor_warm) = floors();
+    /// Finishing inside this means the index was already warm.
+    const WARM_IF_DONE_BY_MS: f64 = 300.0;
 
     // Pick the largest wordmark this terminal can hold; None means fall back
     // to the letter reveal.
@@ -103,14 +125,25 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress) -> Result<bool> {
         let bytes = p.bytes.load(Ordering::Relaxed);
         let finished = p.finished.load(Ordering::Relaxed);
 
-        let rev = (ms / REVEAL_MS).min(1.0);
+        if speed.is_none() {
+            if finished && ms <= WARM_IF_DONE_BY_MS {
+                speed = Some((floor_warm, REVEAL_WARM_MS));
+            } else if ms > WARM_IF_DONE_BY_MS {
+                speed = Some((floor_cold, REVEAL_COLD_MS));
+            }
+        }
+        // Until it is known, animate at the slower pace: switching from slow
+        // to fast nudges the reveal forward a little, which reads fine, while
+        // the other way round would make it appear to stall.
+        let (floor, reveal_ms) = speed.unwrap_or((floor_cold, REVEAL_COLD_MS));
+        let rev = (ms / reveal_ms).min(1.0);
         let complete = rev >= 1.0;
 
         // the shimmer leads the reveal, then keeps sweeping across
         let band = if !complete {
             rev * mark_w as f64
         } else {
-            let t = ((ms - REVEAL_MS) / SWEEP_MS).fract();
+            let t = ((ms - reveal_ms) / SWEEP_MS).fract();
             t * (mark_w as f64 + 30.0) - 15.0
         };
 
@@ -255,7 +288,7 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress) -> Result<bool> {
             }
         }
 
-        if finished && elapsed >= FLOOR && complete {
+        if finished && elapsed >= floor && complete {
             std::thread::sleep(Duration::from_millis(160));
             break;
         }

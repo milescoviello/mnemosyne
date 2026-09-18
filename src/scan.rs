@@ -74,6 +74,24 @@ fn raw_str(hay: &[u8], key: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&rest[..end]).into_owned())
 }
 
+/// Pull a JSON number out of raw bytes. The key must match exactly, so
+/// `"output_tokens":` does not also catch `"output_tokens_details":`.
+fn raw_num(hay: &[u8], key: &str) -> Option<u64> {
+    let needle = format!("\"{key}\":");
+    let i = memmem::find(hay, needle.as_bytes())? + needle.len();
+    let rest = &hay[i..];
+    let digits: Vec<u8> = rest
+        .iter()
+        .skip_while(|c| **c == b' ')
+        .take_while(|c| c.is_ascii_digit())
+        .copied()
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    std::str::from_utf8(&digits).ok()?.parse().ok()
+}
+
 fn iso_to_epoch(s: &str) -> i64 {
     chrono::DateTime::parse_from_rfc3339(s)
         .map(|d| d.timestamp())
@@ -366,6 +384,12 @@ fn process_line(s: &mut Session, line: &[u8], text: &mut Option<&mut String>) {
         }
     } else if is_asst {
         s.assistant_msgs += 1;
+        if memmem::find(f, b"\"usage\"").is_some() {
+            s.in_tokens += raw_num(f, "input_tokens").unwrap_or(0);
+            s.out_tokens += raw_num(f, "output_tokens").unwrap_or(0);
+            s.cache_read += raw_num(f, "cache_read_input_tokens").unwrap_or(0);
+            s.cache_write += raw_num(f, "cache_creation_input_tokens").unwrap_or(0);
+        }
         if let Some(m) = raw_str(f, "model") {
             // `<synthetic>` marks locally-generated turns; `inherit` and
             // `sniff` are internal placeholders. None are resumable ids.
@@ -648,6 +672,27 @@ mod harvest_tests {
     use super::*;
 
     #[test]
+    fn token_usage_is_summed() {
+        let line = br#"{"parentUuid":"x","isSidechain":false,"message":{"model":"claude-opus-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":2985,"cache_creation_input_tokens":2998,"cache_read_input_tokens":41234,"output_tokens":57}},"type":"assistant","uuid":"a1"}"#;
+        let mut s = Session::default();
+        let mut sink: Option<&mut String> = None;
+        process_line(&mut s, line, &mut sink);
+        assert_eq!(s.assistant_msgs, 1, "classified as an assistant turn");
+        assert_eq!(s.in_tokens, 2985);
+        assert_eq!(s.out_tokens, 57);
+        assert_eq!(s.cache_read, 41234);
+        assert_eq!(s.cache_write, 2998);
+    }
+
+    #[test]
+    fn raw_num_reads_only_the_exact_key() {
+        let b = br#"{"output_tokens":57,"output_tokens_details":{"thinking_tokens":9}}"#;
+        assert_eq!(raw_num(b, "output_tokens"), Some(57));
+        assert_eq!(raw_num(b, "thinking_tokens"), Some(9));
+        assert_eq!(raw_num(b, "nope"), None);
+    }
+
+    #[test]
     fn harvest_takes_prose_and_leaves_scaffolding() {
         let line = br#"{"message":{"role":"assistant","content":[{"type":"text","text":"the disk is full"},{"type":"tool_use","name":"Bash","input":{"command":"zpool status"}}]},"type":"assistant"}"#;
         let mut out = String::new();
@@ -688,5 +733,27 @@ mod harvest_tests {
         );
         assert!(out.contains("tabbed"));
         assert!(out.contains("quoted"));
+    }
+}
+
+#[cfg(test)]
+mod diag {
+    use super::*;
+    #[test]
+    #[ignore]
+    fn scan_a_real_transcript() {
+        let p = std::env::var("DIAG_FILE").expect("DIAG_FILE");
+        let s = scan(std::path::Path::new(&p), false, None, None).unwrap();
+        eprintln!(
+            "entries={} user={} asst={} in={} out={} cr={} cw={}",
+            s.entries,
+            s.user_msgs,
+            s.assistant_msgs,
+            s.in_tokens,
+            s.out_tokens,
+            s.cache_read,
+            s.cache_write
+        );
+        assert!(s.entries > 0);
     }
 }

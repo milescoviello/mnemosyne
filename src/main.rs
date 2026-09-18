@@ -7,6 +7,7 @@
 
 mod app;
 mod art;
+mod config;
 mod index;
 mod live;
 mod meta;
@@ -53,6 +54,7 @@ usage: mnemosyne [options]
   --subagents      start with subagent transcripts revealed
   --no-splash      skip the opening animation (or set MNEMOSYNE_NO_SPLASH=1)
   --no-mouse       start with mouse reporting off (toggle in-app with M)
+  --write-config   write a commented config file and exit
   --no-model       do not restore each session's original --model
   -h, --help       this text
   -V, --version    version
@@ -79,6 +81,18 @@ fn main() -> Result<()> {
 
     let include_subagents = true; // always indexed; visibility is a UI toggle
     let restore_model = !has("--no-model");
+
+    if has("--write-config") {
+        let p = config::path();
+        std::fs::create_dir_all(p.parent().unwrap())?;
+        if p.exists() {
+            println!("{} already exists — leaving it alone", p.display());
+        } else {
+            std::fs::write(&p, config::EXAMPLE)?;
+            println!("wrote {}", p.display());
+        }
+        return Ok(());
+    }
 
     if has("--refresh") {
         let t = Instant::now();
@@ -126,10 +140,31 @@ fn main() -> Result<()> {
         println!("running now     {}", live::live_map().count);
         let m = meta::Meta::load();
         println!("favourites      {}", m.favorite_count());
+        println!("tags            {}", m.all_tags().len());
         if let Ok(i) = index::Index::open() {
             println!("indexed bodies  {}", i.text_rows().unwrap_or(0));
         }
-        println!("tags            {}", m.all_tags().len());
+
+        // Tokens read straight off the usage records in the transcripts.
+        // Counts only, and only this machine -- `claude-spend` already turns
+        // usage into money, and across the fleet.
+        let (mut tin, mut tout, mut tcr, mut tcw) = (0u64, 0u64, 0u64, 0u64);
+        for s in &sessions {
+            tin += s.in_tokens;
+            tout += s.out_tokens;
+            tcr += s.cache_read;
+            tcw += s.cache_write;
+        }
+        let total = tin + tout + tcr + tcw;
+        if total > 0 {
+            println!();
+            println!("tokens, every session on this machine");
+            println!("  input        {:>9}", model::human_count(tin));
+            println!("  output       {:>9}", model::human_count(tout));
+            println!("  cache read   {:>9}", model::human_count(tcr));
+            println!("  cache write  {:>9}", model::human_count(tcw));
+            println!("  total        {:>9}", model::human_count(total));
+        }
         return Ok(());
     }
 
@@ -296,7 +331,19 @@ fn main() -> Result<()> {
     app.show_subagents = has("--subagents");
     app.rebuild();
 
-    app.mouse_on = !has("--no-mouse");
+    let cfg = config::Config::load();
+    if let Some(stops) = &cfg.ramp {
+        let parsed: Vec<(u8, u8, u8)> = stops
+            .iter()
+            .filter_map(|s| config::parse_color(s))
+            .collect();
+        art::set_ramp(parsed);
+    }
+    // A flag always beats the config.
+    app.mouse_on = cfg.start.mouse && !has("--no-mouse");
+    app.show_preview = cfg.start.preview;
+    app.show_subagents = cfg.start.subagents || has("--subagents");
+    app.rebuild();
 
     enable_raw_mode()?;
     stderr().execute(EnterAlternateScreen)?;

@@ -46,11 +46,16 @@ impl Meta {
         }
     }
 
-    /// Write via temp file + rename so an interrupted save cannot truncate the
-    /// one file in here that isn't reproducible.
+    /// Write via temp file + rename, keeping a few generations behind it.
+    ///
+    /// Everything else here can be rebuilt from the transcripts; favourites,
+    /// tags and notes cannot. Atomic replacement stops a crash mid-write from
+    /// truncating it, and the rotation covers the other way of losing data —
+    /// a write that succeeds but contains the wrong thing.
     pub fn save(&self) -> Result<()> {
         let p = meta_path();
         std::fs::create_dir_all(p.parent().unwrap())?;
+        rotate_backups(&p);
         let tmp = p.with_extension("json.tmp");
         {
             let mut f = std::fs::File::create(&tmp)?;
@@ -146,6 +151,29 @@ impl Meta {
     }
 }
 
+/// How many previous versions of the overlay to keep.
+const BACKUPS: usize = 3;
+
+/// Shuffle meta.json -> .1 -> .2 -> .3 before it is replaced.
+///
+/// Only rotates when the current file differs from the newest backup, so
+/// toggling one favourite repeatedly cannot push real history out.
+fn rotate_backups(path: &std::path::Path) {
+    let Ok(current) = std::fs::read(path) else {
+        return;
+    };
+    let newest = path.with_extension("json.1");
+    if std::fs::read(&newest).is_ok_and(|b| b == current) {
+        return;
+    }
+    for i in (1..BACKUPS).rev() {
+        let from = path.with_extension(format!("json.{i}"));
+        let to = path.with_extension(format!("json.{}", i + 1));
+        let _ = std::fs::rename(from, to);
+    }
+    let _ = std::fs::write(newest, current);
+}
+
 pub fn normalize_tag(t: &str) -> String {
     t.trim()
         .to_lowercase()
@@ -235,6 +263,27 @@ mod tests {
         assert!(e.favorite);
         assert_eq!(e.tags, vec!["homelab"]);
         assert_eq!(e.note, "the important one");
+    }
+
+    #[test]
+    fn saving_keeps_previous_versions() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("meta.json");
+        std::fs::write(&p, b"first").unwrap();
+        rotate_backups(&p);
+        assert_eq!(std::fs::read(p.with_extension("json.1")).unwrap(), b"first");
+
+        std::fs::write(&p, b"second").unwrap();
+        rotate_backups(&p);
+        assert_eq!(
+            std::fs::read(p.with_extension("json.1")).unwrap(),
+            b"second"
+        );
+        assert_eq!(std::fs::read(p.with_extension("json.2")).unwrap(), b"first");
+
+        // an identical save must not push real history out of the window
+        rotate_backups(&p);
+        assert_eq!(std::fs::read(p.with_extension("json.2")).unwrap(), b"first");
     }
 
     #[test]

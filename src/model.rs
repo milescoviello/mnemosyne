@@ -31,6 +31,13 @@ pub struct Session {
     pub entries: u32,
     pub user_msgs: u32,
     pub assistant_msgs: u32,
+    /// Token usage, summed from the `usage` records the transcripts already
+    /// carry. Cache reads are counted separately because they dominate the
+    /// totals and are not comparable to fresh input.
+    pub in_tokens: u64,
+    pub out_tokens: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
 
     /// How many bytes of this file the indexer has already consumed.
     /// Transcripts are append-only, so on the next run we read only the tail
@@ -73,6 +80,11 @@ impl Session {
         }
     }
 
+    /// Everything the model was charged for reading or writing.
+    pub fn total_tokens(&self) -> u64 {
+        self.in_tokens + self.out_tokens + self.cache_read + self.cache_write
+    }
+
     pub fn duration_secs(&self) -> i64 {
         if self.first_ts > 0 && self.last_ts > self.first_ts {
             self.last_ts - self.first_ts
@@ -100,6 +112,7 @@ pub enum Sort {
     Duration,
     Title,
     Folder,
+    Tokens,
 }
 
 impl Sort {
@@ -111,6 +124,7 @@ impl Sort {
             Sort::Duration => "duration",
             Sort::Title => "title",
             Sort::Folder => "folder",
+            Sort::Tokens => "tokens",
         }
     }
     pub fn next(self) -> Sort {
@@ -120,7 +134,8 @@ impl Sort {
             Sort::Entries => Sort::Duration,
             Sort::Duration => Sort::Title,
             Sort::Title => Sort::Folder,
-            Sort::Folder => Sort::Recency,
+            Sort::Folder => Sort::Tokens,
+            Sort::Tokens => Sort::Recency,
         }
     }
 }
@@ -215,6 +230,19 @@ pub fn compact_count(n: u32) -> String {
     }
 }
 
+/// Like `compact_count` but for the larger numbers token totals reach.
+pub fn human_count(n: u64) -> String {
+    if n < 1_000 {
+        format!("{n}")
+    } else if n < 1_000_000 {
+        format!("{:.0}k", n as f64 / 1_000.0)
+    } else if n < 1_000_000_000 {
+        format!("{:.1}m", n as f64 / 1_000_000.0)
+    } else {
+        format!("{:.2}b", n as f64 / 1_000_000_000.0)
+    }
+}
+
 /// Clip to `w` display columns, ending in an ellipsis when it had to cut.
 pub fn fit(s: &str, w: usize) -> String {
     let n = s.chars().count();
@@ -289,21 +317,27 @@ mod tests {
 
     #[test]
     fn sort_cycles_through_every_mode_and_returns() {
+        // Counted rather than hardcoded, so adding a mode makes this fail
+        // usefully instead of silently going stale.
         let mut s = Sort::Recency;
         let mut seen = Vec::new();
-        for _ in 0..6 {
+        loop {
             seen.push(s.label());
             s = s.next();
+            if s == Sort::Recency || seen.len() > 32 {
+                break;
+            }
         }
-        assert_eq!(
-            s,
-            Sort::Recency,
-            "six modes, so six steps returns to the start"
-        );
+        assert_eq!(s, Sort::Recency, "cycling returns to the start");
         let mut uniq = seen.clone();
         uniq.sort_unstable();
         uniq.dedup();
-        assert_eq!(uniq.len(), 6, "every mode appears exactly once: {seen:?}");
+        assert_eq!(
+            uniq.len(),
+            seen.len(),
+            "every mode appears exactly once: {seen:?}"
+        );
+        assert!(seen.contains(&"tokens"), "tokens is reachable: {seen:?}");
     }
 
     #[test]

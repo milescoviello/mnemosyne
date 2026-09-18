@@ -35,7 +35,53 @@ pub fn db_path() -> PathBuf {
 ///   2  permission_mode records the mode the session STARTED in
 ///   3  conversation prose is harvested into the full-text index
 ///   4  thinking blocks and shell commands are harvested too
-pub const SCANNER_VERSION: u32 = 4;
+///   5  token usage is summed per session
+pub const SCANNER_VERSION: u32 = 5;
+
+/// Every column the loader expects. Compared against what the database
+/// actually has, so drift is detected rather than assumed away.
+const EXPECTED_COLUMNS: &[&str] = &[
+    "path",
+    "id",
+    "project_dir",
+    "cwd",
+    "git_branch",
+    "ai_title",
+    "first_prompt",
+    "last_prompt",
+    "model",
+    "permission_mode",
+    "version",
+    "size",
+    "mtime",
+    "first_ts",
+    "last_ts",
+    "entries",
+    "user_msgs",
+    "assistant_msgs",
+    "in_tokens",
+    "out_tokens",
+    "cache_read",
+    "cache_write",
+    "scanned_len",
+    "is_subagent",
+    "parent",
+    "agent_id",
+];
+
+fn schema_current(conn: &Connection) -> bool {
+    let Ok(mut st) = conn.prepare("PRAGMA table_info(sessions)") else {
+        return false;
+    };
+    let Ok(rows) = st.query_map([], |r| r.get::<_, String>(1)) else {
+        return false;
+    };
+    let have: std::collections::HashSet<String> = rows.flatten().collect();
+    if have.is_empty() {
+        return false; // no table yet
+    }
+    EXPECTED_COLUMNS.iter().all(|c| have.contains(*c))
+}
 
 pub struct Index {
     conn: Connection,
@@ -91,6 +137,34 @@ impl Index {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+        )?;
+
+        // Read the version before creating anything. Everything else here is
+        // derived from the transcripts, so a mismatch is dropped rather than
+        // migrated -- and it has to be a DROP, because `CREATE TABLE IF NOT
+        // EXISTS` will not add a new column to a table that already exists,
+        // which fails every later query with "no such column".
+        let stored: Option<u32> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key='scanner_version'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|v| v.parse().ok());
+
+        // Trusting the version number alone is not enough: an interrupted run
+        // can record a new version against a table that was never recreated,
+        // and then every query fails with "no such column" and the recorded
+        // version says nothing is wrong. Check the columns that are actually
+        // there.
+        let mut reset = stored != Some(SCANNER_VERSION) || !schema_current(&conn);
+        if reset {
+            conn.execute_batch("DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS body;")?;
+        }
+
+        conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS sessions (
                 path            TEXT PRIMARY KEY,
@@ -111,6 +185,10 @@ impl Index {
                 entries         INTEGER NOT NULL DEFAULT 0,
                 user_msgs       INTEGER NOT NULL DEFAULT 0,
                 assistant_msgs  INTEGER NOT NULL DEFAULT 0,
+                in_tokens       INTEGER NOT NULL DEFAULT 0,
+                out_tokens      INTEGER NOT NULL DEFAULT 0,
+                cache_read      INTEGER NOT NULL DEFAULT 0,
+                cache_write     INTEGER NOT NULL DEFAULT 0,
                 scanned_len     INTEGER NOT NULL DEFAULT 0,
                 is_subagent     INTEGER NOT NULL DEFAULT 0,
                 parent          TEXT,
@@ -118,7 +196,6 @@ impl Index {
             );
             CREATE INDEX IF NOT EXISTS idx_mtime  ON sessions(mtime DESC);
             CREATE INDEX IF NOT EXISTS idx_parent ON sessions(parent);
-            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
             -- Full text of what was actually said. Small, because prose is
             -- about two per cent of a transcript; searching it beats
             -- re-reading gigabytes of tool output on every query.
@@ -128,18 +205,12 @@ impl Index {
             "#,
         )?;
 
-        // Discard rows derived by an older scanner rather than trusting them.
-        let stored: Option<u32> = conn
-            .query_row(
-                "SELECT value FROM meta WHERE key='scanner_version'",
-                [],
-                |r| r.get::<_, String>(0),
-            )
-            .ok()
-            .and_then(|v| v.parse().ok());
-        if stored != Some(SCANNER_VERSION) {
-            conn.execute("DELETE FROM sessions", [])?;
-            let _ = conn.execute("DELETE FROM body", []);
+        // Only claim the version once the tables really match it.
+        if !schema_current(&conn) {
+            conn.execute_batch("DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS body;")?;
+            reset = true;
+        }
+        if reset {
             conn.execute(
                 "INSERT INTO meta (key,value) VALUES ('scanner_version', ?1)
                  ON CONFLICT(key) DO UPDATE SET value=?1",
@@ -156,7 +227,8 @@ impl Index {
         let mut st = self.conn.prepare(
             "SELECT path,id,project_dir,cwd,git_branch,ai_title,first_prompt,last_prompt,
                     model,permission_mode,version,size,mtime,first_ts,last_ts,entries,
-                    user_msgs,assistant_msgs,scanned_len,is_subagent,parent,agent_id
+                    user_msgs,assistant_msgs,scanned_len,is_subagent,parent,agent_id,
+                    in_tokens,out_tokens,cache_read,cache_write
              FROM sessions",
         )?;
         let rows = st.query_map([], |r| {
@@ -184,6 +256,10 @@ impl Index {
                 is_subagent: r.get::<_, i64>(19)? != 0,
                 parent: r.get(20)?,
                 agent_id: r.get(21)?,
+                in_tokens: r.get::<_, i64>(22)? as u64,
+                out_tokens: r.get::<_, i64>(23)? as u64,
+                cache_read: r.get::<_, i64>(24)? as u64,
+                cache_write: r.get::<_, i64>(25)? as u64,
                 ..Default::default()
             })
         })?;
@@ -260,13 +336,16 @@ impl Index {
             let mut st = tx.prepare(
                 "INSERT INTO sessions (path,id,project_dir,cwd,git_branch,ai_title,first_prompt,
                     last_prompt,model,permission_mode,version,size,mtime,first_ts,last_ts,entries,
-                    user_msgs,assistant_msgs,scanned_len,is_subagent,parent,agent_id)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)
+                    user_msgs,assistant_msgs,scanned_len,is_subagent,parent,agent_id,
+                    in_tokens,out_tokens,cache_read,cache_write)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,
+                         ?21,?22,?23,?24,?25,?26)
                  ON CONFLICT(path) DO UPDATE SET
                     id=?2,project_dir=?3,cwd=?4,git_branch=?5,ai_title=?6,first_prompt=?7,
                     last_prompt=?8,model=?9,permission_mode=?10,version=?11,size=?12,mtime=?13,
                     first_ts=?14,last_ts=?15,entries=?16,user_msgs=?17,assistant_msgs=?18,
-                    scanned_len=?19,is_subagent=?20,parent=?21,agent_id=?22",
+                    scanned_len=?19,is_subagent=?20,parent=?21,agent_id=?22,
+                    in_tokens=?23,out_tokens=?24,cache_read=?25,cache_write=?26",
             )?;
             for s in sessions {
                 st.execute(params![
@@ -292,6 +371,10 @@ impl Index {
                     s.is_subagent as i64,
                     s.parent,
                     s.agent_id,
+                    s.in_tokens as i64,
+                    s.out_tokens as i64,
+                    s.cache_read as i64,
+                    s.cache_write as i64,
                 ])?;
             }
         }
@@ -319,11 +402,24 @@ impl Index {
             let tx = self.conn.transaction()?;
             {
                 let mut st = tx.prepare("DELETE FROM sessions WHERE path=?1")?;
+                // The indexed text has to go with it. Missing this leaked a
+                // row per deleted transcript, and since nothing ages out of
+                // the index on its own it only ever grew.
+                let mut sb = tx.prepare("DELETE FROM body WHERE path=?1")?;
                 for p in gone {
                     st.execute([p])?;
+                    sb.execute([p])?;
                 }
             }
             tx.commit()?;
+
+            // SQLite keeps freed pages unless told otherwise, so a deletion
+            // on its own reclaims nothing. Only worth doing when something
+            // actually went.
+            let _ = self
+                .conn
+                .execute("INSERT INTO body(body) VALUES('optimize')", []);
+            let _ = self.conn.execute_batch("VACUUM");
         }
         Ok(n)
     }
@@ -491,6 +587,32 @@ mod tests {
         let loaded = idx.load().unwrap();
         assert!(loaded.contains_key("/a.jsonl"));
         assert!(!loaded.contains_key("/b.jsonl"));
+    }
+
+    #[test]
+    fn prune_also_drops_the_indexed_text() {
+        // Cleaning only the sessions table leaked a body row per deleted
+        // transcript, and nothing ever aged them out.
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("i.db");
+        let mut idx = Index::open_at(&db).unwrap();
+        idx.store(&[sample("/a.jsonl", "keep"), sample("/b.jsonl", "gone")])
+            .unwrap();
+        idx.store_text(&[
+            ("/a.jsonl".into(), "alpha text".into()),
+            ("/b.jsonl".into(), "beta text".into()),
+        ])
+        .unwrap();
+        assert_eq!(idx.text_rows().unwrap(), 2);
+
+        idx.prune(&["/a.jsonl".to_string()]).unwrap();
+        assert_eq!(
+            idx.text_rows().unwrap(),
+            1,
+            "the dead transcript's text went too"
+        );
+        assert!(idx.search_text("\"beta\"*").unwrap().is_empty());
+        assert_eq!(idx.search_text("\"alpha\"*").unwrap().len(), 1);
     }
 
     #[test]

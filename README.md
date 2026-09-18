@@ -281,6 +281,48 @@ long history to browse, raise it in `~/.claude/settings.json`:
 
 There is no literal "never". Already-deleted transcripts are unrecoverable.
 
+## Tokens
+
+Transcripts record their own token usage, so `mn` reads it: a **TOKENS**
+column at wide terminals, sortable with `s`, and a total for the machine:
+
+```
+$ mnemosyne --stats
+tokens, every session on this machine
+  input            19.8m
+  output          334.7m
+  cache read      89.03b
+  cache write      1.30b
+  total           90.68b
+```
+
+Counts only, and only local transcripts. Turning usage into money, and doing
+it across more than one machine, is what `ccusage` is for.
+
+## Configuration
+
+Entirely optional — with no file the defaults are what the tool has always
+used. `mnemosyne --write-config` drops a commented one at
+`~/.claude/mnemosyne/config.toml`:
+
+```toml
+# The water ramp, deep to pale. Every gradient samples it.
+ramp = ["#0e2042", "#154884", "#1a7aa8", "#26b2b0", "#6ce2d6", "#e2f8f6"]
+accent = "cyan"
+favorite = "yellow"
+
+[splash]
+enabled = true
+floor_warm_ms = 420     # how long it lingers when there was no work to cover
+
+[start]
+mouse = true
+preview = true
+```
+
+Command-line flags always beat the file. A malformed config is reported once
+and then ignored — losing your colours is not a reason to refuse to start.
+
 ## Failure modes
 
 The index is derived data, so it is treated that way. A corrupt database is
@@ -288,6 +330,11 @@ deleted and rebuilt rather than reported; if the location cannot be written to
 at all — read-only home, full disk — it falls back to an in-memory index,
 which is slower but works. Neither case stops the tool starting, and both used
 to.
+
+Your favourites, tags and notes are the only thing here that cannot be
+rebuilt, so `meta.json` is written atomically and keeps three generations
+behind it (`meta.json.1` … `.3`). The rotation skips identical saves, so
+toggling one favourite repeatedly cannot push real history out of the window.
 
 Live-session detection reads `/proc`, so it only works on Linux. Elsewhere it
 says so rather than reporting that nothing is running, which looks identical

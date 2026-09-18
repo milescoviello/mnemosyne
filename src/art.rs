@@ -103,16 +103,32 @@ fn lerp(a: Rgb, b: Rgb, t: f64) -> Rgb {
     (f(a.0, b.0), f(a.1, b.1), f(a.2, b.2))
 }
 
+/// The ramp actually in use. Set once from the config, if it supplies one.
+static RAMP_OVERRIDE: std::sync::OnceLock<Vec<Rgb>> = std::sync::OnceLock::new();
+
+/// Install a palette from the config. Ignored if fewer than two stops, since
+/// a gradient needs somewhere to go.
+pub fn set_ramp(stops: Vec<Rgb>) {
+    if stops.len() >= 2 {
+        let _ = RAMP_OVERRIDE.set(stops);
+    }
+}
+
+fn stops() -> &'static [Rgb] {
+    RAMP_OVERRIDE.get().map(|v| v.as_slice()).unwrap_or(RAMP)
+}
+
 /// Sample the ramp at `p` in 0..=1.
 pub fn ramp(p: f64) -> Rgb {
+    let ramp = stops();
     let p = p.clamp(0.0, 1.0);
-    let span = (RAMP.len() - 1) as f64;
+    let span = (ramp.len() - 1) as f64;
     let x = p * span;
     let i = x.floor() as usize;
-    if i >= RAMP.len() - 1 {
-        return RAMP[RAMP.len() - 1];
+    if i >= ramp.len() - 1 {
+        return ramp[ramp.len() - 1];
     }
-    lerp(RAMP[i], RAMP[i + 1], x - i as f64)
+    lerp(ramp[i], ramp[i + 1], x - i as f64)
 }
 
 /// Brighten toward white by `amount` (0..=1), for the travelling shimmer.

@@ -456,6 +456,7 @@ impl App {
                     Sort::Duration => y.duration_secs().cmp(&x.duration_secs()),
                     Sort::Title => x.title().to_lowercase().cmp(&y.title().to_lowercase()),
                     Sort::Folder => x.cwd.cmp(&y.cwd).then_with(|| y.mtime.cmp(&x.mtime)),
+                    Sort::Tokens => y.total_tokens().cmp(&x.total_tokens()),
                 })
         });
 
