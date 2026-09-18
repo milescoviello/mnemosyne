@@ -63,6 +63,48 @@ fn date_band(mtime: i64) -> &'static str {
     }
 }
 
+/// Something a click can trigger. Mouse and keyboard funnel into the same
+/// `do_action`, so the two can never drift apart.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Action {
+    Resume,
+    Tmux,
+    NewWindow,
+    Filter,
+    Search,
+    Favorite,
+    Tag,
+    TagFilter,
+    CycleSort,
+    GroupByDir,
+    CycleDate,
+    FavOnly,
+    LiveOnly,
+    Subagents,
+    Preview,
+    Clear,
+    Help,
+    Quit,
+}
+
+/// Where things ended up on screen last frame. Rebuilt every draw, because the
+/// layout depends on the terminal size and on which panes are showing.
+#[derive(Clone, Default)]
+pub struct Hits {
+    pub list: ratatui::layout::Rect,
+    /// Screen row of the footer and of the column headings, so a click is
+    /// tested against the row it actually landed on. Without this, a footer
+    /// hint would claim every click that shared its x.
+    pub footer_y: u16,
+    pub colhead_y: u16,
+    /// The list's scroll position, needed to turn a screen row into an index.
+    pub list_offset: usize,
+    /// Column header spans: (x start, x end inclusive, what it sorts by).
+    pub columns: Vec<(u16, u16, Sort)>,
+    /// Footer hint spans: (x start, x end inclusive, action).
+    pub footer: Vec<(u16, u16, Action)>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ResumeTarget {
     pub id: String,
@@ -135,6 +177,15 @@ pub struct App {
     pub status: String,
     pub outcome: Option<Outcome>,
     pub quit: bool,
+    /// Mouse reporting steals the terminal's own text selection, so it can be
+    /// turned off (key `M`, or --no-mouse) when you want to copy text.
+    pub mouse_on: bool,
+    pub hits: Hits,
+    pub sub_span: (u16, u16),
+    /// Set when `M` flipped mouse capture, so main can apply it.
+    pub mouse_toggled: bool,
+    pub list_state: ratatui::widgets::ListState,
+    last_click: Option<(std::time::Instant, usize)>,
     pub restore_model: bool,
     pub want_refresh: bool,
 
@@ -174,6 +225,12 @@ impl App {
             status: String::new(),
             outcome: None,
             quit: false,
+            mouse_on: true,
+            hits: Hits::default(),
+            sub_span: (0, 0),
+            mouse_toggled: false,
+            list_state: ratatui::widgets::ListState::default(),
+            last_click: None,
             restore_model,
             want_refresh: false,
             preview_cache: HashMap::new(),
@@ -742,6 +799,182 @@ impl App {
             .collect()
     }
 
+    /// Every command the interface offers, in one place. Keys and mouse clicks
+    /// both come through here.
+    pub fn do_action(&mut self, a: Action) {
+        match a {
+            Action::Resume => self.resume(Target::Here),
+            Action::Tmux => self.resume(Target::Tmux),
+            Action::NewWindow => self.resume(Target::Window),
+            Action::Filter => self.input_mode = InputMode::Fuzzy,
+            Action::Search => self.input_mode = InputMode::Deep,
+            Action::Favorite => self.toggle_favorite(),
+            Action::Tag => {
+                self.input.clear();
+                self.input_mode = InputMode::TagAdd;
+            }
+            Action::TagFilter => {
+                self.input = self.tag_filter.clone().unwrap_or_default();
+                self.input_mode = InputMode::TagFilter;
+            }
+            Action::CycleSort => {
+                self.sort = self.sort.next();
+                self.status = format!("sort: {}", self.sort.label());
+                self.rebuild();
+                self.goto_top();
+            }
+            Action::GroupByDir => {
+                self.group_by_dir = !self.group_by_dir;
+                self.status = if self.group_by_dir {
+                    "grouped by directory".into()
+                } else {
+                    "flat list".into()
+                };
+                self.rebuild();
+            }
+            Action::CycleDate => {
+                self.date = self.date.next();
+                self.status = format!("dates: {}", self.date.label());
+                self.rebuild();
+            }
+            Action::FavOnly => {
+                self.fav_only = !self.fav_only;
+                self.status = if self.fav_only { "favourites only".into() } else { "all sessions".into() };
+                self.rebuild();
+            }
+            Action::LiveOnly => {
+                self.live_only = !self.live_only;
+                self.status = if self.live_only { "running only".into() } else { "all sessions".into() };
+                self.rebuild();
+            }
+            Action::Subagents => {
+                self.show_subagents = !self.show_subagents;
+                self.status = if self.show_subagents {
+                    "subagents shown — click ⌁ or press → to expand".into()
+                } else {
+                    "subagents hidden".into()
+                };
+                self.rebuild();
+            }
+            Action::Preview => {
+                self.show_preview = !self.show_preview;
+                self.status = if self.show_preview { "preview on".into() } else { "preview off".into() };
+            }
+            Action::Clear => {
+                self.selected.clear();
+                self.fuzzy.clear();
+                self.deep.clear();
+                self.deep_hits = None;
+                self.tag_filter = None;
+                self.fav_only = false;
+                self.live_only = false;
+                self.date = DateRange::All;
+                self.status = "filters cleared".into();
+                self.rebuild();
+            }
+            Action::Help => self.input_mode = InputMode::Help,
+            Action::Quit => self.quit = true,
+        }
+    }
+
+    /// Set a specific sort (clicking a column header, rather than cycling).
+    pub fn set_sort(&mut self, s: Sort) {
+        self.sort = s;
+        self.status = format!("sort: {}", s.label());
+        self.rebuild();
+        self.goto_top();
+    }
+
+    // ---------------- mouse ----------------
+
+    pub fn on_mouse(&mut self, m: crossterm::event::MouseEvent) {
+        use crossterm::event::{MouseButton, MouseEventKind};
+
+        // Text entry keeps the keyboard, but clicks should still work.
+        if self.input_mode == InputMode::Help {
+            if matches!(m.kind, MouseEventKind::Down(_)) {
+                self.input_mode = InputMode::Normal;
+            }
+            return;
+        }
+
+        match m.kind {
+            MouseEventKind::ScrollUp => self.move_by(-3),
+            MouseEventKind::ScrollDown => self.move_by(3),
+            MouseEventKind::Down(MouseButton::Left) => self.click(m.column, m.row, false),
+            MouseEventKind::Down(MouseButton::Right) => self.click(m.column, m.row, true),
+            _ => {}
+        }
+    }
+
+    fn click(&mut self, x: u16, y: u16, right: bool) {
+        // a column heading: sort by it
+        if y == self.hits.colhead_y {
+            for (x0, x1, sort) in self.hits.columns.clone() {
+                if x >= x0 && x <= x1 {
+                    self.set_sort(sort);
+                    return;
+                }
+            }
+            return;
+        }
+        // a footer hint: run it
+        if y == self.hits.footer_y {
+            for (x0, x1, action) in self.hits.footer.clone() {
+                if x >= x0 && x <= x1 {
+                    self.do_action(action);
+                    return;
+                }
+            }
+            return;
+        }
+        // a list row
+        let l = self.hits.list;
+        if y >= l.y && y < l.y + l.height && x >= l.x && x < l.x + l.width {
+            let idx = self.hits.list_offset + (y - l.y) as usize;
+            if idx >= self.view.len() {
+                return;
+            }
+            if !self.view[idx].selectable() {
+                return; // a date band or folder heading
+            }
+            let same_row = self.cursor == idx;
+            self.cursor = idx;
+            self.status.clear();
+
+            if right {
+                self.toggle_favorite();
+                return;
+            }
+            // Clicking the ⌁ count expands that session's subagents.
+            if let Some(i) = self.current_idx() {
+                if self.all[i].subagent_count > 0 && !self.all[i].is_subagent {
+                    let (sx0, sx1) = self.hits_sub_span();
+                    if x >= sx0 && x <= sx1 {
+                        let open = self.expanded.contains(&self.all[i].id);
+                        self.toggle_expand(!open);
+                        return;
+                    }
+                }
+            }
+            // Second click on the same row within the double-click window
+            // resumes it; a first click just moves the cursor.
+            let now = std::time::Instant::now();
+            let dbl = matches!(self.last_click, Some((t, r))
+                if r == idx && same_row && now.duration_since(t).as_millis() < 450);
+            self.last_click = Some((now, idx));
+            if dbl {
+                self.last_click = None;
+                self.do_action(Action::Resume);
+            }
+        }
+    }
+
+    /// x-range of the subagent-count cell, filled in by the renderer.
+    fn hits_sub_span(&self) -> (u16, u16) {
+        self.sub_span
+    }
+
     // ---------------- key handling ----------------
 
     pub fn on_key(&mut self, k: KeyEvent) {
@@ -838,7 +1071,7 @@ impl App {
         // ---- normal mode ----
         self.status.clear();
         match k.code {
-            KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
+            KeyCode::Char('q') | KeyCode::Esc => self.do_action(Action::Quit),
 
             KeyCode::Up | KeyCode::Char('k') => self.move_by(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_by(1),
@@ -849,27 +1082,23 @@ impl App {
             KeyCode::Home | KeyCode::Char('g') => self.goto_top(),
             KeyCode::End | KeyCode::Char('G') => self.goto_bottom(),
 
-            KeyCode::Enter => self.resume(if alt { Target::Window } else { Target::Here }),
-            KeyCode::Char('n') if ctrl => self.resume(Target::Window),
-            KeyCode::Char('t') if ctrl => self.resume(Target::Tmux),
+            KeyCode::Enter => {
+                self.do_action(if alt { Action::NewWindow } else { Action::Resume })
+            }
+            KeyCode::Char('n') if ctrl => self.do_action(Action::NewWindow),
+            KeyCode::Char('t') if ctrl => self.do_action(Action::Tmux),
 
             KeyCode::Char(' ') => self.toggle_select(),
-            KeyCode::Char('f') if ctrl => self.input_mode = InputMode::Deep,
-            KeyCode::Char('f') => self.toggle_favorite(),
-            KeyCode::Char('t') => {
-                self.input.clear();
-                self.input_mode = InputMode::TagAdd;
-            }
-            KeyCode::Char('T') => {
-                self.input = self.tag_filter.clone().unwrap_or_default();
-                self.input_mode = InputMode::TagFilter;
-            }
+            KeyCode::Char('f') if ctrl => self.do_action(Action::Search),
+            KeyCode::Char('f') => self.do_action(Action::Favorite),
+            KeyCode::Char('t') => self.do_action(Action::Tag),
+            KeyCode::Char('T') => self.do_action(Action::TagFilter),
             KeyCode::Char('N') => {
                 self.input = self.current().map(|s| s.note.clone()).unwrap_or_default();
                 self.input_mode = InputMode::Note;
             }
-            KeyCode::Char('/') => self.input_mode = InputMode::Fuzzy,
-            KeyCode::Char('F') => self.input_mode = InputMode::Deep,
+            KeyCode::Char('/') => self.do_action(Action::Filter),
+            KeyCode::Char('F') => self.do_action(Action::Search),
             KeyCode::Char('m') => {
                 self.deep_mode = self.deep_mode.next();
                 if !self.deep.trim().is_empty() {
@@ -878,76 +1107,31 @@ impl App {
                 self.status = format!("search mode: {}", self.deep_mode.label());
             }
 
-            KeyCode::Char('s') => {
-                self.sort = self.sort.next();
-                self.status = format!("sort: {}", self.sort.label());
-                self.rebuild();
-                // Keeping the cursor on the same session across a re-sort
-                // scrolls you into the middle of the new order, which reads
-                // like the sort did not work. Show the top instead.
-                self.goto_top();
-            }
-            KeyCode::Char('o') => {
-                self.group_by_dir = !self.group_by_dir;
-                self.status = if self.group_by_dir {
-                    "grouped by directory".into()
-                } else {
-                    "flat list".into()
-                };
-                self.rebuild();
-            }
-            KeyCode::Char('D') => {
-                self.date = self.date.next();
-                self.status = format!("dates: {}", self.date.label());
-                self.rebuild();
-            }
-            KeyCode::Char('*') => {
-                self.fav_only = !self.fav_only;
-                self.status = if self.fav_only { "favourites only".into() } else { "all sessions".into() };
-                self.rebuild();
-            }
-            KeyCode::Char('L') => {
-                self.live_only = !self.live_only;
-                self.status = if self.live_only { "running sessions only".into() } else { "all sessions".into() };
-                self.rebuild();
-            }
-            KeyCode::Char('a') => {
-                self.show_subagents = !self.show_subagents;
-                self.status = if self.show_subagents {
-                    "subagents available — use → to expand".into()
-                } else {
-                    "subagents hidden".into()
-                };
-                self.rebuild();
-            }
+            KeyCode::Char('s') => self.do_action(Action::CycleSort),
+            KeyCode::Char('o') => self.do_action(Action::GroupByDir),
+            KeyCode::Char('D') => self.do_action(Action::CycleDate),
+            KeyCode::Char('*') => self.do_action(Action::FavOnly),
+            KeyCode::Char('L') => self.do_action(Action::LiveOnly),
+            KeyCode::Char('a') => self.do_action(Action::Subagents),
+            KeyCode::Char('p') => self.do_action(Action::Preview),
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => self.toggle_expand(true),
             KeyCode::Left | KeyCode::Char('h') => self.toggle_expand(false),
 
-            KeyCode::Char('c') => {
-                self.selected.clear();
-                self.fuzzy.clear();
-                self.deep.clear();
-                self.deep_hits = None;
-                self.tag_filter = None;
-                self.fav_only = false;
-                self.live_only = false;
-                self.date = DateRange::All;
-                self.status = "filters cleared".into();
-                self.rebuild();
-            }
-            KeyCode::Char('p') => {
-                self.show_preview = !self.show_preview;
-                self.status = if self.show_preview {
-                    "preview on".into()
+            KeyCode::Char('M') => {
+                self.mouse_on = !self.mouse_on;
+                self.mouse_toggled = true;
+                self.status = if self.mouse_on {
+                    "mouse on".into()
                 } else {
-                    "preview off".into()
+                    "mouse off — terminal text selection works again".into()
                 };
             }
+            KeyCode::Char('c') => self.do_action(Action::Clear),
             KeyCode::Char('R') | KeyCode::F(5) => {
                 self.want_refresh = true;
                 self.status = "reindexing…".into();
             }
-            KeyCode::Char('?') => self.input_mode = InputMode::Help,
+            KeyCode::Char('?') => self.do_action(Action::Help),
             _ => {}
         }
     }

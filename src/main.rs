@@ -20,6 +20,7 @@ mod ui;
 use anyhow::Result;
 use app::{App, Outcome};
 use crossterm::event::{self, Event};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -46,6 +47,7 @@ usage: mnemosyne [options]
 
   --subagents      start with subagent transcripts revealed
   --no-splash      skip the opening animation (or set MNEMOSYNE_NO_SPLASH=1)
+  --no-mouse       start with mouse reporting off (toggle in-app with M)
   --no-model       do not restore each session's original --model
   -h, --help       this text
   -V, --version    version
@@ -215,8 +217,13 @@ fn main() -> Result<()> {
     app.show_subagents = has("--subagents");
     app.rebuild();
 
+    app.mouse_on = !has("--no-mouse");
+
     enable_raw_mode()?;
     stderr().execute(EnterAlternateScreen)?;
+    if app.mouse_on {
+        stderr().execute(EnableMouseCapture)?;
+    }
     let mut term = Terminal::new(CrosstermBackend::new(stderr()))?;
 
     if use_splash {
@@ -236,6 +243,7 @@ fn main() -> Result<()> {
 
     let res = run(&mut term, &mut app);
     disable_raw_mode()?;
+    let _ = execute!(term.backend_mut(), DisableMouseCapture);
     execute!(term.backend_mut(), LeaveAlternateScreen)?;
     term.show_cursor()?;
     res?;
@@ -264,12 +272,24 @@ fn run<B: ratatui::backend::Backend>(term: &mut Terminal<B>, app: &mut App) -> R
         if event::poll(Duration::from_millis(120))? {
             match event::read()? {
                 Event::Key(k) if k.kind == event::KeyEventKind::Press => app.on_key(k),
+                Event::Mouse(m) => app.on_mouse(m),
                 Event::Resize(_, _) => {}
                 _ => {}
             }
         }
 
         app.absorb_deep();
+
+        // `M` flips mouse reporting, so the terminal can do its own text
+        // selection again when you need to copy something off the screen.
+        if app.mouse_toggled {
+            app.mouse_toggled = false;
+            if app.mouse_on {
+                let _ = stderr().execute(EnableMouseCapture);
+            } else {
+                let _ = stderr().execute(DisableMouseCapture);
+            }
+        }
 
         if app.want_refresh {
             app.want_refresh = false;

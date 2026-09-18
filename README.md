@@ -10,41 +10,73 @@ directory you happen to be standing in, so there is no way to see the whole
 picture. `mnemosyne` is that missing view.
 
 ```
-  mnemosyne                                              330 sessions · ★12 · 6 live · recency
+  ⌇ mnemosyne                                                    330 sessions · ★12 · ●6 live · recency
 
-       AGE  FOLDER           TITLE                          LEFT OFF                  MODEL     MSGS  TAGS
-    today ────────────────────────────────────────────────────────────────────────────────────────────────
-  →    7s  ~/proj           fix the auth flow              the redirect drops state   opus-5    6.3k
-      26s  ~/proj       ⌁27 migrate the schema             run it against staging     opus-5     412  #api
-    ●  4m  ~                update the deps                check the lockfile diff    opus-5    1.2k
-    yesterday ────────────────────────────────────────────────────────────────────────────────────────────
-   ★  1d   ~/site           redesign the landing page      make the hero smaller      opus-5    8.1k
-       1d  ~/notes          tidy the vault                 merge the daily notes      sonnet-5  3.4k
+         AGE  FOLDER              TITLE                        LEFT OFF                    MODEL     MSGS  TAGS
+  ≈ today  ~~≈≈≈~~∼∼∼∼~~≈≈≈~~      ~~~~        ~~~~
+  ▌ ❯ ●   6s  ~/proj              fix the auth flow            the redirect drops state    opus-5    6.3k
+  ▌      26s  ~/proj         ⌁27  migrate the schema           run it against staging      opus-5     412  #api
+  ▌       4m  ~                   update the deps              check the lockfile diff     opus-5    1.2k
+  ≈ yesterday  ~~≈≈≈~~∼∼∼∼~~≈≈≈~~      ~~~~
+  ▌ ★    1d   ~/site              redesign the landing page    make the hero smaller       opus-5    8.1k
+  ▌       1d  ~/notes             tidy the vault               merge the daily notes       sonnet-5  3.4k
 
-  ──────────────────────────────────────────────────────────────────────────────────────────────────────
-  fix the auth flow                  ~/proj · main · 686K · 187 entries · 35m · bypass · tmux mn-a3f21c04
+  ~~∼∼   ∼∼~≈≈≈~~~∼ ∼~~~≈≈~~       ~~~         ≈≈
+  fix the auth flow                    ~/proj · main · 686K · 187 entries · 35m · bypass · tmux mn-a3f21c04
 
   claude    Found it — the callback rebuilds the URL and loses the query string…
   you       does that break the mobile flow too?
 
-  ↑↓ move   enter resume   / filter   F search   ctrl+t tmux   f ★   t tag   s sort   ? keys        1/330
+  ↑↓ move   ↵ resume   / filter   F search   ^t tmux   f ★   t tag   s sort   ? keys                    1/330
 ```
 
-No borders; structure comes from alignment and whitespace. Columns are
-computed once per frame from one width table, so the header row cannot drift
-out of step with the rows.
+## The look
 
-At a wide terminal a title column alone leaves a sixty-column void in the
-middle of every row, so the leftover space becomes a **LEFT OFF** column
-carrying the last thing you said — the best single cue for "which one was
-this". When a session has no AI title its own opening prompt becomes the
-title, and that is often also the last prompt; printing it twice in one row
-looks like a rendering fault, so the duplicate is suppressed. Below about 80
-columns the column is dropped and the rail carries the cue instead.
+One idea runs through it: **the pool**. Mnemosyne is the spring of memory, so
+the list is a water surface and older sessions sink.
 
-Sorting by recency adds dim date bands, which give a 300-row list something
-to scan against. They are omitted under any other sort, where they would be
-meaningless, and under grouped mode, which has its own folder headings.
+A **depth gutter** runs down the left edge, coloured on the water ramp by each
+session's age — today's are pale foam at the surface, last year's fade into
+deep indigo. Age becomes something you see rather than read, and the age text
+sits on the same ramp. Subagents hang off their parent on a thinner `│`.
+
+**Date bands are ripples**, not rules, and they dissolve toward the right
+instead of stretching a hard line across the terminal. They appear only when
+sorting by recency, where time order makes them mean something.
+
+The **wordmark is lit letter by letter** along the same ramp, and every piece
+of chrome — cursor `❯`, band `≈`, prompt `⌇`, selection `◆` — comes from one
+small water alphabet. No borders anywhere; structure comes from alignment.
+
+At a wide terminal a title column alone leaves a sixty-column void in every
+row, so the leftover space becomes a **LEFT OFF** column carrying the last
+thing you said. When a session has no AI title its opening prompt becomes the
+title, and that is often also the last prompt, so the duplicate is suppressed
+rather than printed twice. Below about 80 columns the column is dropped and
+the rail carries the cue instead.
+
+## Mouse
+
+It is a pointer-driven list as much as a keyboard one.
+
+| | |
+|---|---|
+| click a row | select it |
+| click it again | resume it |
+| right-click | favourite it |
+| wheel | scroll |
+| click a column heading | sort by that column |
+| click a `⌁n` count | open that session's subagents |
+| `M` | mouse off, so the terminal can select text again |
+
+Everything clickable records its screen span as it draws, and the mouse
+handler tests against what was actually rendered — so the hit areas cannot
+drift out of step with the layout. Clicks and keys both dispatch through one
+`Action` enum, so the two can never disagree about what a command does.
+
+Mouse reporting takes over the terminal's own text selection, which is why
+`M` (or `--no-mouse`) exists. In most terminals holding shift while dragging
+also bypasses it.
 
 
 No borders, aligned columns, one footer line. The full key list lives behind

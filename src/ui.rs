@@ -1,53 +1,88 @@
 //! Rendering.
 //!
-//! Visual rules, in order of importance:
+//! The look has one idea behind it: **the pool**. Mnemosyne is the spring of
+//! memory, so the list is a water surface and older sessions sink. That gives
+//! the interface its own visual language rather than a borrowed one:
 //!
-//! 1. No borders. Structure comes from alignment and whitespace, not boxes.
-//! 2. One accent colour. Everything structural is dim grey; colour means
-//!    something (favourite, running, tag) rather than decorating.
-//! 3. One footer line. The full key list lives behind `?` instead of being
-//!    permanently on screen.
-//! 4. Columns line up, and the header row is computed from the same widths as
-//!    the rows so they can never drift apart.
+//! * A depth gutter runs down the left edge, coloured on the water ramp by how
+//!   old each session is — recent ones are pale foam at the surface, old ones
+//!   fade into deep indigo. Age becomes something you see rather than read.
+//! * Date bands are drawn as ripples, not rules.
+//! * The wordmark is lit letter by letter along the same ramp.
+//! * Every glyph of chrome comes from the same small water alphabet.
+//!
+//! Everything clickable records its screen span into `app.hits` as it draws, so
+//! the mouse handler hit-tests against what was actually rendered.
 
-use crate::app::{App, InputMode, Row};
-use crate::model::{compact_count, fit, human_dur, human_size, reltime, short_cwd};
+use crate::app::{Action, App, InputMode, Row};
+use crate::art;
+use crate::model::{compact_count, fit, human_dur, human_size, reltime, short_cwd, Sort};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::Frame;
 
-const ACCENT: Color = Color::Cyan;
 const CHROME: Color = Color::DarkGray;
 const FAV: Color = Color::Yellow;
 const LIVE: Color = Color::Green;
 const TAG: Color = Color::Magenta;
 const TEXT: Color = Color::Gray;
 const BRIGHT: Color = Color::White;
+/// The selected row's band: a shallow pool lit from below.
+const BAND: Color = Color::Rgb(18, 42, 58);
+/// Overlay panels sit on still, deep water so the list cannot bleed through.
+const PANEL: Color = Color::Rgb(9, 17, 28);
 
-const PAD: &str = "  ";
-const CURSOR: &str = "  \u{2192} ";
-const NOCURSOR: &str = "    ";
+const MARGIN: usize = 2;
+/// margin + gutter + gap + cursor + gap + marker + gap
+const PREFIX: usize = MARGIN + 1 + 1 + 1 + 1 + 1 + 1;
 
-/// Column widths, derived once per frame so the header and the rows agree.
+fn rgb((r, g, b): (u8, u8, u8)) -> Color {
+    Color::Rgb(r, g, b)
+}
+
+/// How near the surface a session sits, 1.0 = just now, 0.0 = long sunk.
+/// Logarithmic, because the interesting differences are all in the first week.
+fn depth(mtime: i64) -> f64 {
+    let age = (chrono::Utc::now().timestamp() - mtime).max(0) as f64 / 86_400.0;
+    let t = (1.0 + age).ln() / (1.0 + 400.0f64).ln();
+    (1.0 - t).clamp(0.0, 1.0)
+}
+
 struct Cols {
     folder: usize,
     sub: usize,
     title: usize,
-    /// What you last said, dimmed. At wide terminals the title column would
-    /// otherwise leave a 60-column void in the middle of every row; this puts
-    /// the most useful recall cue there instead.
     preview: usize,
     model: usize,
     msgs: usize,
     tags: usize,
 }
 
-/// Do two strings start the same way, comparing by character?
-///
-/// Byte-offset slicing panics when the cut lands inside a multi-byte
-/// character, and prompts contain plenty of those.
+const TITLE_MAX: usize = 52;
+const PREVIEW_MIN: usize = 24;
+
+impl Cols {
+    fn new(width: usize) -> Cols {
+        let folder = if width >= 150 { 20 } else if width >= 120 { 16 } else { 12 };
+        let sub = 5;
+        let model = if width >= 150 { 12 } else if width >= 110 { 10 } else { 0 };
+        let msgs = 6;
+        let tags = if width >= 140 { 16 } else { 0 };
+        let fixed = PREFIX + 4 + 2 + folder + 1 + sub + model + msgs + tags;
+        let avail = width.saturating_sub(fixed).max(16);
+        let (title, preview) = if avail >= TITLE_MAX + PREVIEW_MIN + 2 {
+            (TITLE_MAX, avail - TITLE_MAX - 2)
+        } else {
+            (avail, 0)
+        };
+        Cols { folder, sub, title, preview, model, msgs, tags }
+    }
+}
+
+/// Character-wise shared-prefix test. Byte slicing panics mid-character and
+/// prompts are full of non-ASCII.
 fn same_prefix(a: &str, b: &str, want: usize) -> bool {
     let mut ai = a.trim().chars().flat_map(|c| c.to_lowercase());
     let mut bi = b.trim().chars().flat_map(|c| c.to_lowercase());
@@ -66,65 +101,30 @@ fn same_prefix(a: &str, b: &str, want: usize) -> bool {
     }
 }
 
-/// Past this, a title column is just empty space.
-const TITLE_MAX: usize = 52;
-/// Below this a preview is too clipped to be worth the column.
-const PREVIEW_MIN: usize = 24;
-
-impl Cols {
-    fn new(width: usize) -> Cols {
-        let folder = if width >= 150 {
-            20
-        } else if width >= 120 {
-            16
-        } else {
-            12
-        };
-        // wide enough for the busiest session here (349 subagents) plus a gap
-        let sub = 5;
-        let model = if width >= 150 { 12 } else if width >= 110 { 10 } else { 0 };
-        let msgs = 6;
-        // tags trail the right edge, so they need reserved room or they fall
-        // off the screen along with their header
-        let tags = if width >= 140 { 16 } else { 0 };
-        // 4 cursor + 2 marker + 4 age + 2 gap
-        let fixed = 4 + 2 + 4 + 2 + folder + 1 + sub + model + msgs + tags;
-        let avail = width.saturating_sub(fixed).max(16);
-        let (title, preview) = if avail >= TITLE_MAX + PREVIEW_MIN + 2 {
-            (TITLE_MAX, avail - TITLE_MAX - 2)
-        } else {
-            (avail, 0)
-        };
-        Cols { folder, sub, title, preview, model, msgs, tags }
-    }
-}
-
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
     let show_input = app.input_mode != InputMode::Normal && app.input_mode != InputMode::Help;
-    let rail = if app.show_preview && area.height >= 18 { 6 } else { 0 };
+    let rail = if app.show_preview && area.height >= 18 { 7 } else { 0 };
 
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),                             // title bar
-            Constraint::Length(1),                             // breathing room
-            Constraint::Length(1),                             // column header
-            Constraint::Min(3),                                // list
-            Constraint::Length(rail),                          // preview rail
-            Constraint::Length(if show_input { 2 } else { 1 }), // input / spacer
-            Constraint::Length(1),                             // footer
+            Constraint::Length(1),                              // wordmark
+            Constraint::Length(1),                              // air
+            Constraint::Length(1),                              // column heads
+            Constraint::Min(3),                                 // the pool
+            Constraint::Length(rail),                           // rail
+            Constraint::Length(if show_input { 2 } else { 1 }), // input / air
+            Constraint::Length(1),                              // footer
         ])
         .split(area);
 
     let cols = Cols::new(area.width as usize);
 
-    draw_titlebar(f, app, rows[0]);
-    draw_colheader(f, &cols, rows[2]);
-    draw_list(f, app, &cols, rows[3]);
+    draw_wordmark(f, app, rows[0]);
+    draw_colheads(f, app, &cols, rows[2]);
+    draw_pool(f, app, &cols, rows[3]);
     if rail > 0 {
-        // When the list carries a LEFT OFF column there is no reason for the
-        // rail to print the same line again; it shows more of the exchange.
         draw_rail(f, app, rows[4], cols.preview == 0);
     }
     if show_input {
@@ -137,138 +137,135 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 }
 
-/// ` mnemosyne                    328 sessions · ★12 · 6 live · recency`
-fn draw_titlebar(f: &mut Frame, app: &App, area: Rect) {
-    let left = vec![
-        Span::raw(PAD),
-        Span::styled(
-            "mnemosyne",
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ),
+/// `⌇ m n e m o s y n e` — the name lit along the water ramp.
+fn draw_wordmark(f: &mut Frame, app: &App, area: Rect) {
+    let mut spans = vec![
+        Span::raw(" ".repeat(MARGIN)),
+        Span::styled("⌇ ", Style::default().fg(rgb(art::ramp(0.55)))),
     ];
+    let letters: Vec<char> = art::WORD.chars().collect();
+    for (i, ch) in letters.iter().enumerate() {
+        let p = 0.30 + (i as f64 / (letters.len() - 1) as f64) * 0.70;
+        spans.push(Span::styled(
+            format!("{ch}"),
+            Style::default().fg(rgb(art::ramp(p))).add_modifier(Modifier::BOLD),
+        ));
+    }
 
-    let mut bits: Vec<Span> = Vec::new();
     let dot = || Span::styled(" · ", Style::default().fg(CHROME));
-
-    bits.push(Span::styled(
+    let mut right: Vec<Span> = vec![Span::styled(
         format!("{} sessions", app.item_count()),
         Style::default().fg(TEXT),
-    ));
+    )];
     let favs = app.meta.favorite_count();
     if favs > 0 {
-        bits.push(dot());
-        bits.push(Span::styled(format!("★{favs}"), Style::default().fg(FAV)));
+        right.push(dot());
+        right.push(Span::styled(format!("★{favs}"), Style::default().fg(FAV)));
     }
     if app.live.count > 0 {
-        bits.push(dot());
-        bits.push(Span::styled(
-            format!("●{} live", app.live.count),
-            Style::default().fg(LIVE),
-        ));
+        right.push(dot());
+        right.push(Span::styled(format!("●{} live", app.live.count), Style::default().fg(LIVE)));
     }
-    bits.push(dot());
-    bits.push(Span::styled(app.sort.label(), Style::default().fg(CHROME)));
-
-    // only states that are actually on get named, so the bar stays quiet
-    if app.group_by_dir {
-        bits.push(dot());
-        bits.push(Span::styled("grouped", Style::default().fg(ACCENT)));
-    }
-    if app.date != crate::model::DateRange::All {
-        bits.push(dot());
-        bits.push(Span::styled(app.date.label(), Style::default().fg(ACCENT)));
-    }
-    if app.fav_only {
-        bits.push(dot());
-        bits.push(Span::styled("★ only", Style::default().fg(FAV)));
-    }
-    if app.live_only {
-        bits.push(dot());
-        bits.push(Span::styled("live only", Style::default().fg(LIVE)));
-    }
-    if let Some(t) = &app.tag_filter {
-        bits.push(dot());
-        bits.push(Span::styled(format!("#{t}"), Style::default().fg(TAG)));
-    }
-    if !app.fuzzy.trim().is_empty() {
-        bits.push(dot());
-        bits.push(Span::styled(format!("/{}", app.fuzzy), Style::default().fg(ACCENT)));
-    }
-    if app.deep_busy {
-        bits.push(dot());
-        bits.push(Span::styled("searching…", Style::default().fg(ACCENT)));
-    } else if app.deep_hits.is_some() {
-        bits.push(dot());
-        bits.push(Span::styled(
+    right.push(dot());
+    right.push(Span::styled(app.sort.label(), Style::default().fg(CHROME)));
+    for (on, label, col) in [
+        (app.group_by_dir, "grouped".to_string(), rgb(art::ramp(0.75))),
+        (app.date != crate::model::DateRange::All, app.date.label(), rgb(art::ramp(0.75))),
+        (app.fav_only, "★ only".to_string(), FAV),
+        (app.live_only, "live only".to_string(), LIVE),
+        (app.tag_filter.is_some(), format!("#{}", app.tag_filter.clone().unwrap_or_default()), TAG),
+        (!app.fuzzy.trim().is_empty(), format!("/{}", app.fuzzy), rgb(art::ramp(0.85))),
+        (app.deep_busy, "searching…".to_string(), rgb(art::ramp(0.85))),
+        (
+            !app.deep_busy && app.deep_hits.is_some(),
             format!("{} “{}”", app.deep_mode.label(), app.deep),
-            Style::default().fg(ACCENT),
-        ));
-    }
-    if !app.selected.is_empty() {
-        bits.push(dot());
-        bits.push(Span::styled(
-            format!("{} selected", app.selected.len()),
-            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
-        ));
+            rgb(art::ramp(0.85)),
+        ),
+        (!app.selected.is_empty(), format!("{} picked", app.selected.len()), rgb(art::ramp(0.9))),
+        (!app.mouse_on, "mouse off".to_string(), CHROME),
+    ] {
+        if on {
+            right.push(dot());
+            right.push(Span::styled(label, Style::default().fg(col)));
+        }
     }
 
-    let lw: usize = left.iter().map(|s| s.content.chars().count()).sum();
-    let rw: usize = bits.iter().map(|s| s.content.chars().count()).sum();
-    let gap = (area.width as usize).saturating_sub(lw + rw + 2);
-
-    let mut spans = left;
-    spans.push(Span::raw(" ".repeat(gap)));
-    spans.extend(bits);
+    let lw: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let rw: usize = right.iter().map(|s| s.content.chars().count()).sum();
+    spans.push(Span::raw(" ".repeat((area.width as usize).saturating_sub(lw + rw + MARGIN))));
+    spans.extend(right);
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_colheader(f: &mut Frame, c: &Cols, area: Rect) {
-    let st = Style::default().fg(CHROME);
-    let mut s = String::new();
-    s.push_str(NOCURSOR);
-    s.push_str("  ");
-    s.push_str(&format!("{:>4}", "AGE"));
-    s.push_str("  ");
-    s.push_str(&format!("{:<w$}", "FOLDER", w = c.folder));
-    s.push(' ');
-    s.push_str(&" ".repeat(c.sub));
-    s.push_str(&format!("{:<w$}", "TITLE", w = c.title));
+/// Column headings, and the clickable spans that sort by them.
+fn draw_colheads(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
+    app.hits.columns.clear();
+    app.hits.colhead_y = area.y;
+    let mut spans: Vec<Span> = vec![Span::raw(" ".repeat(PREFIX))];
+    let mut x = area.x + PREFIX as u16;
+
+    let head = |spans: &mut Vec<Span>, x: &mut u16, text: String, w: usize, sort: Option<Sort>,
+                    hits: &mut Vec<(u16, u16, Sort)>| {
+        if w == 0 {
+            return;
+        }
+        if let Some(s) = sort {
+            hits.push((*x, *x + text.trim().chars().count() as u16, s));
+        }
+        *x += w as u16;
+        spans.push(Span::styled(text, Style::default().fg(CHROME)));
+    };
+
+    let hits = &mut app.hits.columns;
+    head(&mut spans, &mut x, format!("{:>4}  ", "AGE"), 6, Some(Sort::Recency), hits);
+    head(&mut spans, &mut x, format!("{:<w$} ", "FOLDER", w = c.folder), c.folder + 1, Some(Sort::Folder), hits);
+    head(&mut spans, &mut x, " ".repeat(c.sub), c.sub, None, hits);
+    head(&mut spans, &mut x, format!("{:<w$}", "TITLE", w = c.title), c.title, Some(Sort::Title), hits);
     if c.preview > 0 {
-        s.push_str("  ");
-        s.push_str(&format!("{:<w$}", "LEFT OFF", w = c.preview));
+        head(&mut spans, &mut x, format!("  {:<w$}", "LEFT OFF", w = c.preview), c.preview + 2, None, hits);
     }
-    if c.model > 0 {
-        s.push_str(&format!("{:<w$}", "MODEL", w = c.model));
-    }
-    s.push_str(&format!("{:>w$}", "MSGS", w = c.msgs));
+    head(&mut spans, &mut x, format!("{:<w$}", "MODEL", w = c.model), c.model, None, hits);
+    head(&mut spans, &mut x, format!("{:>w$}", "MSGS", w = c.msgs), c.msgs, Some(Sort::Entries), hits);
     if c.tags > 0 {
-        s.push_str("  TAGS");
+        head(&mut spans, &mut x, "  TAGS".to_string(), 6, None, hits);
     }
-    f.render_widget(Paragraph::new(Span::styled(s, st)), area);
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_list(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
+fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
+    let width = area.width as usize;
+    let cursor = app.cursor;
+
+    // where the subagent cell sits, so a click on ⌁ can expand it
+    let sub_x = area.x + (PREFIX + 4 + 2 + c.folder + 1) as u16;
+    app.sub_span = (sub_x, sub_x + c.sub as u16);
+
     let items: Vec<ListItem> = app
         .view
         .iter()
-        .map(|r| match r {
-            Row::Divider(label) => ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!("{label} "),
-                    Style::default().fg(CHROME).add_modifier(Modifier::ITALIC),
-                ),
-                Span::styled(
-                    "─".repeat(
-                        (area.width as usize)
-                            .saturating_sub(NOCURSOR.len() + label.chars().count() + 3),
+        .enumerate()
+        .map(|(row_i, r)| match r {
+            // a ripple across the surface, with the band name riding it
+            Row::Divider(label) => {
+                let text = format!("{label}  ");
+                let used = MARGIN + 2 + text.chars().count();
+                let mut sp = vec![
+                    Span::raw(" ".repeat(MARGIN)),
+                    Span::styled("≈ ", Style::default().fg(rgb(art::sink(art::ramp(0.5), 0.3)))),
+                    Span::styled(
+                        text,
+                        Style::default().fg(rgb(art::ramp(0.55))).add_modifier(Modifier::ITALIC),
                     ),
-                    Style::default().fg(Color::Rgb(38, 44, 54)),
-                ),
-            ])),
+                ];
+                sp.extend(ripple_rule(width.saturating_sub(used), 0, 0.0));
+                ListItem::new(Line::from(sp))
+            }
             Row::Header(dir, n) => ListItem::new(Line::from(vec![
+                Span::raw(" ".repeat(MARGIN)),
+                Span::styled("▌ ", Style::default().fg(rgb(art::ramp(0.7)))),
                 Span::styled(
                     format!("{dir}  "),
-                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    Style::default().fg(rgb(art::ramp(0.8))).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(format!("{n}"), Style::default().fg(CHROME)),
             ])),
@@ -276,65 +273,69 @@ fn draw_list(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                 let s = &app.all[*i];
                 let is_sub = matches!(r, Row::Sub(_));
                 let key = s.path.to_string_lossy().to_string();
+                let d = depth(s.mtime);
                 let mut sp: Vec<Span> = Vec::new();
 
-                // one marker column: selection wins, then favourite, then live
+                // the depth gutter: how far this session has sunk
+                sp.push(Span::raw(" ".repeat(MARGIN)));
+                sp.push(Span::styled(
+                    if is_sub { "│" } else { "▌" },
+                    Style::default().fg(rgb(art::sink(art::ramp(0.25 + d * 0.75), if is_sub { 0.5 } else { 0.0 }))),
+                ));
+                sp.push(Span::raw(" "));
+
+                sp.push(Span::styled(
+                    if row_i == cursor { "❯" } else { " " },
+                    Style::default().fg(rgb(art::ramp(1.0))).add_modifier(Modifier::BOLD),
+                ));
+                sp.push(Span::raw(" "));
+
                 let (glyph, gstyle) = if app.selected.contains(&key) {
-                    ("✓", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))
+                    ("◆", Style::default().fg(rgb(art::ramp(0.9))).add_modifier(Modifier::BOLD))
                 } else if s.favorite {
                     ("★", Style::default().fg(FAV))
                 } else if s.is_live() {
-                    (
-                        if s.live_exact { "●" } else { "◌" },
-                        Style::default().fg(LIVE),
-                    )
+                    (if s.live_exact { "●" } else { "◌" }, Style::default().fg(LIVE))
                 } else {
                     (" ", Style::default())
                 };
                 sp.push(Span::styled(glyph, gstyle));
                 sp.push(Span::raw(" "));
 
+                // age reads on the same ramp, floored so it stays legible
                 sp.push(Span::styled(
                     format!("{:>4}", reltime(s.mtime)),
-                    Style::default().fg(CHROME),
+                    Style::default().fg(rgb(art::ramp(0.30 + d * 0.5))),
                 ));
                 sp.push(Span::raw("  "));
 
                 if is_sub {
                     sp.push(Span::styled(
-                        format!("{:<w$}", "└ subagent", w = c.folder),
+                        format!("{:<w$} ", "└ subagent", w = c.folder),
                         Style::default().fg(CHROME),
                     ));
                 } else {
-                    let folder = if s.cwd.is_empty() {
-                        "—".to_string()
-                    } else {
-                        short_cwd(&s.cwd)
-                    };
+                    let folder = if s.cwd.is_empty() { "—".to_string() } else { short_cwd(&s.cwd) };
                     sp.push(Span::styled(
-                        format!("{:<w$}", fit(&folder, c.folder), w = c.folder),
-                        Style::default().fg(Color::Blue),
+                        format!("{:<w$} ", fit(&folder, c.folder), w = c.folder),
+                        Style::default().fg(rgb(art::ramp(0.45 + d * 0.2))),
                     ));
                 }
-                sp.push(Span::raw(" "));
 
                 if s.subagent_count > 0 && !is_sub {
                     sp.push(Span::styled(
                         format!("{:<w$}", fit(&format!("⌁{}", s.subagent_count), c.sub - 1), w = c.sub),
-                        Style::default().fg(CHROME),
+                        Style::default().fg(rgb(art::ramp(0.5))),
                     ));
                 } else {
                     sp.push(Span::raw(" ".repeat(c.sub)));
                 }
 
-                let tstyle = if s.is_live() {
-                    Style::default().fg(BRIGHT)
-                } else {
-                    Style::default().fg(TEXT)
-                };
                 sp.push(Span::styled(
                     format!("{:<w$}", fit(s.title(), c.title), w = c.title),
-                    tstyle,
+                    Style::default()
+                        .fg(if s.is_live() { BRIGHT } else { TEXT })
+                        .add_modifier(if row_i == cursor { Modifier::BOLD } else { Modifier::empty() }),
                 ));
 
                 if c.preview > 0 {
@@ -343,15 +344,10 @@ fn draw_list(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                     } else {
                         s.first_prompt.as_str()
                     };
-                    // Sessions with no AI title fall back to their opening
-                    // prompt, which is often also the last one. Printing it
-                    // twice in one row just looks like a rendering fault.
                     if same_prefix(cue, s.title(), 24) {
                         cue = "";
                     }
                     sp.push(Span::raw("  "));
-                    // clip two short of the cell so a long cue can never run
-                    // into the MODEL column
                     sp.push(Span::styled(
                         format!("{:<w$}", fit(cue, c.preview.saturating_sub(2)), w = c.preview),
                         Style::default().fg(CHROME),
@@ -367,7 +363,6 @@ fn draw_list(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                     format!("{:>w$}", compact_count(s.entries), w = c.msgs),
                     Style::default().fg(CHROME),
                 ));
-
                 for t in &s.tags {
                     sp.push(Span::styled(format!("  #{t}"), Style::default().fg(TAG)));
                 }
@@ -378,44 +373,59 @@ fn draw_list(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
 
     let list = List::new(items)
         .block(Block::default())
-        .highlight_symbol(CURSOR)
-        .highlight_style(
-            Style::default()
-                .fg(BRIGHT)
-                .bg(Color::Rgb(22, 38, 52))
-                .add_modifier(Modifier::BOLD),
-        );
+        .highlight_style(Style::default().bg(BAND));
 
-    let mut st = ListState::default();
-    st.select(Some(app.cursor));
-    f.render_stateful_widget(list, area, &mut st);
+    app.list_state.select(Some(app.cursor));
+    f.render_stateful_widget(list, area, &mut app.list_state);
+
+    app.hits.list = area;
+    app.hits.list_offset = app.list_state.offset();
 }
 
-/// The bottom rail: what this session was, and where you left off.
+/// A rule made of water. Only the crests print, and they thin out toward the
+/// right so the line dissolves instead of shouting across the whole screen.
+fn ripple_rule(width: usize, indent: usize, phase: f64) -> Vec<Span<'static>> {
+    let span = (width as f64 * 0.55).max(24.0);
+    let mut sp = vec![Span::raw(" ".repeat(indent))];
+    for i in 0..width.saturating_sub(indent * 2) {
+        let fade = (1.0 - i as f64 / span).clamp(0.0, 1.0);
+        let (ch, inten) = art::ripple_at(i, phase, 0.0);
+        let v = inten * fade;
+        if v < 0.42 {
+            sp.push(Span::raw(" "));
+        } else {
+            sp.push(Span::styled(
+                ch.to_string(),
+                Style::default().fg(rgb(art::sink(art::ramp(0.18 + v * 0.22), 0.45))),
+            ));
+        }
+    }
+    sp
+}
+
+fn ripple_line(width: usize, indent: usize, phase: f64) -> Line<'static> {
+    Line::from(ripple_rule(width, indent, phase))
+}
+
 fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
     let turns = app.preview(8);
     let snippet = app.deep_snippet().cloned();
     let width = area.width as usize;
 
     let Some(s) = app.current().cloned() else {
-        let l = Line::from(vec![
-            Span::raw(PAD),
-            Span::styled(
-                "nothing matches these filters — press c to clear them",
-                Style::default().fg(CHROME),
-            ),
-        ]);
-        f.render_widget(Paragraph::new(Text::from(vec![Line::raw(""), l])), area);
+        let mut lines = vec![ripple_line(width, MARGIN, 1.7), Line::raw("")];
+        lines.push(Line::from(vec![
+            Span::raw(" ".repeat(MARGIN)),
+            Span::styled("still water — nothing matches. ", Style::default().fg(CHROME)),
+            Span::styled("c", Style::default().fg(rgb(art::ramp(0.85)))),
+            Span::styled(" clears the filters", Style::default().fg(CHROME)),
+        ]));
+        f.render_widget(Paragraph::new(Text::from(lines)), area);
         return;
     };
 
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        format!("{}{}", PAD, "─".repeat(width.saturating_sub(4))),
-        Style::default().fg(CHROME),
-    )));
+    let mut lines: Vec<Line> = vec![ripple_line(width, MARGIN, 1.7)];
 
-    // headline: title on the left, hard facts on the right
     let mut facts: Vec<String> = vec![short_cwd(&s.cwd)];
     if !s.git_branch.is_empty() {
         facts.push(s.git_branch.clone());
@@ -425,37 +435,32 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
     if s.duration_secs() > 0 {
         facts.push(human_dur(s.duration_secs()));
     }
-    // Worth seeing at a glance: this is what the session ran under, and it is
-    // not uniform across a history.
     if !s.permission_mode.is_empty() && s.permission_mode != "default" {
         facts.push(match s.permission_mode.as_str() {
-            "bypassPermissions" => "bypass".to_string(),
-            other => other.to_string(),
+            "bypassPermissions" => "bypass".into(),
+            o => o.to_string(),
         });
     }
     if let Some(pid) = s.live_pid {
-        facts.push(format!(
-            "{} {pid}",
-            if s.live_exact { "running" } else { "likely running" }
-        ));
+        facts.push(format!("{} {pid}", if s.live_exact { "running" } else { "likely running" }));
     }
     if s.has_tmux {
         facts.push(format!("tmux {}", crate::live::tmux_name(&s.id)));
     }
     let fact_str = facts.join(" · ");
-    let title = fit(s.title(), width.saturating_sub(fact_str.chars().count() + 8));
+    let title = fit(s.title(), width.saturating_sub(fact_str.chars().count() + MARGIN * 3));
     let gap = width
-        .saturating_sub(title.chars().count() + fact_str.chars().count() + 4)
+        .saturating_sub(title.chars().count() + fact_str.chars().count() + MARGIN * 2)
         .max(2);
     lines.push(Line::from(vec![
-        Span::raw(PAD),
+        Span::raw(" ".repeat(MARGIN)),
         Span::styled(title, Style::default().fg(BRIGHT).add_modifier(Modifier::BOLD)),
         Span::raw(" ".repeat(gap)),
         Span::styled(fact_str, Style::default().fg(CHROME)),
     ]));
 
     if !s.tags.is_empty() || !s.note.is_empty() {
-        let mut sp = vec![Span::raw(PAD)];
+        let mut sp = vec![Span::raw(" ".repeat(MARGIN))];
         for t in &s.tags {
             sp.push(Span::styled(format!("#{t} "), Style::default().fg(TAG)));
         }
@@ -470,64 +475,45 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
         lines.push(Line::raw(""));
     }
 
-    let label = |t: &str| {
-        Span::styled(
-            format!("{:<10}", t),
-            Style::default().fg(ACCENT),
-        )
-    };
+    let label = |t: &str| Span::styled(format!("{:<10}", t), Style::default().fg(rgb(art::ramp(0.72))));
     let body = width.saturating_sub(14);
-
-    // Three body lines, and no line repeating another. `last_prompt` is
-    // usually literally the final user turn, so showing both wastes a line
-    // and reads as clutter.
     const BODY: usize = 3;
     let mut body_lines: Vec<Line> = Vec::new();
-    // Compare by characters, not bytes: slicing a &str at an arbitrary byte
-    // offset panics when it lands inside a multi-byte character, and prompts
-    // contain plenty of non-ASCII.
-    let same = |a: &str, b: &str| same_prefix(a, b, 48);
-
     if let Some(sn) = snippet {
         body_lines.push(Line::from(vec![
-            Span::raw(PAD),
+            Span::raw(" ".repeat(MARGIN)),
             label("match"),
             Span::styled(fit(&sn, body), Style::default().fg(BRIGHT)),
         ]));
     }
     if show_cue && !s.last_prompt.is_empty() {
         body_lines.push(Line::from(vec![
-            Span::raw(PAD),
+            Span::raw(" ".repeat(MARGIN)),
             label("left off"),
             Span::styled(fit(&s.last_prompt, body), Style::default().fg(BRIGHT)),
         ]));
     }
-    // A turn that is nothing but tool invocations ("[Bash] [Read]") tells you
-    // nothing about the conversation, so it does not earn a rail line.
     let only_tools = |t: &str| {
-        let trimmed = t.trim();
-        !trimmed.is_empty()
-            && trimmed
-                .split_whitespace()
-                .all(|w| w.starts_with('[') && w.ends_with(']'))
+        let t = t.trim();
+        !t.is_empty() && t.split_whitespace().all(|w| w.starts_with('[') && w.ends_with(']'))
     };
     for t in turns.iter().rev() {
         if body_lines.len() >= BODY {
             break;
         }
-        if t.role == "you" && same(&t.text, &s.last_prompt) {
+        if t.role == "you" && same_prefix(&t.text, &s.last_prompt, 48) {
             continue;
         }
         if only_tools(&t.text) {
             continue;
         }
         body_lines.insert(
-            if body_lines.is_empty() { 0 } else { body_lines.len() },
+            body_lines.len(),
             Line::from(vec![
-                Span::raw(PAD),
+                Span::raw(" ".repeat(MARGIN)),
                 Span::styled(
                     format!("{:<10}", t.role),
-                    Style::default().fg(if t.role == "you" { ACCENT } else { FAV }),
+                    Style::default().fg(if t.role == "you" { rgb(art::ramp(0.8)) } else { FAV }),
                 ),
                 Span::styled(fit(&t.text, body), Style::default().fg(TEXT)),
             ]),
@@ -561,59 +547,59 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         _ => ("", String::new(), String::new()),
     };
     let line = Line::from(vec![
-        Span::raw(PAD),
-        Span::styled(format!("{label} "), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        Span::raw(" ".repeat(MARGIN)),
+        Span::styled("⌇ ", Style::default().fg(rgb(art::ramp(0.6)))),
+        Span::styled(format!("{label} "), Style::default().fg(rgb(art::ramp(0.85))).add_modifier(Modifier::BOLD)),
         Span::styled(value, Style::default().fg(BRIGHT).add_modifier(Modifier::BOLD)),
-        Span::styled("▏", Style::default().fg(ACCENT)),
+        Span::styled("▏", Style::default().fg(rgb(art::ramp(1.0)))),
         Span::styled(format!("   {hint}"), Style::default().fg(CHROME)),
     ]);
     f.render_widget(Paragraph::new(Text::from(vec![Line::raw(""), line])), area);
 }
 
-/// One line. Transient messages take it over; otherwise it shows the keys.
-fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
-    let pos = {
-        let n = app.item_count();
-        let at = app
-            .view
-            .iter()
-            .take(app.cursor + 1)
-            .filter(|r| matches!(r, Row::Item(_) | Row::Sub(_)))
-            .count();
-        format!("{at}/{n}")
-    };
+fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
+    let n = app.item_count();
+    let at = app
+        .view
+        .iter()
+        .take(app.cursor + 1)
+        .filter(|r| r.selectable())
+        .count();
+    let pos = format!("{at}/{n}");
 
-    let mut spans: Vec<Span> = vec![Span::raw(PAD)];
+    app.hits.footer.clear();
+    app.hits.footer_y = area.y;
+    let mut spans: Vec<Span> = vec![Span::raw(" ".repeat(MARGIN))];
+    let mut x = area.x + MARGIN as u16;
+
     if app.status.is_empty() {
-        let k = |s: &'static str| Span::styled(s, Style::default().fg(ACCENT));
-        let d = |s: &'static str| Span::styled(s, Style::default().fg(CHROME));
-        // Drop hints rather than let them collide with the position counter.
         let budget = area.width as usize;
-        let mut hints: Vec<(&'static str, &'static str)> = vec![
-            ("↑↓", " move   "),
-            ("enter", " resume   "),
-            ("/", " filter   "),
-            ("F", " search   "),
-            ("ctrl+t", " tmux   "),
-            ("f", " ★   "),
-            ("t", " tag   "),
-            ("s", " sort   "),
-            ("?", " keys"),
+        let mut hints: Vec<(&'static str, &'static str, Option<Action>)> = vec![
+            ("↑↓", " move   ", None),
+            ("↵", " resume   ", Some(Action::Resume)),
+            ("/", " filter   ", Some(Action::Filter)),
+            ("F", " search   ", Some(Action::Search)),
+            ("^t", " tmux   ", Some(Action::Tmux)),
+            ("f", " ★   ", Some(Action::Favorite)),
+            ("t", " tag   ", Some(Action::Tag)),
+            ("s", " sort   ", Some(Action::CycleSort)),
+            ("?", " keys", Some(Action::Help)),
         ];
         loop {
-            let w: usize = hints
-                .iter()
-                .map(|(a, b)| a.chars().count() + b.chars().count())
-                .sum();
+            let w: usize = hints.iter().map(|(a, b, _)| a.chars().count() + b.chars().count()).sum();
             if w + pos.chars().count() + 6 <= budget || hints.len() <= 2 {
                 break;
             }
-            // remove the second-to-last hint, always keeping "? keys"
             hints.remove(hints.len() - 2);
         }
-        for (a, b) in hints {
-            spans.push(k(a));
-            spans.push(d(b));
+        for (k, d, act) in hints {
+            let kw = k.chars().count() as u16;
+            if let Some(a) = act {
+                app.hits.footer.push((x, x + kw + d.trim_end().chars().count() as u16, a));
+            }
+            spans.push(Span::styled(k, Style::default().fg(rgb(art::ramp(0.85)))));
+            spans.push(Span::styled(d, Style::default().fg(CHROME)));
+            x += kw + d.chars().count() as u16;
         }
     } else {
         spans.push(Span::styled(
@@ -623,8 +609,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let gap = (area.width as usize).saturating_sub(used + pos.chars().count() + 2);
-    spans.push(Span::raw(" ".repeat(gap)));
+    spans.push(Span::raw(" ".repeat((area.width as usize).saturating_sub(used + pos.chars().count() + MARGIN))));
     spans.push(Span::styled(pos, Style::default().fg(CHROME)));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -640,52 +625,80 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
 
 fn draw_help(f: &mut Frame, area: Rect) {
     let rows: &[(&str, &str, &str)] = &[
-        ("↑ ↓", "k j", "move the cursor"),
-        ("pgup pgdn", "ctrl+u ctrl+d", "jump ten rows"),
-        ("home end", "g G", "first / last session"),
+        ("click", "", "select · click again to resume"),
+        ("right-click", "", "favourite it"),
+        ("wheel", "", "scroll the pool"),
+        ("click a heading", "", "sort by that column"),
+        ("click ⌁n", "", "open that session's subagents"),
+        ("M", "", "mouse off, so the terminal can select text again"),
+        ("", "", ""),
+        ("↑ ↓", "k j", "move"),
+        ("pgup pgdn", "^u ^d", "jump ten"),
+        ("home end", "g G", "first · last"),
         ("", "", ""),
         ("enter", "", "resume here: cd to its folder and reattach"),
         ("ctrl+n", "alt+enter", "resume in a new terminal window"),
         ("ctrl+t", "", "resume in tmux — attaches if one is already waiting"),
-        ("space", "", "select several, then enter reopens them all"),
+        ("space", "", "pick several, then enter reopens them all"),
         ("", "", ""),
-        ("/", "", "filter by title, folder, branch or tag"),
-        ("F", "ctrl+f", "search inside the conversations themselves"),
-        ("m", "", "switch search: content / file touched / tool used"),
+        ("/", "", "filter titles, folders, branches, tags"),
+        ("F", "^f", "search inside the conversations"),
+        ("m", "", "search mode: content · file touched · tool used"),
         ("", "", ""),
-        ("f", "", "favourite — favourites always sort to the top"),
-        ("t", "", "add a tag (type -name to remove one)"),
-        ("T", "", "show only one tag"),
-        ("N", "", "attach a private note"),
+        ("f", "", "favourite — favourites float to the surface"),
+        ("t", "", "tag (type -name to remove)"),
+        ("T", "", "show one tag only"),
+        ("N", "", "private note"),
         ("", "", ""),
-        ("s", "", "cycle sort: recency, size, entries, duration, title, folder"),
-        ("o", "", "group the list by directory"),
-        ("D", "", "cycle date range: today, 7d, 30d, 90d, any"),
+        ("s", "", "sort: recency · size · entries · duration · title · folder"),
+        ("o", "", "group by directory"),
+        ("D", "", "date range"),
         ("*", "", "favourites only"),
-        ("L", "", "only sessions running right now"),
-        ("", "", ""),
-        ("a", "", "reveal subagent transcripts"),
-        ("→ ←", "l h  tab", "expand / collapse a session's subagents"),
-        ("p", "", "show or hide the preview rail"),
+        ("L", "", "running only"),
+        ("a", "", "reveal subagents"),
+        ("→ ←", "l h", "expand · collapse subagents"),
+        ("p", "", "preview rail"),
         ("R", "f5", "reindex"),
-        ("c", "", "clear every filter and selection"),
-        ("q esc", "ctrl+c", "quit without resuming"),
+        ("c", "", "clear everything"),
+        ("q esc", "^c", "quit"),
     ];
-    let w = 76u16.min(area.width);
-    let h = (rows.len() as u16 + 4).min(area.height);
+
+    let art_w = art::wordmark_width() as u16;
+    let want_w = (art_w + 6).max(80);
+    let w = want_w.min(area.width);
+    let show_art = area.width >= art_w + 6 && area.height as usize >= rows.len() + 12;
+    let h = (rows.len() as u16 + if show_art { 12 } else { 4 }).min(area.height);
     let r = centered(area, w, h);
     f.render_widget(Clear, r);
 
     let mut lines: Vec<Line> = vec![Line::raw("")];
-    for (plain, vim, desc) in rows {
+    if show_art {
+        let marks = art::wordmark();
+        for (row, chars) in marks.iter().enumerate() {
+            let mut sp: Vec<Span> = vec![Span::raw("  ")];
+            let glyphs: Vec<Span> = chars
+                .iter()
+                .enumerate()
+                .map(|(x, ch)| {
+                    let c = art::column_color(x, art_w as usize, -99.0, row, art::ROWS);
+                    Span::styled(ch.to_string(), Style::default().fg(rgb(c)))
+                })
+                .collect();
+            sp.extend(glyphs);
+            lines.push(Line::from(sp));
+        }
+        lines.push(ripple_line(w as usize, 2, 1.7));
+        lines.push(Line::raw(""));
+    }
+    for (plain, alt, desc) in rows {
         if plain.is_empty() {
             lines.push(Line::raw(""));
             continue;
         }
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(format!("{plain:<11}"), Style::default().fg(ACCENT)),
-            Span::styled(format!("{vim:<14}"), Style::default().fg(CHROME)),
+            Span::styled(format!("{plain:<16}"), Style::default().fg(rgb(art::ramp(0.85)))),
+            Span::styled(format!("{alt:<11}"), Style::default().fg(CHROME)),
             Span::styled(*desc, Style::default().fg(TEXT)),
         ]));
     }
@@ -698,9 +711,13 @@ fn draw_help(f: &mut Frame, area: Rect) {
         ),
     ]));
 
-    let p = Paragraph::new(Text::from(lines))
-        .block(Block::default())
-        .alignment(Alignment::Left)
-        .wrap(Wrap { trim: false });
-    f.render_widget(p, r);
+    f.render_widget(
+        Paragraph::new(Text::from(lines))
+            .alignment(Alignment::Left)
+            .wrap(Wrap { trim: false })
+            // A filled panel, because a centred overlay narrower than the
+            // terminal otherwise shows the list either side of it.
+            .block(Block::default().style(Style::default().bg(PANEL))),
+        r,
+    );
 }
