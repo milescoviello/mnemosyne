@@ -17,6 +17,7 @@ mod scan;
 mod search;
 mod splash;
 mod ui;
+mod update;
 
 use anyhow::Result;
 use app::{App, Outcome};
@@ -55,6 +56,10 @@ usage: mnemosyne [options]
   --no-splash      skip the opening animation (or set MNEMOSYNE_NO_SPLASH=1)
   --no-mouse       start with mouse reporting off (toggle in-app with M)
   --write-config   write a commented config file and exit
+
+  --update         install the latest release now, and exit
+  --check-update   say whether a newer release exists, and exit
+  --no-update      skip the background update check this run
   --no-model       do not restore each session's original --model
   -h, --help       this text
   -V, --version    version
@@ -81,6 +86,26 @@ fn main() -> Result<()> {
 
     let include_subagents = true; // always indexed; visibility is a UI toggle
     let restore_model = !has("--no-model");
+
+    if has("--update") {
+        println!("current {}", update::current());
+        match update::install_latest() {
+            Ok(v) => println!("updated to {v} — it takes effect next time you start"),
+            Err(e) => println!("not updated: {e}"),
+        }
+        return Ok(());
+    }
+
+    if has("--check-update") {
+        match update::latest_tag() {
+            Some(tag) if update::is_newer(&tag, update::current()) => {
+                println!("{} is available; you have {}", tag, update::current())
+            }
+            Some(tag) => println!("up to date on {} (latest is {tag})", update::current()),
+            None => println!("could not reach GitHub"),
+        }
+        return Ok(());
+    }
 
     if has("--write-config") {
         let p = config::path();
@@ -368,7 +393,22 @@ fn main() -> Result<()> {
         }
     }
 
-    let res = run(&mut term, &mut app);
+    // Off the main path entirely: a slow or missing network must not delay
+    // the interface, and the result is only ever a line of text.
+    let updated: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    if !has("--no-update") && cfg.update.auto && std::env::var_os("MNEMOSYNE_NO_UPDATE").is_none() {
+        let slot = updated.clone();
+        let every = cfg.update.check_every_hours.max(1);
+        std::thread::spawn(move || {
+            if let Some(v) = update::auto(every) {
+                if let Ok(mut g) = slot.lock() {
+                    *g = Some(v);
+                }
+            }
+        });
+    }
+
+    let res = run(&mut term, &mut app, &updated);
     disable_raw_mode()?;
     let _ = execute!(term.backend_mut(), DisableMouseCapture);
     execute!(term.backend_mut(), LeaveAlternateScreen)?;
@@ -395,7 +435,11 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn run<B: ratatui::backend::Backend>(term: &mut Terminal<B>, app: &mut App) -> Result<()> {
+fn run<B: ratatui::backend::Backend>(
+    term: &mut Terminal<B>,
+    app: &mut App,
+    updated: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
+) -> Result<()> {
     let mut last_live = Instant::now();
     loop {
         term.draw(|f| ui::draw(f, app))?;
@@ -410,6 +454,14 @@ fn run<B: ratatui::backend::Backend>(term: &mut Terminal<B>, app: &mut App) -> R
         }
 
         app.absorb_deep();
+
+        if app.update_notice.is_none() {
+            if let Ok(g) = updated.try_lock() {
+                if let Some(v) = g.clone() {
+                    app.update_notice = Some(v);
+                }
+            }
+        }
 
         // `M` flips mouse reporting, so the terminal can do its own text
         // selection again when you need to copy something off the screen.

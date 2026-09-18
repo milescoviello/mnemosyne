@@ -222,6 +222,9 @@ pub struct App {
     /// follow the filters: it is a property of the corpus, not of the view,
     /// and a number that moved while you typed would be hard to read.
     pub corpus_tokens: u64,
+    /// Set when a background update has been installed. Shown, not acted on:
+    /// the running process keeps the binary it started with.
+    pub update_notice: Option<String>,
 
     pub help_page: HelpPage,
     pub help_scroll: u16,
@@ -281,6 +284,7 @@ impl App {
             show_preview: true,
             expanded: HashSet::new(),
             corpus_tokens: 0,
+            update_notice: None,
             help_page: HelpPage::Guide,
             help_scroll: 0,
             help_height: 0,

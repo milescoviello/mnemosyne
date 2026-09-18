@@ -30,7 +30,7 @@ mn() {
     for a in "$@"; do
         if [ "$take_value" = 1 ]; then mine+=("$a"); take_value=0; continue; fi
         case "$a" in
-            --no-splash|--subagents|--no-model) mine+=("$a") ;;
+            --no-splash|--subagents|--no-model|--no-update|--update|--check-update|--write-config) mine+=("$a") ;;
             # --restore takes a count, which is ours and not claude's
             --restore) mine+=("$a"); take_value=1 ;;
             --ask|--no-bypass) no_bypass=1 ;;

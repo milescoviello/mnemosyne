@@ -16,7 +16,7 @@ function mn --description 'Browse, search, tag and resume Claude Code sessions (
             continue
         end
         switch $a
-            case --no-splash --subagents --no-model
+            case --no-splash --subagents --no-model --no-update --update --check-update --write-config
                 set -a mine $a
             case --restore
                 # takes a count, which belongs to mnemosyne and not to claude

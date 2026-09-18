@@ -457,6 +457,13 @@ fn draw_wordmark(f: &mut Frame, app: &App, area: Rect) {
         segs.push((2, plain(format!("●{} live", app.live.count), th().live)));
     }
     segs.push((5, plain(app.sort.label().to_string(), th().chrome)));
+    if let Some(v) = &app.update_notice {
+        // Near the front: it is news, and it is only ever shown once per run.
+        segs.push((
+            1,
+            plain(format!("updated to {v} · restart"), rgb(art::ramp(0.95))),
+        ));
+    }
 
     // Anything that explains why the list looks the way it does stays near
     // the front: without it the view is inexplicable.

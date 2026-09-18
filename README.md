@@ -156,6 +156,34 @@ working directory — no child process can. The binary draws the interface on
 performs the `cd` plus `claude --resume` itself. It is a few lines long and
 you can read all of it in `shell/mn.fish`.
 
+## Staying current
+
+It updates itself. On an interactive run it asks GitHub for the latest
+release at most once a day, on a background thread, and installs it if there
+is a newer one. Two things it deliberately does not do: block the interface
+waiting for the network, and swap the binary out from under the process you
+are using. The new one is renamed into place — atomic, and harmless to the
+running image — and takes effect next time you start. When that happens the
+header says so.
+
+```sh
+mn --check-update     # is there a newer one?
+mn --update           # install it now
+mn --no-update        # skip the check this run
+```
+
+To turn it off for good, in `~/.claude/mnemosyne/config.toml`:
+
+```toml
+[update]
+auto = false
+check_every_hours = 24
+```
+
+`MNEMOSYNE_NO_UPDATE=1` does the same for one run. Downloads are checksum
+verified, and a mismatch refuses to install rather than warning and carrying
+on.
+
 ## Searching
 
 `/` filters the list. `F` searches *inside* the conversations.

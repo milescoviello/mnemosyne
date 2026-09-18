@@ -38,6 +38,12 @@ enabled = true
 floor_cold_ms = 1500
 floor_warm_ms = 420
 
+[update]
+# Check GitHub for a newer release and install it in the background. The
+# running session is never swapped out; a new version takes effect next start.
+auto = true
+check_every_hours = 24
+
 [start]
 mouse = true           # false is the same as --no-mouse
 preview = true         # the bottom rail
@@ -63,6 +69,23 @@ impl Default for Splash {
             enabled: true,
             floor_cold_ms: 1500,
             floor_warm_ms: 420,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default)]
+pub struct Update {
+    #[serde(default = "d_true")]
+    pub auto: bool,
+    pub check_every_hours: u64,
+}
+
+impl Default for Update {
+    fn default() -> Self {
+        Update {
+            auto: true,
+            check_every_hours: 24,
         }
     }
 }
@@ -101,6 +124,7 @@ pub struct Config {
     pub panel: Option<String>,
     pub splash: Splash,
     pub start: Start,
+    pub update: Update,
 }
 
 pub fn path() -> std::path::PathBuf {
@@ -166,6 +190,8 @@ mod tests {
         let c: Config = toml::from_str(EXAMPLE).expect("shipped example must parse");
         assert_eq!(c.ramp.as_ref().unwrap().len(), 6);
         assert!(c.splash.enabled);
+        assert!(c.update.auto);
+        assert_eq!(c.update.check_every_hours, 24);
         assert_eq!(c.splash.floor_warm_ms, 420);
         assert!(c.start.mouse);
     }
@@ -176,6 +202,7 @@ mod tests {
         assert!(c.ramp.is_none());
         assert_eq!(c.splash.floor_cold_ms, 1500);
         assert!(c.start.preview);
+        assert!(c.update.auto, "updates are on unless turned off");
     }
 
     #[test]

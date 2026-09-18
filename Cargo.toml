@@ -1,6 +1,6 @@
 [package]
 name = "mnemosyne"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Browse, search, tag and resume Claude Code sessions across every folder"
 license = "MIT"
