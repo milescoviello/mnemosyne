@@ -377,6 +377,23 @@ fn main() -> Result<()> {
     }
     let mut term = Terminal::new(CrosstermBackend::new(stderr()))?;
 
+    // Started before the splash so the network round-trip overlaps the
+    // animation rather than following it. Off the main path entirely: a slow
+    // or missing network delays nothing, and the result is only ever a line
+    // of text the header shows.
+    let updated: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    if !has("--no-update") && cfg.update.auto && std::env::var_os("MNEMOSYNE_NO_UPDATE").is_none() {
+        let slot = updated.clone();
+        let every = cfg.update.check_every_hours.max(1);
+        std::thread::spawn(move || {
+            if let Some(v) = update::auto(every) {
+                if let Ok(mut g) = slot.lock() {
+                    *g = Some(v);
+                }
+            }
+        });
+    }
+
     if use_splash {
         let p = index::Progress::default();
         let p2 = p.clone();
@@ -391,21 +408,6 @@ fn main() -> Result<()> {
             app.apply_overlay();
             app.rebuild();
         }
-    }
-
-    // Off the main path entirely: a slow or missing network must not delay
-    // the interface, and the result is only ever a line of text.
-    let updated: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
-    if !has("--no-update") && cfg.update.auto && std::env::var_os("MNEMOSYNE_NO_UPDATE").is_none() {
-        let slot = updated.clone();
-        let every = cfg.update.check_every_hours.max(1);
-        std::thread::spawn(move || {
-            if let Some(v) = update::auto(every) {
-                if let Ok(mut g) = slot.lock() {
-                    *g = Some(v);
-                }
-            }
-        });
     }
 
     let res = run(&mut term, &mut app, &updated);
