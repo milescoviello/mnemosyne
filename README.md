@@ -297,6 +297,12 @@ corpus rather than of whatever you are looking at, and a figure that moved
 while you typed would be hard to read. Narrowing to one tag changes the
 session count beside it, not the total.
 
+As the terminal narrows the header drops whole facts rather than cutting one
+in half, worst-first: the sort label goes, then the token total, then the live
+count. Anything explaining *why* the list looks the way it does — an active
+filter, a tag, a selection — outlives them, since without it the view is
+inexplicable.
+
 The same numbers, broken down:
 
 ```

@@ -429,38 +429,37 @@ fn draw_wordmark(f: &mut Frame, app: &App, area: Rect) {
         ));
     }
 
-    let dot = || Span::styled(" · ", Style::default().fg(th().chrome));
-    let mut right: Vec<Span> = vec![Span::styled(
-        format!("{} sessions", app.item_count()),
-        Style::default().fg(th().text),
-    )];
+    // The right side is built as separate pieces so it can be thinned rather
+    // than truncated: a narrow terminal drops whole facts, worst-first,
+    // instead of cutting one in half.
+    let mut segs: Vec<(u8, Vec<Span>)> = Vec::new();
+    let plain = |t: String, c: Color| vec![Span::styled(t, Style::default().fg(c))];
+
+    // priority 0 is kept longest
+    segs.push((
+        0,
+        plain(format!("{} sessions", app.item_count()), th().text),
+    ));
     if app.corpus_tokens > 0 {
-        right.push(dot());
-        right.push(Span::styled(
-            format!("{} tokens", crate::model::human_count(app.corpus_tokens)),
-            Style::default().fg(th().chrome),
+        segs.push((
+            4,
+            plain(
+                format!("{} tokens", crate::model::human_count(app.corpus_tokens)),
+                th().chrome,
+            ),
         ));
     }
     let favs = app.meta.favorite_count();
     if favs > 0 {
-        right.push(dot());
-        right.push(Span::styled(
-            format!("★{favs}"),
-            Style::default().fg(th().fav),
-        ));
+        segs.push((3, plain(format!("★{favs}"), th().fav)));
     }
     if app.live.count > 0 {
-        right.push(dot());
-        right.push(Span::styled(
-            format!("●{} live", app.live.count),
-            Style::default().fg(th().live),
-        ));
+        segs.push((2, plain(format!("●{} live", app.live.count), th().live)));
     }
-    right.push(dot());
-    right.push(Span::styled(
-        app.sort.label(),
-        Style::default().fg(th().chrome),
-    ));
+    segs.push((5, plain(app.sort.label().to_string(), th().chrome)));
+
+    // Anything that explains why the list looks the way it does stays near
+    // the front: without it the view is inexplicable.
     for (on, label, col) in [
         (
             app.group_by_dir,
@@ -502,9 +501,35 @@ fn draw_wordmark(f: &mut Frame, app: &App, area: Rect) {
         (!app.mouse_on, "mouse off".to_string(), th().chrome),
     ] {
         if on {
-            right.push(dot());
-            right.push(Span::styled(label, Style::default().fg(col)));
+            segs.push((1, plain(label, col)));
         }
+    }
+
+    let lw: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let width = area.width as usize;
+    let seg_len = |v: &Vec<Span>| v.iter().map(|s| s.content.chars().count()).sum::<usize>();
+    // drop the least important piece until what remains fits with a gap
+    loop {
+        let joined: usize =
+            segs.iter().map(|(_, v)| seg_len(v)).sum::<usize>() + 3 * segs.len().saturating_sub(1);
+        if lw + joined + MARGIN + 2 <= width || segs.len() <= 1 {
+            break;
+        }
+        let worst = segs
+            .iter()
+            .enumerate()
+            .max_by_key(|(i, (pri, _))| (*pri, *i))
+            .map(|(i, _)| i)
+            .unwrap();
+        segs.remove(worst);
+    }
+
+    let mut right: Vec<Span> = Vec::new();
+    for (i, (_, v)) in segs.into_iter().enumerate() {
+        if i > 0 {
+            right.push(Span::styled(" · ", Style::default().fg(th().chrome)));
+        }
+        right.extend(v);
     }
 
     let lw: usize = spans.iter().map(|s| s.content.chars().count()).sum();
