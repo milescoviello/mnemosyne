@@ -72,6 +72,15 @@ started in; pass --ask to resume with prompts on instead.
 ";
 
 fn main() -> Result<()> {
+    // Rust ignores SIGPIPE, so a closed pipe surfaces as a write error and
+    // `println!` panics. `mnemosyne --stats | head` printing a backtrace is
+    // not how a command-line tool should behave; restore the default and let
+    // the process die quietly like every other one in the pipeline.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let args: Vec<String> = std::env::args().skip(1).collect();
     let has = |f: &str| args.iter().any(|a| a == f);
 

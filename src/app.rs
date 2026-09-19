@@ -544,14 +544,23 @@ impl App {
             }
         } else {
             // Date bands only make sense when the list is in time order.
+            //
+            // Favourites are pinned above everything regardless of age, so
+            // they are their own band: without that the run of pinned rows
+            // cuts across the dates and you get "today, yesterday, today,
+            // yesterday" as the list crosses back into time order.
             let banded = self.sort == Sort::Recency;
-            let mut band = "";
+            let mut band = String::new();
             for &i in &idx {
                 if banded {
-                    let b = date_band(self.all[i].mtime);
+                    let b = if self.all[i].favorite {
+                        "favourites".to_string()
+                    } else {
+                        date_band(self.all[i].mtime).to_string()
+                    };
                     if b != band {
+                        rows.push(Row::Divider(b.clone()));
                         band = b;
-                        rows.push(Row::Divider(b.to_string()));
                     }
                 }
                 rows.push(Row::Item(i));
@@ -638,6 +647,19 @@ impl App {
 
     pub fn current(&self) -> Option<&Session> {
         self.current_idx().map(|i| &self.all[i])
+    }
+
+    /// Sessions we could actually point at a running process.
+    ///
+    /// Not the same as the number of claude processes: a plain `claude` with
+    /// no `--resume` cannot be tied to a transcript. Counting processes here
+    /// meant the header could say "4 live" with nothing in the list marked,
+    /// which reads as a bug.
+    pub fn live_shown(&self) -> usize {
+        self.all
+            .iter()
+            .filter(|s| s.is_live() && !s.is_subagent)
+            .count()
     }
 
     pub fn item_count(&self) -> usize {
@@ -1609,6 +1631,30 @@ mod logic_tests {
     }
 
     #[test]
+    fn favourites_get_their_own_band_rather_than_breaking_the_dates() {
+        // Pinned rows sit above everything regardless of age. Banding them by
+        // date made the list read "today, yesterday, today, yesterday" as it
+        // crossed back into time order.
+        let mut m = crate::meta::Meta::default();
+        m.toggle_favorite("aaaaaaaa-1"); // today
+        m.toggle_favorite("eeeeeeee-5"); // 300 days old
+        let a = app_with(m, true);
+        let bands: Vec<String> = a
+            .view
+            .iter()
+            .filter_map(|r| match r {
+                Row::Divider(d) => Some(d.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bands.first().map(String::as_str), Some("favourites"));
+        let mut uniq = bands.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(bands.len(), uniq.len(), "a band repeated: {bands:?}");
+    }
+
+    #[test]
     fn date_bands_appear_only_under_recency() {
         let mut a = app();
         let bands = |a: &App| {
@@ -1820,6 +1866,25 @@ mod logic_tests {
         assert_eq!(
             a.cursor, first_selectable,
             "the top of the list, skipping the date band above it"
+        );
+    }
+
+    #[test]
+    fn the_live_count_matches_what_is_marked() {
+        let mut a = app();
+        assert_eq!(a.live_shown(), 0);
+        a.all[0].live_pid = Some(1);
+        a.all[1].live_pid = Some(2);
+        assert_eq!(a.live_shown(), 2);
+        let marked = a
+            .all
+            .iter()
+            .filter(|s| s.is_live() && !s.is_subagent)
+            .count();
+        assert_eq!(
+            a.live_shown(),
+            marked,
+            "the header must agree with the rows"
         );
     }
 

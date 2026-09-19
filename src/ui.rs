@@ -461,8 +461,9 @@ fn draw_wordmark(f: &mut Frame, app: &App, area: Rect) {
     if favs > 0 {
         segs.push((3, plain(format!("★{favs}"), th().fav)));
     }
-    if app.live.count > 0 {
-        segs.push((2, plain(format!("●{} live", app.live.count), th().live)));
+    let live = app.live_shown();
+    if live > 0 {
+        segs.push((2, plain(format!("●{live} live"), th().live)));
     }
     segs.push((5, plain(app.sort.label().to_string(), th().chrome)));
     if let Some(found) = &app.update_notice {
