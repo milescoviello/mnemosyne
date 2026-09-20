@@ -433,6 +433,9 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
 /// Only ever an offer. Restoring on login without being asked would mean a
 /// pile of terminal windows and a Claude process each, before you had said
 /// you wanted any of them.
+/// One clickable word in the offer: its key, its label, what it does.
+type Button = (&'static str, &'static str, Action);
+
 fn draw_reopen(f: &mut Frame, app: &mut App, area: Rect) {
     let n = app.reopen.len();
     let what = if n == 1 {
@@ -443,11 +446,66 @@ fn draw_reopen(f: &mut Frame, app: &mut App, area: Rect) {
     // Naming one of them is what makes the offer legible: a bare count could
     // mean anything, and you cannot tell whether you want it back.
     let first = app.reopen[0].title.trim().to_string();
-    let head = if first.is_empty() || n > 1 {
-        format!("{what} open before the reboot")
-    } else {
-        format!("{what} open before the reboot: {first}")
+
+    // What to say, wordiest first. A title can be 160 characters long, which
+    // used to run the whole line off the screen and take both buttons with
+    // it -- the offer was still there, and there was no longer any visible
+    // way to accept it. The buttons are what must survive, so the wording
+    // gives way to them rather than the other way round.
+    let mut says = Vec::new();
+    if n == 1 && !first.is_empty() {
+        says.push(format!("{what} open before the reboot: {first}"));
+    }
+    says.push(format!("{what} open before the reboot"));
+    says.push(format!("{n} open before the reboot"));
+    says.push(format!("reopen {n}?"));
+
+    // Likewise the buttons themselves: words if they fit, letters if not.
+    let wordy: [Button; 2] = [
+        ("r", " reopen   ", Action::Reopen),
+        ("x", " not now", Action::DismissReopen),
+    ];
+    let terse: [Button; 2] = [
+        ("r", " reopen ", Action::Reopen),
+        ("x", " no", Action::DismissReopen),
+    ];
+
+    let room = area.width as usize;
+    let fixed = MARGIN + 2 + 3; // margin, marker, the gap before the buttons
+    let width_of = |b: &[Button; 2]| -> usize {
+        b.iter()
+            .map(|(k, l, _)| k.chars().count() + l.chars().count())
+            .sum()
     };
+
+    let mut chosen: Option<(String, &[Button; 2])> = None;
+    for buttons in [&wordy, &terse] {
+        let budget = room.saturating_sub(fixed + width_of(buttons));
+        if says[0].chars().count() <= budget {
+            chosen = Some((says[0].clone(), buttons));
+            break;
+        }
+        // The wordiest line is the one carrying the title, and half a title
+        // still tells you which session this is. Cut it rather than drop it,
+        // so long as enough of it survives to be worth reading. This has to
+        // be tried before the shorter wordings, or the first one that merely
+        // fits always wins and the title is never shown at all.
+        if says.len() > 1 && budget > says[1].chars().count() + 8 {
+            chosen = Some((crate::model::fit(&says[0], budget), buttons));
+            break;
+        }
+        if let Some(say) = says.iter().find(|s| s.chars().count() <= budget) {
+            chosen = Some((say.clone(), buttons));
+            break;
+        }
+    }
+
+    // Narrower than even "reopen 3?" plus two letters: say the least that
+    // still leaves something to press.
+    let (head, buttons) = chosen.unwrap_or_else(|| {
+        let budget = room.saturating_sub(fixed + width_of(&terse));
+        (crate::model::fit(says.last().unwrap(), budget), &terse)
+    });
 
     let key = Style::default()
         .fg(rgb(art::ramp(0.95)))
@@ -465,16 +523,16 @@ fn draw_reopen(f: &mut Frame, app: &mut App, area: Rect) {
     let mut x = area.x + MARGIN as u16 + 2 + head.chars().count() as u16 + 3;
 
     app.hits.banner_y = Some(area.y);
-    for (k, label, action) in [
-        ("r", " reopen   ", Action::Reopen),
-        ("x", " not now", Action::DismissReopen),
-    ] {
+    for (k, label, action) in buttons {
         let w = (k.chars().count() + label.chars().count()) as u16;
         // The whole phrase is the target, not just the letter: a one-column
-        // click target is not a click target.
-        app.hits.banner.push((x, x + w.saturating_sub(1), action));
-        spans.push(Span::styled(k, key));
-        spans.push(Span::styled(label, dim));
+        // click target is not a click target. Anything that would land past
+        // the edge of the screen is not one either, so it is not registered.
+        if x + w <= area.x + area.width {
+            app.hits.banner.push((x, x + w.saturating_sub(1), *action));
+        }
+        spans.push(Span::styled(*k, key));
+        spans.push(Span::styled(*label, dim));
         x += w;
     }
 
@@ -1730,6 +1788,49 @@ mod render_tests {
             "the line under the wordmark should stay empty: {:?}",
             rows[1]
         );
+    }
+
+    #[test]
+    fn a_long_title_never_pushes_the_buttons_off_the_screen() {
+        // A title can be 160 characters. It used to take the whole line and
+        // both buttons with it: the offer was still up, and there was no
+        // longer any visible way to take it.
+        let mut a = app();
+        offer(&mut a, 1);
+        a.reopen[0].title = "Work out why the nightly backup job silently drops the last \
+             three datasets when the pool is more than eighty per cent full"
+            .into();
+
+        for (w, h) in sizes() {
+            if h < 4 {
+                continue;
+            }
+            let rows = render(&mut a, w, h);
+            for (x0, x1, _) in &a.hits.banner {
+                assert!(
+                    *x1 < w,
+                    "{w}x{h}: a click target at {x0}..{x1} is off the screen"
+                );
+            }
+            // Where the offer landed depends on how the layout squeezed;
+            // at four rows high there may be no room for it at all.
+            let Some(y) = a.hits.banner_y else { continue };
+            let Some(line) = rows.get(y as usize) else {
+                continue;
+            };
+            if !line.contains("reopen") && !line.contains("open before") {
+                continue; // squeezed out entirely, which is not this test
+            }
+            // wide enough to say anything at all: it must still be possible
+            // to accept the offer by clicking
+            if w >= 40 {
+                assert_eq!(a.hits.banner.len(), 2, "{w}x{h}: lost a button: {line:?}");
+                assert!(
+                    line.contains('r') && line.contains('x'),
+                    "{w}x{h}: no visible way to answer: {line:?}"
+                );
+            }
+        }
     }
 
     #[test]
