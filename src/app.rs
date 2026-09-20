@@ -110,6 +110,10 @@ pub enum Action {
     Clear,
     Help,
     Quit,
+    /// Reopen the sessions that were running before the machine rebooted.
+    Reopen,
+    /// Put the reopen offer away without acting on it.
+    DismissReopen,
 }
 
 /// Where things ended up on screen last frame. Rebuilt every draw, because the
@@ -128,6 +132,9 @@ pub struct Hits {
     pub columns: Vec<(u16, u16, Sort)>,
     /// Footer hint spans: (x start, x end inclusive, action).
     pub footer: Vec<(u16, u16, Action)>,
+    /// Screen row of the reopen offer, and the spans within it.
+    pub banner_y: Option<u16>,
+    pub banner: Vec<(u16, u16, Action)>,
 }
 
 #[derive(Clone, Debug)]
@@ -150,6 +157,11 @@ pub enum Target {
     /// attach to it rather than starting a second client on the same
     /// transcript, so the work continues from its latest state.
     Tmux,
+    /// A window *and* a tmux session: the work runs under tmux, and a terminal
+    /// window is opened attached to it. Closing the window then leaves the
+    /// session running instead of killing it, which is what you want from
+    /// something restored automatically after a reboot.
+    WindowTmux,
 }
 
 impl Target {
@@ -158,6 +170,7 @@ impl Target {
             Target::Here => "here",
             Target::Window => "window",
             Target::Tmux => "tmux",
+            Target::WindowTmux => "wintmux",
         }
     }
 }
@@ -246,6 +259,10 @@ pub struct App {
     last_click: Option<(std::time::Instant, usize)>,
     pub restore_model: bool,
     pub want_refresh: bool,
+    /// Sessions that were running before the last reboot and are not running
+    /// now. Empty in the normal case; when it is not, the offer to reopen
+    /// them sits above the list until it is taken or waved away.
+    pub reopen: Vec<crate::workspace::Entry>,
 
     preview_cache: HashMap<String, Vec<Turn>>,
     matcher: Matcher,
@@ -304,6 +321,7 @@ impl App {
             last_click: None,
             restore_model,
             want_refresh: false,
+            reopen: Vec::new(),
             preview_cache: HashMap::new(),
             matcher: Matcher::new(Config::DEFAULT),
             deep_tx,
@@ -784,6 +802,70 @@ impl App {
         self.rebuild();
     }
 
+    /// The sessions that are open right now, in the form the reopen record
+    /// wants them. This is deliberately the same set the list marks with a
+    /// `●`: whatever the header claims is live is exactly what gets written
+    /// down, so the two can never disagree.
+    pub fn open_sessions(&self) -> Vec<crate::workspace::Entry> {
+        let mut out = Vec::new();
+        for s in &self.all {
+            if s.is_subagent || (s.live_pid.is_none() && !s.has_tmux) {
+                continue;
+            }
+            if s.cwd.is_empty() {
+                continue;
+            }
+            out.push(crate::workspace::Entry {
+                id: s.id.clone(),
+                cwd: s.cwd.clone(),
+                model: s.model.clone(),
+                perms: s.permission_mode.clone(),
+                title: s.title().to_string(),
+            });
+        }
+        out
+    }
+
+    /// Load the offer, if a reboot left one outstanding.
+    pub fn load_reopen(&mut self) {
+        let w = crate::workspace::load();
+        let running: std::collections::HashSet<String> = self
+            .all
+            .iter()
+            .filter(|s| s.live_pid.is_some() || s.has_tmux)
+            .map(|s| s.id.clone())
+            .collect();
+        self.reopen = crate::workspace::pending(&w, &crate::workspace::boot_id(), false, &|id| {
+            running.contains(id)
+        });
+    }
+
+    fn reopen_previous(&mut self) {
+        if self.reopen.is_empty() {
+            return;
+        }
+        let targets: Vec<ResumeTarget> = self
+            .reopen
+            .iter()
+            .map(|e| ResumeTarget {
+                id: e.id.clone(),
+                cwd: e.cwd.clone(),
+                model: if self.restore_model {
+                    e.model.clone()
+                } else {
+                    String::new()
+                },
+                perms: e.perms.clone(),
+                title: e.title.clone(),
+            })
+            .collect();
+        self.outcome = Some(Outcome::Resume {
+            targets,
+            target: Target::WindowTmux,
+        });
+        self.quit = true;
+    }
+
     pub fn targets(&self) -> Vec<ResumeTarget> {
         let mk = |s: &Session| ResumeTarget {
             id: if s.is_subagent {
@@ -1037,6 +1119,13 @@ impl App {
     pub fn do_action(&mut self, a: Action) {
         match a {
             Action::Resume => self.resume(Target::Here),
+            Action::Reopen => self.reopen_previous(),
+            Action::DismissReopen => {
+                let n = self.reopen.len();
+                self.reopen.clear();
+                crate::workspace::dismiss_previous();
+                self.status = format!("left {n} closed — mn --reopen still brings them back");
+            }
             Action::View => self.open_viewer(),
             Action::Tmux => self.resume(Target::Tmux),
             Action::NewWindow => self.resume(Target::Window),
@@ -1208,6 +1297,16 @@ impl App {
     }
 
     fn click(&mut self, x: u16, y: u16, right: bool) {
+        // the reopen offer: its two words are buttons
+        if Some(y) == self.hits.banner_y {
+            for (x0, x1, action) in self.hits.banner.clone() {
+                if x >= x0 && x <= x1 {
+                    self.do_action(action);
+                    return;
+                }
+            }
+            return;
+        }
         // a column heading: sort by it
         if y == self.hits.colhead_y {
             for (x0, x1, sort) in self.hits.columns.clone() {
@@ -1479,6 +1578,10 @@ impl App {
                     "mouse off — terminal text selection works again".into()
                 };
             }
+            // Both are inert unless the offer is actually showing: a stray
+            // `r` should never be able to open a pile of windows.
+            KeyCode::Char('r') if !self.reopen.is_empty() => self.do_action(Action::Reopen),
+            KeyCode::Char('x') if !self.reopen.is_empty() => self.do_action(Action::DismissReopen),
             KeyCode::Char('c') => self.do_action(Action::Clear),
             KeyCode::Char('R') | KeyCode::F(5) => {
                 self.want_refresh = true;
@@ -1845,6 +1948,99 @@ mod logic_tests {
             panic!("no outcome");
         };
         assert!(targets[0].model.is_empty());
+    }
+
+    fn offer(a: &mut App, ids: &[&str]) {
+        a.reopen = ids
+            .iter()
+            .map(|id| crate::workspace::Entry {
+                id: (*id).to_string(),
+                cwd: "/home/u".into(),
+                model: "claude-opus-5".into(),
+                perms: "bypassPermissions".into(),
+                title: format!("work in {id}"),
+            })
+            .collect();
+    }
+
+    fn press(a: &mut App, c: char) {
+        a.on_key(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Char(c),
+        ));
+    }
+
+    #[test]
+    fn taking_the_offer_reopens_every_one_of_them() {
+        let mut a = app();
+        offer(&mut a, &["aaaaaaaa-1", "bbbbbbbb-2"]);
+        press(&mut a, 'r');
+        let Some(Outcome::Resume { targets, target }) = &a.outcome else {
+            panic!("the offer did nothing");
+        };
+        assert_eq!(targets.len(), 2, "only part of the set came back");
+        assert_eq!(
+            *target,
+            Target::WindowTmux,
+            "restored sessions need tmux under them, or closing the window kills them"
+        );
+        // the recorded permission mode has to survive, or a restored session
+        // comes back asking about every edit
+        assert_eq!(targets[0].perms, "bypassPermissions");
+        assert!(a.quit);
+    }
+
+    #[test]
+    fn r_does_nothing_at_all_when_there_is_no_offer() {
+        // `r` is a letter people will hit by accident. With nothing on offer
+        // it must not open anything.
+        let mut a = app();
+        assert!(a.reopen.is_empty());
+        press(&mut a, 'r');
+        assert!(a.outcome.is_none(), "a stray keystroke opened windows");
+        assert!(!a.quit);
+    }
+
+    #[test]
+    fn waving_the_offer_away_takes_it_off_screen() {
+        let mut a = app();
+        offer(&mut a, &["aaaaaaaa-1"]);
+        press(&mut a, 'x');
+        assert!(a.reopen.is_empty(), "the offer stayed up");
+        assert!(a.outcome.is_none(), "dismissing must not open anything");
+        assert!(
+            a.status.contains("--reopen"),
+            "dismissing should say how to change your mind: {}",
+            a.status
+        );
+    }
+
+    #[test]
+    fn what_gets_recorded_is_exactly_what_the_list_marks_as_live() {
+        let mut a = app();
+        assert!(a.open_sessions().is_empty());
+
+        a.all[0].live_pid = Some(1);
+        a.all[1].has_tmux = true;
+        // a subagent is not something you can resume on its own
+        let sub = a.all.iter().position(|s| s.is_subagent).unwrap();
+        a.all[sub].live_pid = Some(3);
+        // and neither is a session with nowhere to open
+        let nowhere = a.all.iter().position(|s| s.cwd.is_empty()).unwrap();
+        a.all[nowhere].live_pid = Some(4);
+
+        let ids: Vec<String> = a.open_sessions().into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec!["aaaaaaaa-1", "bbbbbbbb-2"], "recorded: {ids:?}");
+    }
+
+    #[test]
+    fn a_recorded_session_carries_what_reopening_it_needs() {
+        let mut a = app();
+        a.all[0].live_pid = Some(1);
+        let e = a.open_sessions().remove(0);
+        assert!(!e.cwd.is_empty() && !e.id.is_empty());
+        assert_eq!(e.model, "claude-opus-5");
+        assert_eq!(e.perms, "bypassPermissions");
+        assert_eq!(e.title, "today's work");
     }
 
     #[test]

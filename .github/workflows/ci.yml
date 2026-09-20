@@ -25,6 +25,12 @@ jobs:
         run: cargo test
       - name: build release
         run: cargo build --release
+      # The wrappers are shell, so cargo test never sees them. This runs both
+      # against stub binaries and a private tmux socket.
+      - name: shell wrappers
+        run: |
+          sudo apt-get install -y --no-install-recommends fish tmux
+          tools/shell-selftest.sh
       # Informational only. The rasteriser's output depends on the exact
       # DejaVu version installed, so a font bump on the runner would fail this
       # without anything actually being wrong with the repo.

@@ -106,6 +106,11 @@ single cue for "where was I".
 on one tells you its pid instead of silently attaching a second client to the
 same transcript.
 
+**Survives a reboot.** Which sessions are open is written down every time
+`mn` runs. After a reboot it offers them back — `r` reopens each in its own
+window with tmux underneath, so closing a window no longer kills the session.
+Nothing reopens on its own; see [After a reboot](#after-a-reboot).
+
 **Restores the model.** If a session ran on a specific `--model`, resuming
 brings it back on that model rather than quietly dropping to the default.
 
@@ -252,6 +257,52 @@ it.
 Turn it off with `--no-splash` or `MNEMOSYNE_NO_SPLASH=1`. `?` shows the same
 wordmark over the key reference.
 
+## After a reboot
+
+A reboot takes every running session with it, and a list of two hundred
+transcripts cannot tell you which three you actually had open. So `mn` writes
+that down: every time it runs, and every time it launches something, the set
+of open sessions is recorded in `workspace.json`.
+
+After a reboot the line under the title says so:
+
+![the offer to reopen what was running before a reboot](docs/reopen.png)
+
+The marker is hollow rather than solid on purpose: `●` means *running now*
+everywhere else in the interface, and these are the sessions that are not.
+
+`r` opens each one in its own terminal window, running under tmux. Both
+halves matter: the window is so you can see it, and tmux is so that closing
+the window — or the whole desktop session — leaves the work running instead
+of killing it. `x` puts the offer away; `mn --reopen` still acts on it
+afterwards, which is what makes dismissing it safe. Either way you are asked,
+because restoring on login without asking means a pile of windows and a
+Claude process each before you have said you want any of them.
+
+Sessions whose folder no longer exists are skipped, and so is anything
+already running — reopening one of those would put a second client on a
+transcript that already has one.
+
+**There is no daemon.** Nothing runs at shutdown to take a final snapshot, so
+the record is as fresh as your last `mn` — in practice, most of the way
+there. What it can see also varies by platform:
+
+| | what gets recorded |
+|---|---|
+| Linux | every running session, read from `/proc` |
+| macOS, BSD | what `mn` launched, plus anything waiting in tmux |
+
+There is no session id in a Claude process's environment, so a session is
+identified exactly only when its command line carries `--resume <uuid>` —
+which everything `mn` starts does. A bare `claude` you started by hand is
+matched by working directory instead, and two of those in one folder look
+like one session.
+
+The offer is only made when a reboot has actually happened, which is
+established from `/proc/sys/kernel/random/boot_id` on Linux and from
+`kern.boottime` elsewhere. On a platform where neither can be read, the offer
+is never made on its own and `mn --reopen` is the way in.
+
 ## Permissions
 
 A session resumes under the permission mode it was **started** in, read from
@@ -293,10 +344,13 @@ mnemosyne --search WebSearch --search-mode tool    # which sessions used it
 mnemosyne --stats                     # corpus summary
 mnemosyne --refresh                   # rebuild the index and exit
 mnemosyne --restore 5                 # reopen the 5 most recent, each in a window
+mnemosyne --reopen                    # put back what was open before the reboot
 ```
 
 `--restore` skips anything already running or already in a tmux session, and
-anything whose directory has since been deleted.
+anything whose directory has since been deleted. `--reopen` does the same,
+and works even after the offer has been dismissed — so it is the one to put
+in a login script if you would rather not be asked.
 
 ## How it stays fast
 
@@ -368,9 +422,11 @@ and are never required.
 | `~/.claude/projects/**/*.jsonl` | read only, never modified |
 | `~/.claude/mnemosyne/index.db` | disposable cache; delete it any time |
 | `~/.claude/mnemosyne/meta.json` | your favourites, tags and notes |
+| `~/.claude/mnemosyne/workspace.json` | which sessions were open, for reopening after a reboot |
 
 Only `meta.json` cannot be regenerated, so it is written via a temp file and
-rename and kept deliberately small and readable.
+rename and kept deliberately small and readable. `workspace.json` is written
+the same way; losing it costs you one reopen offer and nothing else.
 
 ## Retention warning
 
@@ -474,11 +530,14 @@ worth keeping as a fallback if the binary is ever missing:
 ## Development
 
 ```sh
-cargo test          # 134 tests, no network and no fixtures on disk
+cargo test          # 170 tests, no network and no fixtures on disk
 cargo clippy --all-targets -- -D warnings
+tools/shell-selftest.sh           # the fish and bash wrappers, 32 checks
 python3 tools/gen-wordmark.py     # regenerate the logo (needs Pillow)
 python3 tools/demo-corpus.py /tmp/demo-home        # invented sessions
 HOME=/tmp/demo-home python3 tools/screenshot.py docs/list.png 150 24
+python3 tools/demo-corpus.py /tmp/demo-home --reopen-offer   # + a pre-reboot set
+HOME=/tmp/demo-home python3 tools/screenshot.py docs/reopen.png 150 16
 python3 tools/tui-drive.py '["./target/release/mnemosyne","--no-splash"]' '["DOWN","v"]'
 ```
 
@@ -501,6 +560,17 @@ nothing in fontconfig's fallback chain for plain `monospace` carries it — it
 had been rendering as a box, and no text capture could reveal that, because
 the codepoint survives whether or not the font can draw it. A test now holds
 every non-ASCII glyph the interface draws against a vetted list.
+
+`tools/shell-selftest.sh` covers the part `cargo test` cannot see. About a
+third of the work of resuming a session happens in the shell wrapper —
+splitting the plan into fields, mapping permission modes, creating the tmux
+session, opening the window — and none of it is Rust. It runs both wrappers
+against stub `mnemosyne`, `claude` and terminal binaries, with tmux on a
+private socket so it can never disturb real sessions. It immediately found
+two bugs in the bash wrapper: `read` with tab as the separator collapses
+runs of tabs, so a session with no recorded model had every later field
+shifted along by one, losing its title and passing `--model default` to
+Claude.
 
 `tools/tui-drive.py` runs the interface in a pseudo-terminal and rebuilds what
 it drew, so the TUI can be exercised in CI or from a script. It speaks

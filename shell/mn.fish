@@ -16,7 +16,7 @@ function mn --description 'Browse, search, tag and resume Claude Code sessions (
             continue
         end
         switch $a
-            case --no-splash --subagents --no-model --no-update --update --check-update --write-config
+            case --no-splash --subagents --no-model --no-update --update --check-update --write-config --reopen
                 set -a mine $a
             case --restore
                 # takes a count, which belongs to mnemosyne and not to claude
@@ -51,6 +51,15 @@ function mn --description 'Browse, search, tag and resume Claude Code sessions (
         test -n "$mdl"; and set margs --model $mdl
         echo "▶ $ttl"
         claude --resume $sid $margs $extra $fwd
+    else if test "$first[1]" = wintmux
+        # A window each, with tmux underneath: closing the window leaves the
+        # session running instead of killing it. That is what makes reopening
+        # after a reboot safe to do in bulk.
+        for line in $plan
+            set -l p (string split \t -- $line)
+            set -l extra (__mn_perms "$p[5]" $no_bypass $fwd)
+            __mn_wintmux "$p[2]" "$p[3]" "$p[4]" "$p[6]" -- $extra $fwd
+        end
     else if test "$first[1]" = tmux
         # Create every requested session detached first, then attach once --
         # attaching inside the loop would block on the first one.
@@ -115,6 +124,24 @@ function __mn_tmux_ensure --description 'Make sure a tmux session exists for thi
     return 1
 end
 
+function __mn_wintmux --description 'Open a resumed session in its own window, running under tmux'
+    # Without tmux this is just a window, which is the next best thing rather
+    # than an error: the session still opens.
+    if not command -q tmux
+        __mn_window $argv
+        return $status
+    end
+    set -l name (__mn_tmux_ensure $argv)
+    or return 1
+    set -l ttl $argv[4]
+    set -l term (__mn_term_open "$argv[1]" "exec tmux attach-session -t ="$name)
+    or begin
+        echo "  ▶ $ttl  (tmux $name — no terminal to show it in; ctrl+t attaches)"
+        return 0
+    end
+    echo "  ▶ $ttl  ($term → tmux $name)"
+end
+
 function __mn_tmux_attach --description 'Attach to a tmux session, from inside or outside tmux'
     # attach-session fails when already inside tmux; switch-client is the
     # in-tmux equivalent.
@@ -177,7 +204,19 @@ function __mn_window --description 'Open one resumed session in its own terminal
     test -n "$mdl"; and set margs --model $mdl
     set -l inner "cd "(string escape -- $cwd)"; exec claude --resume $sid $margs $extra"
 
-    for term in $MN_TERMINAL alacritty konsole kitty wezterm foot xterm
+    set -l term (__mn_term_open "$cwd" "$inner")
+    or begin
+        echo "  ✗ no terminal emulator found (set \$MN_TERMINAL)"
+        return 1
+    end
+    echo "  ▶ $ttl  ($term)"
+end
+
+function __mn_term_open --description 'Run a command in a new terminal window; echo the terminal used'
+    set -l cwd $argv[1]
+    set -l inner $argv[2]
+
+    for term in $MN_TERMINAL alacritty konsole kitty wezterm foot ghostty xterm
         test -z "$term"; and continue
         command -q $term; or continue
         switch $term
@@ -191,13 +230,27 @@ function __mn_window --description 'Open one resumed session in its own terminal
                 command $term start --cwd "$cwd" -- fish -lc "$inner" &
             case foot
                 command $term --working-directory="$cwd" fish -lc "$inner" &
+            case ghostty
+                command $term --working-directory="$cwd" -e fish -lc "$inner" &
             case '*'
                 command $term -e fish -lc "$inner" &
         end
         disown
-        echo "  ▶ $ttl  ($term)"
+        echo $term
         return 0
     end
-    echo "  ✗ no terminal emulator found (set \$MN_TERMINAL)"
+
+    # macOS has none of those. Terminal.app is told to run a script rather
+    # than a command line, which keeps a shell command out of AppleScript
+    # quoting entirely.
+    if command -q osascript
+        set -l tmp (mktemp -t mn-open)
+        printf '#!/bin/sh\nrm -f %s\ncd %s\n%s\n' (string escape -- $tmp) (string escape -- $cwd) "$inner" >$tmp
+        chmod +x $tmp
+        osascript -e "tell application \"Terminal\" to do script \"$tmp\"" \
+            -e 'tell application "Terminal" to activate' >/dev/null
+        echo Terminal.app
+        return 0
+    end
     return 1
 end

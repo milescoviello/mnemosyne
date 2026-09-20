@@ -240,6 +240,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let cols = Cols::new(area.width as usize);
 
     draw_wordmark(f, app, rows[0]);
+    // The blank line under the wordmark is where the reopen offer goes, so
+    // an offer never pushes the list around: it fills air that was there
+    // anyway, and the rows below it do not move.
+    app.hits.banner.clear();
+    app.hits.banner_y = None;
+    if !app.reopen.is_empty() {
+        draw_reopen(f, app, rows[1]);
+    }
     draw_colheads(f, app, &cols, rows[2]);
     draw_pool(f, app, &cols, rows[3]);
     if rail > 0 {
@@ -418,6 +426,59 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
         .block(Block::default().style(Style::default().bg(th().panel))),
         head[2],
     );
+}
+
+/// The offer to put back what a reboot took away.
+///
+/// Only ever an offer. Restoring on login without being asked would mean a
+/// pile of terminal windows and a Claude process each, before you had said
+/// you wanted any of them.
+fn draw_reopen(f: &mut Frame, app: &mut App, area: Rect) {
+    let n = app.reopen.len();
+    let what = if n == 1 {
+        "1 session was".to_string()
+    } else {
+        format!("{n} sessions were")
+    };
+    // Naming one of them is what makes the offer legible: a bare count could
+    // mean anything, and you cannot tell whether you want it back.
+    let first = app.reopen[0].title.trim().to_string();
+    let head = if first.is_empty() || n > 1 {
+        format!("{what} open before the reboot")
+    } else {
+        format!("{what} open before the reboot: {first}")
+    };
+
+    let key = Style::default()
+        .fg(rgb(art::ramp(0.95)))
+        .add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(th().chrome);
+
+    let mut spans = vec![
+        Span::raw(" ".repeat(MARGIN)),
+        // Hollow, not solid: `●` means running *now* everywhere else in this
+        // interface, and these are exactly the sessions that are not.
+        Span::styled("◌ ", Style::default().fg(th().live)),
+        Span::styled(head.clone(), Style::default().fg(th().text)),
+        Span::raw("   "),
+    ];
+    let mut x = area.x + MARGIN as u16 + 2 + head.chars().count() as u16 + 3;
+
+    app.hits.banner_y = Some(area.y);
+    for (k, label, action) in [
+        ("r", " reopen   ", Action::Reopen),
+        ("x", " not now", Action::DismissReopen),
+    ] {
+        let w = (k.chars().count() + label.chars().count()) as u16;
+        // The whole phrase is the target, not just the letter: a one-column
+        // click target is not a click target.
+        app.hits.banner.push((x, x + w.saturating_sub(1), action));
+        spans.push(Span::styled(k, key));
+        spans.push(Span::styled(label, dim));
+        x += w;
+    }
+
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// `≈ m n e m o s y n e` — the name lit along the water ramp.
@@ -1222,6 +1283,14 @@ fn guide() -> Vec<H> {
         Key("space", "", "choose several, then enter reopens them all at once"),
         Say("It comes back with the model and the permission mode it started under."),
         Gap,
+        Head("after a reboot"),
+        Say("Which sessions are open is written down every time this runs. When a reboot"),
+        Say("has taken them, the line under the title offers them back."),
+        Key("r", "", "reopen them — a window each, running under tmux"),
+        Key("x", "", "leave them closed"),
+        Say("Nothing reopens on its own: that would be a pile of windows you never asked"),
+        Say("for. Waved it away and changed your mind? mn --reopen still does it."),
+        Gap,
         Head("keeping track"),
         Key("f", "", "favourite — favourites float to the top"),
         Key("t", "", "tag it, or tag everything you have selected"),
@@ -1311,6 +1380,15 @@ fn keys() -> Vec<H> {
         Key("a", "", "reveal subagents"),
         Key("→ ←", "l h", "expand · collapse subagents"),
         Key("p", "", "preview rail"),
+        Gap,
+        Head("after a reboot"),
+        Key(
+            "r",
+            "",
+            "reopen what was open before it — window each, under tmux",
+        ),
+        Key("x", "", "leave them closed (mn --reopen still works)"),
+        Say("Both only do anything while the offer is showing."),
         Gap,
         Head("other"),
         Key("R", "f5", "reindex"),
@@ -1592,7 +1670,128 @@ mod render_tests {
             a.help_page = HelpPage::Keys;
             let _ = render(&mut a, w, h);
             a.input_mode = InputMode::Normal;
+
+            // and with the reopen offer up, which draws into the one blank
+            // line in the layout
+            offer(&mut a, 3);
+            let _ = render(&mut a, w, h);
         }
+    }
+
+    /// An outstanding offer of `n` sessions to put back.
+    fn offer(a: &mut App, n: usize) {
+        a.reopen = (0..n)
+            .map(|i| crate::workspace::Entry {
+                id: format!("session-{i}"),
+                cwd: "/home/u".into(),
+                title: format!("some work {i}"),
+                ..Default::default()
+            })
+            .collect();
+    }
+
+    #[test]
+    fn the_offer_says_what_it_is_offering() {
+        let mut a = app();
+        offer(&mut a, 3);
+        let rows = render(&mut a, 120, 30);
+        let line = rows
+            .iter()
+            .find(|r| r.contains("before the reboot"))
+            .unwrap_or_else(|| panic!("the offer never appeared: {rows:#?}"));
+        assert!(line.contains("3 sessions were"), "no count: {line:?}");
+        assert!(line.contains("reopen"), "no way to accept: {line:?}");
+        assert!(line.contains("not now"), "no way to decline: {line:?}");
+    }
+
+    #[test]
+    fn a_single_session_is_named_rather_than_counted() {
+        let mut a = app();
+        offer(&mut a, 1);
+        let rows = render(&mut a, 120, 30);
+        let line = rows
+            .iter()
+            .find(|r| r.contains("before the reboot"))
+            .unwrap();
+        assert!(line.contains("1 session was"), "{line:?}");
+        assert!(
+            line.contains("some work 0"),
+            "one session should be named, not just counted: {line:?}"
+        );
+    }
+
+    #[test]
+    fn nothing_is_drawn_there_when_there_is_no_offer() {
+        let mut a = app();
+        let rows = render(&mut a, 120, 30);
+        assert!(!rows.iter().any(|r| r.contains("before the reboot")));
+        assert!(
+            rows[1].trim().is_empty(),
+            "the line under the wordmark should stay empty: {:?}",
+            rows[1]
+        );
+    }
+
+    #[test]
+    fn the_offer_can_be_clicked() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        // Where the words land depends on how the header was drawn, so the
+        // coordinates come from the render rather than from a guess.
+        let mut a = app();
+        offer(&mut a, 2);
+        let _ = render(&mut a, 120, 30);
+        let y = a
+            .hits
+            .banner_y
+            .expect("the offer registered no click target");
+        let (x0, _, _) = a.hits.banner[0];
+
+        a.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x0,
+            row: y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        let Some(crate::app::Outcome::Resume { targets, .. }) = &a.outcome else {
+            panic!("clicking reopen did nothing");
+        };
+        assert_eq!(targets.len(), 2);
+    }
+
+    #[test]
+    fn declining_can_be_clicked_too() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut a = app();
+        offer(&mut a, 2);
+        let _ = render(&mut a, 120, 30);
+        let y = a.hits.banner_y.unwrap();
+        let (x0, _, _) = a.hits.banner[1];
+
+        a.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x0,
+            row: y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        assert!(a.reopen.is_empty(), "the offer stayed up");
+        assert!(a.outcome.is_none(), "declining opened something");
+    }
+
+    #[test]
+    fn a_click_beside_the_offer_does_not_open_anything() {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let mut a = app();
+        offer(&mut a, 2);
+        let _ = render(&mut a, 120, 30);
+        let y = a.hits.banner_y.unwrap();
+        a.on_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: y,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        });
+        assert!(a.outcome.is_none(), "the margin acted as a button");
+        assert_eq!(a.reopen.len(), 2);
     }
 
     #[test]

@@ -18,6 +18,7 @@ mod search;
 mod splash;
 mod ui;
 mod update;
+mod workspace;
 
 use anyhow::Result;
 use app::{App, Outcome};
@@ -51,6 +52,8 @@ usage: mnemosyne [options]
 
   --restore N      reopen the N most recent sessions, each in its own window,
                    skipping any already running (replaces claude-restore)
+  --reopen         put back the sessions that were open before the machine
+                   last rebooted, each in a window backed by tmux
 
   --subagents      start with subagent transcripts revealed
   --no-splash      skip the opening animation (or set MNEMOSYNE_NO_SPLASH=1)
@@ -64,8 +67,11 @@ usage: mnemosyne [options]
   -h, --help       this text
   -V, --version    version
 
+Which sessions are open is recorded every time the browser runs, so that a
+reboot can be undone. After one, the browser offers to put them back.
+
 On exit the browser prints the chosen action to stdout as TSV:
-  <here|window|tmux>\\t<cwd>\\t<session-id>\\t<model>\\t<permission-mode>\\t<title>
+  <here|window|tmux|wintmux>\\t<cwd>\\t<session-id>\\t<model>\\t<permission-mode>\\t<title>
 The shell function (`mn`) turns that into a cd plus `claude --resume`, or into
 a tmux attach. It restores the model and the permission mode the session
 started in; pass --ask to resume with prompts on instead.
@@ -301,6 +307,61 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Put back what the last reboot took. The offer is normally made in the
+    // browser; this is the same thing without opening it, for a login script
+    // or for when it has already been waved away.
+    if has("--reopen") {
+        let live = live::live_map();
+        let mut app = App::new(sessions, meta::Meta::load(), live, restore_model);
+        app.rebuild();
+        let boot = workspace::boot_id();
+        // Fold first: on the first run after a reboot the set from before it
+        // is still filed under "current", and rolling it over is what makes
+        // it available to offer.
+        let w = workspace::fold(
+            workspace::load(),
+            app.open_sessions(),
+            &boot,
+            live::detection_supported(),
+        );
+        let _ = workspace::save(&w);
+
+        let running: std::collections::HashSet<String> = app
+            .all
+            .iter()
+            .filter(|s| s.live_pid.is_some() || s.has_tmux)
+            .map(|s| s.id.clone())
+            .collect();
+        // A dismissed offer is included here: asking for this by name is a
+        // clear enough statement of intent.
+        let pending = workspace::pending(&w, &boot, true, &|id| running.contains(id));
+        if pending.is_empty() {
+            eprintln!(
+                "nothing to reopen — no sessions were recorded as open before the last reboot"
+            );
+            return Ok(());
+        }
+        let mut out = std::io::stdout().lock();
+        for e in &pending {
+            writeln!(
+                out,
+                "wintmux\t{}\t{}\t{}\t{}\t{}",
+                e.cwd,
+                e.id,
+                if restore_model { &e.model } else { "" },
+                e.perms,
+                e.title
+            )?;
+        }
+        // Taken, so never offered again; what was just opened becomes the
+        // current set instead.
+        let mut after = workspace::load();
+        after.previous = None;
+        let _ = workspace::save(&after);
+        workspace::record(pending, live::detection_supported());
+        return Ok(());
+    }
+
     if has("--list") || has("--json") {
         let mut app = App::new(
             sessions,
@@ -420,6 +481,13 @@ fn main() -> Result<()> {
         }
     }
 
+    // Write down what is open, every run. There is no daemon to do it at
+    // shutdown, so the record is kept fresh by the thing you actually use.
+    // This also rolls the pre-reboot set over into the offer, which has to
+    // happen before the offer can be read.
+    workspace::record(app.open_sessions(), live::detection_supported());
+    app.load_reopen();
+
     let res = run(&mut term, &mut app, &updated);
     disable_raw_mode()?;
     let _ = execute!(term.backend_mut(), DisableMouseCapture);
@@ -428,6 +496,26 @@ fn main() -> Result<()> {
     res?;
 
     if let Some(Outcome::Resume { targets, target }) = &app.outcome {
+        // What is about to be launched counts as open: it will be, moments
+        // from now, and nothing else will be watching when it happens.
+        let mut open = app.open_sessions();
+        for t in targets {
+            if !open.iter().any(|e| e.id == t.id) {
+                open.push(workspace::Entry {
+                    id: t.id.clone(),
+                    cwd: t.cwd.clone(),
+                    model: t.model.clone(),
+                    perms: t.perms.clone(),
+                    title: t.title.clone(),
+                });
+            }
+        }
+        workspace::record(open, live::detection_supported());
+        if *target == app::Target::WindowTmux {
+            // The offer was taken, so it is not made again.
+            workspace::clear_previous();
+        }
+
         // Several selections cannot share this terminal, so they become
         // windows unless tmux was asked for explicitly.
         let mode = if *target == app::Target::Here && targets.len() > 1 {
