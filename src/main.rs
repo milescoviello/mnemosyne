@@ -50,8 +50,8 @@ usage: mnemosyne [options]
                    the last one also reads tool output, which the index
                    leaves out: slower, but complete
 
-  --restore N      reopen the N most recent sessions, each in its own window,
-                   skipping any already running (replaces claude-restore)
+  --restore N      reopen the N most recent sessions, each in its own window
+                   under tmux, skipping any already running
   --reopen         put back the sessions that were open before the machine
                    last rebooted, each in a window backed by tmux
 
@@ -76,6 +76,35 @@ The shell function (`mn`) turns that into a cd plus `claude --resume`, or into
 a tmux attach. It restores the model and the permission mode the session
 started in; pass --ask to resume with prompts on instead.
 ";
+
+/// Write one line of the plan, or explain why it cannot be written.
+///
+/// The plan is tab-separated and the shell splits it back apart positionally,
+/// so a tab anywhere inside a field silently shifts every field after it: the
+/// session id becomes half a path, and resuming fails with a message about
+/// something unrelated. A folder can legally contain a tab on Unix. Titles
+/// cannot -- the scanner collapses all whitespace -- but they are checked too
+/// rather than trusted, since that is one refactor away from being untrue.
+fn plan_line(
+    out: &mut impl Write,
+    mode: &str,
+    cwd: &str,
+    id: &str,
+    model: &str,
+    perms: &str,
+    title: &str,
+) -> Result<bool> {
+    let fields = [cwd, id, model, perms, title];
+    if let Some(bad) = fields.iter().find(|f| f.contains('\t') || f.contains('\n')) {
+        eprintln!(
+            "skipping {id}: a tab or newline in {bad:?} cannot be carried \
+             by the plan the shell reads"
+        );
+        return Ok(false);
+    }
+    writeln!(out, "{mode}\t{cwd}\t{id}\t{model}\t{perms}\t{title}")?;
+    Ok(true)
+}
 
 fn main() -> Result<()> {
     // Rust ignores SIGPIPE, so a closed pipe surfaces as a write error and
@@ -177,7 +206,24 @@ fn main() -> Result<()> {
             "with git branch {}",
             main.iter().filter(|s| !s.git_branch.is_empty()).count()
         );
-        println!("running now     {}", live::live_map().count);
+        // Two numbers, because they are two different things and reporting
+        // only the second made this disagree with the header and the list.
+        // A claude with no --resume on its command line cannot be tied to a
+        // transcript, so it is running without being a session we can name.
+        let lm = live::live_map();
+        let named = {
+            let app = App::new(
+                sessions.clone(),
+                meta::Meta::load(),
+                live::live_map(),
+                false,
+            );
+            app.live_shown()
+        };
+        println!("running now     {named}");
+        if lm.count != named {
+            println!("claude processes {}", lm.count);
+        }
         let m = meta::Meta::load();
         println!("favourites      {}", m.favorite_count());
         println!("tags            {}", m.all_tags().len());
@@ -289,20 +335,21 @@ fn main() -> Result<()> {
             if s.cwd.is_empty() || !std::path::Path::new(&s.cwd).is_dir() {
                 continue;
             }
-            writeln!(
-                out,
-                "window\t{}\t{}\t{}\t{}\t{}",
-                s.cwd,
-                s.id,
-                if restore_model {
-                    s.model.clone()
-                } else {
-                    String::new()
-                },
-                s.permission_mode,
-                s.title()
-            )?;
-            opened += 1;
+            // Same landing as the post-reboot offer: a window each, with
+            // tmux underneath, so closing one leaves the session running.
+            // An older shell wrapper treats this as a plain window.
+            let model = if restore_model { s.model.as_str() } else { "" };
+            if plan_line(
+                &mut out,
+                "wintmux",
+                &s.cwd,
+                &s.id,
+                model,
+                &s.permission_mode,
+                s.title(),
+            )? {
+                opened += 1;
+            }
         }
         return Ok(());
     }
@@ -343,14 +390,14 @@ fn main() -> Result<()> {
         }
         let mut out = std::io::stdout().lock();
         for e in &pending {
-            writeln!(
-                out,
-                "wintmux\t{}\t{}\t{}\t{}\t{}",
-                e.cwd,
-                e.id,
+            plan_line(
+                &mut out,
+                "wintmux",
+                &e.cwd,
+                &e.id,
                 if restore_model { &e.model } else { "" },
-                e.perms,
-                e.title
+                &e.perms,
+                &e.title,
             )?;
         }
         // Taken, so never offered again; what was just opened becomes the
@@ -525,11 +572,7 @@ fn main() -> Result<()> {
         };
         let mut out = std::io::stdout().lock();
         for t in targets {
-            writeln!(
-                out,
-                "{mode}\t{}\t{}\t{}\t{}\t{}",
-                t.cwd, t.id, t.model, t.perms, t.title
-            )?;
+            plan_line(&mut out, mode, &t.cwd, &t.id, &t.model, &t.perms, &t.title)?;
         }
     }
     Ok(())
@@ -602,7 +645,7 @@ fn run<B: ratatui::backend::Backend>(
         if last_live.elapsed() > Duration::from_secs(3) {
             last_live = Instant::now();
             let lm = live::live_map();
-            if lm.count != app.live.count {
+            if lm.fingerprint() != app.live.fingerprint() {
                 app.live = lm;
                 app.apply_overlay();
                 app.rebuild();
@@ -612,5 +655,58 @@ fn run<B: ratatui::backend::Backend>(
         if app.quit {
             return Ok(());
         }
+    }
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::plan_line;
+
+    fn line(cwd: &str, title: &str) -> (bool, String) {
+        let mut out: Vec<u8> = Vec::new();
+        let wrote = plan_line(
+            &mut out,
+            "wintmux",
+            cwd,
+            "026bcdb5-8d88-4ad7-9f23-58649bf4f353",
+            "claude-opus-5",
+            "bypassPermissions",
+            title,
+        )
+        .unwrap();
+        (wrote, String::from_utf8(out).unwrap())
+    }
+
+    #[test]
+    fn an_ordinary_session_becomes_six_fields() {
+        let (wrote, text) = line("/home/u/proj", "some title");
+        assert!(wrote);
+        assert_eq!(text.matches('\t').count(), 5, "wrong shape: {text:?}");
+        assert!(text.ends_with("some title\n"));
+    }
+
+    #[test]
+    fn a_folder_with_a_tab_in_it_is_refused_rather_than_mangled() {
+        // The shell splits this back apart positionally, so a tab inside a
+        // field shifts every field after it: the session id becomes half a
+        // path and the failure surfaces as something unrelated.
+        let (wrote, text) = line("/home/u/tab\there", "fine");
+        assert!(!wrote);
+        assert!(text.is_empty(), "wrote a line that cannot be parsed back");
+    }
+
+    #[test]
+    fn a_newline_is_refused_too() {
+        let (wrote, text) = line("/home/u/proj", "first line\nsecond line");
+        assert!(!wrote);
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn a_space_in_a_path_is_perfectly_fine() {
+        // Spaces are ordinary, especially on macOS. Only tabs break the shape.
+        let (wrote, text) = line("/home/u/My Documents/thing", "a title");
+        assert!(wrote);
+        assert!(text.contains("/home/u/My Documents/thing"));
     }
 }

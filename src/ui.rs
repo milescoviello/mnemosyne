@@ -433,8 +433,9 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
 /// Only ever an offer. Restoring on login without being asked would mean a
 /// pile of terminal windows and a Claude process each, before you had said
 /// you wanted any of them.
-/// One clickable word in the offer: its key, its label, what it does.
-type Button = (&'static str, &'static str, Action);
+/// One word in the offer: its key, its label, and what clicking it does —
+/// `None` for a hint that is there to be read rather than pressed.
+type Button = (&'static str, &'static str, Option<Action>);
 
 fn draw_reopen(f: &mut Frame, app: &mut App, area: Rect) {
     let n = app.reopen.len();
@@ -461,25 +462,33 @@ fn draw_reopen(f: &mut Frame, app: &mut App, area: Rect) {
     says.push(format!("reopen {n}?"));
 
     // Likewise the buttons themselves: words if they fit, letters if not.
-    let wordy: [Button; 2] = [
-        ("r", " reopen   ", Action::Reopen),
-        ("x", " not now", Action::DismissReopen),
+    // The hint about space is how you find out the offer can be narrowed at
+    // all; the marked rows below are the other half of that. It is the first
+    // thing dropped when the line gets tight.
+    let wordy: &[Button] = &[
+        ("r", " reopen   ", Some(Action::Reopen)),
+        ("x", " not now   ", Some(Action::DismissReopen)),
+        ("space", " drops one", None),
     ];
-    let terse: [Button; 2] = [
-        ("r", " reopen ", Action::Reopen),
-        ("x", " no", Action::DismissReopen),
+    let plain: &[Button] = &[
+        ("r", " reopen   ", Some(Action::Reopen)),
+        ("x", " not now", Some(Action::DismissReopen)),
+    ];
+    let terse: &[Button] = &[
+        ("r", " reopen ", Some(Action::Reopen)),
+        ("x", " no", Some(Action::DismissReopen)),
     ];
 
     let room = area.width as usize;
     let fixed = MARGIN + 2 + 3; // margin, marker, the gap before the buttons
-    let width_of = |b: &[Button; 2]| -> usize {
+    let width_of = |b: &[Button]| -> usize {
         b.iter()
             .map(|(k, l, _)| k.chars().count() + l.chars().count())
             .sum()
     };
 
-    let mut chosen: Option<(String, &[Button; 2])> = None;
-    for buttons in [&wordy, &terse] {
+    let mut chosen: Option<(String, &[Button])> = None;
+    for buttons in [wordy, plain, terse] {
         let budget = room.saturating_sub(fixed + width_of(buttons));
         if says[0].chars().count() <= budget {
             chosen = Some((says[0].clone(), buttons));
@@ -503,8 +512,8 @@ fn draw_reopen(f: &mut Frame, app: &mut App, area: Rect) {
     // Narrower than even "reopen 3?" plus two letters: say the least that
     // still leaves something to press.
     let (head, buttons) = chosen.unwrap_or_else(|| {
-        let budget = room.saturating_sub(fixed + width_of(&terse));
-        (crate::model::fit(says.last().unwrap(), budget), &terse)
+        let budget = room.saturating_sub(fixed + width_of(terse));
+        (crate::model::fit(says.last().unwrap(), budget), terse)
     });
 
     let key = Style::default()
@@ -528,8 +537,10 @@ fn draw_reopen(f: &mut Frame, app: &mut App, area: Rect) {
         // The whole phrase is the target, not just the letter: a one-column
         // click target is not a click target. Anything that would land past
         // the edge of the screen is not one either, so it is not registered.
-        if x + w <= area.x + area.width {
-            app.hits.banner.push((x, x + w.saturating_sub(1), *action));
+        if let Some(a) = action {
+            if x + w <= area.x + area.width {
+                app.hits.banner.push((x, x + w.saturating_sub(1), *a));
+            }
         }
         spans.push(Span::styled(*k, key));
         spans.push(Span::styled(*label, dim));
@@ -855,6 +866,18 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                         "◆",
                         Style::default()
                             .fg(rgb(art::ramp(0.9)))
+                            .add_modifier(Modifier::BOLD),
+                    )
+                } else if app.is_offered(&s.id) {
+                    // In the offer above: hollow, because it is not running
+                    // now, and in the offer's own colour so it cannot be
+                    // read as the "probably running" marker it shares a
+                    // glyph with. Nothing can be both -- the offer skips
+                    // anything already up.
+                    (
+                        "◌",
+                        Style::default()
+                            .fg(rgb(art::ramp(0.95)))
                             .add_modifier(Modifier::BOLD),
                     )
                 } else if s.favorite {

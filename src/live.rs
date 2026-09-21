@@ -139,6 +139,32 @@ pub struct LiveMap {
     pub supported: bool,
 }
 
+impl LiveMap {
+    /// A value that changes whenever the set of running sessions does.
+    ///
+    /// The refresh used to compare counts, which misses the case that
+    /// matters most: one session ends and another starts between two polls,
+    /// the count is unchanged, and the markers quietly describe a state that
+    /// no longer exists. Pids are enough to tell those apart.
+    pub fn fingerprint(&self) -> u64 {
+        let mut pids: Vec<i32> = self
+            .by_id
+            .values()
+            .chain(self.by_cwd.values())
+            .map(|p| p.pid)
+            .collect();
+        pids.sort_unstable();
+        let mut h: u64 = 1469598103934665603; // FNV-1a
+        for pid in pids {
+            for b in pid.to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(1099511628211);
+            }
+        }
+        h
+    }
+}
+
 pub fn live_map() -> LiveMap {
     let procs = scan_procs();
     let count = procs.len();
@@ -193,6 +219,61 @@ pub fn tmux_sessions() -> HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn map_of(procs: Vec<Proc>) -> LiveMap {
+        let count = procs.len();
+        let mut by_id = HashMap::new();
+        let mut by_cwd = HashMap::new();
+        for p in procs {
+            match &p.resume_id {
+                Some(id) => {
+                    by_id.insert(id.clone(), p);
+                }
+                None => {
+                    by_cwd.insert(p.cwd.clone(), p);
+                }
+            }
+        }
+        LiveMap {
+            by_id,
+            by_cwd,
+            count,
+            supported: true,
+        }
+    }
+
+    fn proc(pid: i32, id: &str) -> Proc {
+        Proc {
+            pid,
+            cwd: format!("/home/u/{id}"),
+            resume_id: Some(id.to_string()),
+            model: None,
+        }
+    }
+
+    #[test]
+    fn swapping_one_session_for_another_is_a_change() {
+        // The refresh used to compare counts. One session ending as another
+        // starts keeps the count identical, and the markers went stale.
+        let a = map_of(vec![proc(1, "one"), proc(2, "two")]);
+        let b = map_of(vec![proc(1, "one"), proc(3, "three")]);
+        assert_eq!(
+            a.count, b.count,
+            "the count is exactly what does not change"
+        );
+        assert_ne!(
+            a.fingerprint(),
+            b.fingerprint(),
+            "the change went unnoticed"
+        );
+    }
+
+    #[test]
+    fn the_same_set_in_a_different_order_is_not_a_change() {
+        let a = map_of(vec![proc(7, "one"), proc(9, "two")]);
+        let b = map_of(vec![proc(9, "two"), proc(7, "one")]);
+        assert_eq!(a.fingerprint(), b.fingerprint(), "a redraw for nothing");
+    }
 
     #[test]
     fn tmux_names_are_namespaced_and_short() {

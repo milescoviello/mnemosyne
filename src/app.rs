@@ -259,6 +259,13 @@ pub struct App {
     last_click: Option<(std::time::Instant, usize)>,
     pub restore_model: bool,
     pub want_refresh: bool,
+    /// Whether changes are written to disk.
+    ///
+    /// False in tests, and for one reason: without it `cargo test` overwrote
+    /// the real `meta.json` in whatever home it ran in, replacing a person's
+    /// favourites, tags and notes with the fixture's. It did that for days
+    /// before anyone noticed, because the tests all passed.
+    pub persist: bool,
     /// Sessions that were running before the last reboot and are not running
     /// now. Empty in the normal case; when it is not, the offer to reopen
     /// them sits above the list until it is taken or waved away.
@@ -321,6 +328,7 @@ impl App {
             last_click: None,
             restore_model,
             want_refresh: false,
+            persist: true,
             reopen: Vec::new(),
             preview_cache: HashMap::new(),
             matcher: Matcher::new(Config::DEFAULT),
@@ -762,7 +770,9 @@ impl App {
         let Some(i) = self.current_idx() else { return };
         let id = self.all[i].id.clone();
         let now = self.meta.toggle_favorite(&id);
-        let _ = self.meta.save();
+        if self.persist {
+            let _ = self.meta.save();
+        }
         self.all[i].favorite = now;
         self.status = if now {
             "★ favourited".into()
@@ -772,9 +782,47 @@ impl App {
         self.rebuild();
     }
 
+    /// Is this session one of the ones the offer is proposing to reopen?
+    pub fn is_offered(&self, id: &str) -> bool {
+        !self.reopen.is_empty() && self.reopen.iter().any(|e| e.id == id)
+    }
+
+    /// Take one session out of the offer, leaving the rest of it standing.
+    ///
+    /// This is what `space` does on a row that is in the offer, so narrowing
+    /// it down uses the key you already use for picking things. It stays out
+    /// of the ordinary selection set deliberately: pre-selecting three rows
+    /// would quietly redefine what `enter` does, and resuming one session
+    /// would open three.
+    fn drop_from_offer(&mut self, id: &str) {
+        let before = self.reopen.len();
+        self.reopen.retain(|e| e.id != id);
+        if self.reopen.len() == before {
+            return;
+        }
+        if self.reopen.is_empty() {
+            // Taken apart one at a time until nothing is left, which is the
+            // same answer as waving it away.
+            if self.persist {
+                crate::workspace::dismiss_previous();
+            }
+            self.status = "nothing left to reopen — mn --reopen brings it back".into();
+        } else {
+            self.status = format!("{} left to reopen", self.reopen.len());
+        }
+        self.move_by(1);
+    }
+
     fn toggle_select(&mut self) {
         let Some(i) = self.current_idx() else { return };
         let key = self.all[i].path.to_string_lossy().to_string();
+        // On a row the offer is proposing, space narrows the offer rather
+        // than starting an unrelated selection.
+        let id = self.all[i].id.clone();
+        if self.is_offered(&id) {
+            self.drop_from_offer(&id);
+            return;
+        }
         if !self.selected.remove(&key) {
             self.selected.insert(key);
         }
@@ -1026,7 +1074,9 @@ impl App {
         // `old>new` renames a tag everywhere rather than tagging anything.
         if let Some((from, to)) = raw.split_once('>') {
             let n = self.meta.rename_tag(from, to);
-            let _ = self.meta.save();
+            if self.persist {
+                let _ = self.meta.save();
+            }
             if self.tag_filter.as_deref() == Some(crate::meta::normalize_tag(from).as_str()) {
                 self.tag_filter = Some(crate::meta::normalize_tag(to));
             }
@@ -1068,7 +1118,9 @@ impl App {
                 format!("tagged {many} sessions {raw}")
             };
         }
-        let _ = self.meta.save();
+        if self.persist {
+            let _ = self.meta.save();
+        }
         self.input.clear();
         self.input_mode = InputMode::Normal;
         self.apply_overlay();
@@ -1079,7 +1131,9 @@ impl App {
         let Some(i) = self.current_idx() else { return };
         let id = self.all[i].id.clone();
         self.meta.set_note(&id, &self.input);
-        let _ = self.meta.save();
+        if self.persist {
+            let _ = self.meta.save();
+        }
         self.all[i].note = self
             .meta
             .get(&id)
@@ -1123,7 +1177,9 @@ impl App {
             Action::DismissReopen => {
                 let n = self.reopen.len();
                 self.reopen.clear();
-                crate::workspace::dismiss_previous();
+                if self.persist {
+                    crate::workspace::dismiss_previous();
+                }
                 self.status = format!("left {n} closed — mn --reopen still brings them back");
             }
             Action::View => self.open_viewer(),
@@ -1658,6 +1714,8 @@ pub mod fixtures {
         app_with(meta, true)
     }
 
+    /// Every fixture is non-persisting. This is not a detail: the suite used
+    /// to overwrite the real `meta.json` of whoever ran it.
     pub fn app_with(meta: crate::meta::Meta, restore_model: bool) -> App {
         let live = LiveMap {
             by_id: Default::default(),
@@ -1665,7 +1723,9 @@ pub mod fixtures {
             count: 0,
             supported: true,
         };
-        App::new(corpus(), meta, live, restore_model)
+        let mut a = App::new(corpus(), meta, live, restore_model);
+        a.persist = false;
+        a
     }
 }
 
@@ -1987,6 +2047,77 @@ mod logic_tests {
         // comes back asking about every edit
         assert_eq!(targets[0].perms, "bypassPermissions");
         assert!(a.quit);
+    }
+
+    #[test]
+    fn space_takes_one_session_out_of_the_offer() {
+        let mut a = app();
+        offer(&mut a, &["aaaaaaaa-1", "bbbbbbbb-2"]);
+        // put the cursor on the first offered session
+        a.cursor = a
+            .view
+            .iter()
+            .position(|r| matches!(r, Row::Item(i) if a.all[*i].id == "aaaaaaaa-1"))
+            .unwrap();
+        press(&mut a, ' ');
+
+        assert_eq!(a.reopen.len(), 1, "space did not narrow the offer");
+        assert_eq!(a.reopen[0].id, "bbbbbbbb-2", "dropped the wrong one");
+        assert!(
+            a.selected.is_empty(),
+            "narrowing the offer must not start an unrelated selection"
+        );
+
+        press(&mut a, 'r');
+        let Some(Outcome::Resume { targets, .. }) = &a.outcome else {
+            panic!("nothing reopened");
+        };
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].id, "bbbbbbbb-2");
+    }
+
+    #[test]
+    fn space_on_a_row_outside_the_offer_still_selects_it() {
+        let mut a = app();
+        offer(&mut a, &["aaaaaaaa-1"]);
+        a.cursor = a
+            .view
+            .iter()
+            .position(|r| matches!(r, Row::Item(i) if a.all[*i].id == "cccccccc-3"))
+            .unwrap();
+        press(&mut a, ' ');
+        assert_eq!(a.selected.len(), 1, "ordinary selection stopped working");
+        assert_eq!(a.reopen.len(), 1, "the offer should be untouched");
+    }
+
+    #[test]
+    fn dropping_the_last_one_is_the_same_as_declining() {
+        let mut a = app();
+        offer(&mut a, &["aaaaaaaa-1"]);
+        a.cursor = a
+            .view
+            .iter()
+            .position(|r| matches!(r, Row::Item(i) if a.all[*i].id == "aaaaaaaa-1"))
+            .unwrap();
+        press(&mut a, ' ');
+        assert!(a.reopen.is_empty());
+        assert!(
+            a.status.contains("--reopen"),
+            "should say how to get it back: {}",
+            a.status
+        );
+        // and the offer is gone, so r does nothing again
+        press(&mut a, 'r');
+        assert!(a.outcome.is_none());
+    }
+
+    #[test]
+    fn no_fixture_may_ever_write_to_the_real_home() {
+        // This suite overwrote the real meta.json of whoever ran it for
+        // several days: favourites, tags and notes replaced by the
+        // fixture's, and every test still passed. Nothing here writes.
+        assert!(!app().persist);
+        assert!(!app_with(crate::meta::Meta::default(), true).persist);
     }
 
     #[test]
