@@ -1239,6 +1239,16 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             ),
         ),
         InputMode::Note => ("note", app.input.clone(), "enter saves".into()),
+        InputMode::TmuxName => (
+            "name this tmux session",
+            app.input.clone(),
+            format!(
+                "enter · leave it empty for {}",
+                app.current()
+                    .map(|s| crate::live::tmux_name(&s.id))
+                    .unwrap_or_else(|| "mn-…".into())
+            ),
+        ),
         _ => ("", String::new(), String::new()),
     };
     let line = Line::from(vec![
@@ -1361,6 +1371,10 @@ fn guide() -> Vec<H> {
         Key("v", "", "read it first, without resuming or changing it"),
         Key("ctrl+t", "", "resume inside tmux, attaching if a session is already waiting"),
         Key("ctrl+n", "alt+enter", "resume in a new terminal window"),
+        Key("W", "ctrl+shift+t", "both: a new terminal window with tmux inside it"),
+        Say("The last one is the durable option — close the window and the session keeps"),
+        Say("running. Either tmux route asks what to call the session first; leave it"),
+        Say("empty for the generated name."),
         Key("space", "", "choose several, then enter reopens them all at once"),
         Say("It comes back with the model and the permission mode it started under."),
         Gap,
@@ -1426,6 +1440,13 @@ fn keys() -> Vec<H> {
             "",
             "resume in tmux — attaches if one is already waiting",
         ),
+        Key(
+            "W",
+            "ctrl+shift+t",
+            "new terminal window with tmux inside it — closing the window leaves it running",
+        ),
+        Say("ctrl+shift+t only arrives as its own key where the terminal says so; inside"),
+        Say("tmux that needs `set -s extended-keys on`. W always works."),
         Key("v", "", "read the conversation without resuming it"),
         Key("space", "", "pick several, then enter reopens them all"),
         Gap,

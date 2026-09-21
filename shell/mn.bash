@@ -62,13 +62,25 @@ __mn_term_open() {
 # Make sure a tmux session exists for this chat; print its name. Progress goes
 # to stderr so the caller can capture just the name.
 __mn_tmux_ensure() {
-    local cwd="$1" sid="$2" mdl="$3" ttl="$4"; shift 4
+    local cwd="$1" sid="$2" mdl="$3" ttl="$4" want="$5"; shift 5
     [ "$1" = "--" ] && shift
     command -v tmux >/dev/null 2>&1 || { echo "  ✗ tmux is not installed" >&2; return 1; }
 
     local name="mn-${sid:0:8}"
-    # Already there: attach to it rather than starting a second client on the
-    # same transcript. That is what resuming its latest state means.
+    [ -n "$want" ] && name="$want"
+
+    # Already there, whatever it ended up called: attach rather than starting
+    # a second client on the same transcript. tmux remembers the command each
+    # pane was started with, so the chat is found by its session id and not by
+    # a name that is now yours to choose.
+    local have
+    have="$(tmux list-panes -a -F '#{session_name}	#{pane_start_command}' 2>/dev/null \
+            | grep -F -- "--resume $sid" | head -1 | cut -f1)"
+    if [ -n "$have" ]; then
+        echo "  ▶ $have already running — resuming where it left off" >&2
+        printf '%s\n' "$have"
+        return 0
+    fi
     if tmux has-session -t "=$name" 2>/dev/null; then
         echo "  ▶ $name already running — resuming where it left off" >&2
         printf '%s\n' "$name"
@@ -124,8 +136,8 @@ mn() {
     plan="$(mnemosyne "${mine[@]}")" || return $?
     [ -z "$plan" ] && return 0
 
-    local mode cwd sid mdl prm ttl line
-    __mn_split "$(printf '%s\n' "$plan" | head -1)" mode cwd sid mdl prm ttl
+    local mode cwd sid mdl prm ttl tmx line
+    __mn_split "$(printf '%s\n' "$plan" | head -1)" mode cwd sid mdl prm ttl tmx
 
     if [ "$mode" = "here" ]; then
         local extra=(); mapfile -t extra < <(__mn_perms "$prm" "$no_bypass" "${fwd[@]}")
@@ -142,9 +154,9 @@ mn() {
         # attaching inside the loop would block on the first one.
         local target="" nm
         while IFS= read -r line; do
-            __mn_split "$line" mode cwd sid mdl prm ttl
+            __mn_split "$line" mode cwd sid mdl prm ttl tmx
             local extra=(); mapfile -t extra < <(__mn_perms "$prm" "$no_bypass" "${fwd[@]}")
-            nm="$(__mn_tmux_ensure "$cwd" "$sid" "$mdl" "$ttl" -- "${extra[@]}" "${fwd[@]}")" || continue
+            nm="$(__mn_tmux_ensure "$cwd" "$sid" "$mdl" "$ttl" "$tmx" -- "${extra[@]}" "${fwd[@]}")" || continue
             [ -z "$target" ] && target="$nm"
         done < <(printf '%s\n' "$plan")
         [ -n "$target" ] && __mn_tmux_attach "$target"
@@ -155,13 +167,13 @@ mn() {
     # the window leaves the session running instead of killing it.
     local term inner name
     while IFS= read -r line; do
-        __mn_split "$line" mode cwd sid mdl prm ttl
+        __mn_split "$line" mode cwd sid mdl prm ttl tmx
         [ -d "$cwd" ] || { echo "  ✗ folder gone, skipping: $cwd"; continue; }
         local extra=(); mapfile -t extra < <(__mn_perms "$prm" "$no_bypass" "${fwd[@]}")
         local margs=(); [ -n "$mdl" ] && margs=(--model "$mdl")
 
         if [ "$mode" = "wintmux" ] && command -v tmux >/dev/null 2>&1; then
-            name="$(__mn_tmux_ensure "$cwd" "$sid" "$mdl" "$ttl" -- "${extra[@]}" "${fwd[@]}")" || continue
+            name="$(__mn_tmux_ensure "$cwd" "$sid" "$mdl" "$ttl" "$tmx" -- "${extra[@]}" "${fwd[@]}")" || continue
             if term="$(__mn_term_open "$cwd" "exec tmux attach-session -t =$name")"; then
                 echo "  ▶ $ttl  ($term → tmux $name)"
             else

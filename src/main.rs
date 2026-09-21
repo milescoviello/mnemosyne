@@ -71,7 +71,8 @@ Which sessions are open is recorded every time the browser runs, so that a
 reboot can be undone. After one, the browser offers to put them back.
 
 On exit the browser prints the chosen action to stdout as TSV:
-  <here|window|tmux|wintmux>\\t<cwd>\\t<session-id>\\t<model>\\t<permission-mode>\\t<title>
+  <here|window|tmux|wintmux>\\t<cwd>\\t<session-id>\\t<model>
+      \\t<permission-mode>\\t<title>\\t<tmux-session-name, may be empty>
 The shell function (`mn`) turns that into a cd plus `claude --resume`, or into
 a tmux attach. It restores the model and the permission mode the session
 started in; pass --ask to resume with prompts on instead.
@@ -85,6 +86,7 @@ started in; pass --ask to resume with prompts on instead.
 /// something unrelated. A folder can legally contain a tab on Unix. Titles
 /// cannot -- the scanner collapses all whitespace -- but they are checked too
 /// rather than trusted, since that is one refactor away from being untrue.
+#[allow(clippy::too_many_arguments)]
 fn plan_line(
     out: &mut impl Write,
     mode: &str,
@@ -93,8 +95,9 @@ fn plan_line(
     model: &str,
     perms: &str,
     title: &str,
+    tmux: &str,
 ) -> Result<bool> {
-    let fields = [cwd, id, model, perms, title];
+    let fields = [cwd, id, model, perms, title, tmux];
     if let Some(bad) = fields.iter().find(|f| f.contains('\t') || f.contains('\n')) {
         eprintln!(
             "skipping {id}: a tab or newline in {bad:?} cannot be carried \
@@ -102,7 +105,10 @@ fn plan_line(
         );
         return Ok(false);
     }
-    writeln!(out, "{mode}\t{cwd}\t{id}\t{model}\t{perms}\t{title}")?;
+    writeln!(
+        out,
+        "{mode}\t{cwd}\t{id}\t{model}\t{perms}\t{title}\t{tmux}"
+    )?;
     Ok(true)
 }
 
@@ -347,6 +353,7 @@ fn main() -> Result<()> {
                 model,
                 &s.permission_mode,
                 s.title(),
+                "",
             )? {
                 opened += 1;
             }
@@ -398,6 +405,7 @@ fn main() -> Result<()> {
                 if restore_model { &e.model } else { "" },
                 &e.perms,
                 &e.title,
+                "",
             )?;
         }
         // Taken, so never offered again; what was just opened becomes the
@@ -489,6 +497,22 @@ fn main() -> Result<()> {
 
     enable_raw_mode()?;
     stderr().execute(EnterAlternateScreen)?;
+    // Ask the terminal to tell shift and ctrl apart, so ctrl+shift+t can be
+    // its own key rather than arriving as ctrl+t. Terminals that do not
+    // understand the request ignore it, and inside tmux it additionally
+    // needs `set -s extended-keys on` -- so this is asked for and not relied
+    // on. `W` does the same job everywhere.
+    //
+    // Deliberately not crossterm's supports_keyboard_enhancement(): that
+    // probes by writing to *stdout* and reading the reply, and stdout is
+    // where the chosen session is printed. The probe ended up in the plan,
+    // and the shell tried to resume a session called `^[[?u^[[ctmux`.
+    let _ = execute!(
+        stderr(),
+        event::PushKeyboardEnhancementFlags(
+            event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+        )
+    );
     if app.mouse_on {
         stderr().execute(EnableMouseCapture)?;
     }
@@ -536,6 +560,7 @@ fn main() -> Result<()> {
     app.load_reopen();
 
     let res = run(&mut term, &mut app, &updated);
+    let _ = execute!(term.backend_mut(), event::PopKeyboardEnhancementFlags);
     disable_raw_mode()?;
     let _ = execute!(term.backend_mut(), DisableMouseCapture);
     execute!(term.backend_mut(), LeaveAlternateScreen)?;
@@ -572,7 +597,16 @@ fn main() -> Result<()> {
         };
         let mut out = std::io::stdout().lock();
         for t in targets {
-            plan_line(&mut out, mode, &t.cwd, &t.id, &t.model, &t.perms, &t.title)?;
+            plan_line(
+                &mut out,
+                mode,
+                &t.cwd,
+                &t.id,
+                &t.model,
+                &t.perms,
+                &t.title,
+                &app.tmux_name,
+            )?;
         }
     }
     Ok(())
@@ -672,6 +706,7 @@ mod plan_tests {
             "claude-opus-5",
             "bypassPermissions",
             title,
+            "",
         )
         .unwrap();
         (wrote, String::from_utf8(out).unwrap())
@@ -681,8 +716,8 @@ mod plan_tests {
     fn an_ordinary_session_becomes_six_fields() {
         let (wrote, text) = line("/home/u/proj", "some title");
         assert!(wrote);
-        assert_eq!(text.matches('\t').count(), 5, "wrong shape: {text:?}");
-        assert!(text.ends_with("some title\n"));
+        assert_eq!(text.matches('\t').count(), 6, "wrong shape: {text:?}");
+        assert!(text.ends_with("some title\t\n"), "{text:?}");
     }
 
     #[test]

@@ -47,6 +47,9 @@ pub enum InputMode {
     TagAdd,
     TagFilter,
     Note,
+    /// Naming the tmux session a chat is about to run in. Blank means the
+    /// generated `mn-<id>`, which is what it has always been.
+    TmuxName,
     Help,
 }
 
@@ -110,6 +113,8 @@ pub enum Action {
     Clear,
     Help,
     Quit,
+    /// A new terminal window, with the session running under tmux inside it.
+    WindowTmux,
     /// Reopen the sessions that were running before the machine rebooted.
     Reopen,
     /// Put the reopen offer away without acting on it.
@@ -266,6 +271,10 @@ pub struct App {
     /// favourites, tags and notes with the fixture's. It did that for days
     /// before anyone noticed, because the tests all passed.
     pub persist: bool,
+    /// A tmux resume waiting on its name, and the name once it is given.
+    /// Empty means "use the generated one".
+    pending_tmux: Option<Target>,
+    pub tmux_name: String,
     /// Sessions that were running before the last reboot and are not running
     /// now. Empty in the normal case; when it is not, the offer to reopen
     /// them sits above the list until it is taken or waved away.
@@ -329,6 +338,8 @@ impl App {
             restore_model,
             want_refresh: false,
             persist: true,
+            pending_tmux: None,
+            tmux_name: String::new(),
             reopen: Vec::new(),
             preview_cache: HashMap::new(),
             matcher: Matcher::new(Config::DEFAULT),
@@ -350,7 +361,7 @@ impl App {
 
     /// Fold favourites/tags/notes and live-process state onto the sessions.
     pub fn apply_overlay(&mut self) {
-        let tmux = crate::live::tmux_sessions();
+        let tmux = crate::live::tmux_by_session_id();
         // One stat per distinct directory, not per session: 234 of the
         // sessions here share a single cwd.
         let mut dir_exists: HashMap<String, bool> = HashMap::new();
@@ -378,7 +389,16 @@ impl App {
                 s.note.clear();
             }
             s.subagent_count = *subcount.get(&s.id).unwrap_or(&0);
-            s.has_tmux = tmux.contains(&crate::live::tmux_name(&s.id));
+            match tmux.get(&s.id) {
+                Some(name) => {
+                    s.has_tmux = true;
+                    s.tmux_session = name.clone();
+                }
+                None => {
+                    s.has_tmux = false;
+                    s.tmux_session.clear();
+                }
+            }
             s.cwd_missing = !s.cwd.is_empty() && !dir_exists.get(&s.cwd).copied().unwrap_or(true);
             s.live_pid = None;
             s.live_exact = false;
@@ -947,6 +967,45 @@ impl App {
         self.current().map(mk).into_iter().collect()
     }
 
+    /// Ask what to call the tmux session, then resume into it.
+    ///
+    /// `mn-026bcdb5` tells you nothing in `tmux ls`. Naming it is one enter
+    /// away, and an empty answer keeps the generated name.
+    fn ask_tmux_name(&mut self, target: Target) {
+        if self.targets().is_empty() {
+            self.status = "nothing selected".into();
+            return;
+        }
+        // Already running somewhere: go there instead of asking what to call
+        // a second one.
+        if let Some(s) = self.current() {
+            if s.has_tmux && self.selected.is_empty() {
+                let name = s.tmux_session.clone();
+                self.pending_tmux = Some(target);
+                self.tmux_name = name;
+                self.finish_tmux();
+                return;
+            }
+        }
+        self.pending_tmux = Some(target);
+        self.input.clear();
+        self.input_mode = InputMode::TmuxName;
+    }
+
+    fn commit_tmux_name(&mut self) {
+        self.tmux_name = crate::live::clean_tmux_name(&self.input);
+        self.input.clear();
+        self.input_mode = InputMode::Normal;
+        self.finish_tmux();
+    }
+
+    fn finish_tmux(&mut self) {
+        let Some(target) = self.pending_tmux.take() else {
+            return;
+        };
+        self.resume(target);
+    }
+
     fn resume(&mut self, target: Target) {
         let targets = self.targets();
         if targets.is_empty() {
@@ -965,7 +1024,7 @@ impl App {
                     self.status = if s.has_tmux {
                         format!(
                             "{} is already running in tmux — ctrl+t attaches to it",
-                            crate::live::tmux_name(&s.id)
+                            s.tmux_session
                         )
                     } else {
                         format!(
@@ -1183,8 +1242,9 @@ impl App {
                 self.status = format!("left {n} closed — mn --reopen still brings them back");
             }
             Action::View => self.open_viewer(),
-            Action::Tmux => self.resume(Target::Tmux),
+            Action::Tmux => self.ask_tmux_name(Target::Tmux),
             Action::NewWindow => self.resume(Target::Window),
+            Action::WindowTmux => self.ask_tmux_name(Target::WindowTmux),
             Action::Filter => self.input_mode = InputMode::Fuzzy,
             Action::Search => self.input_mode = InputMode::Deep,
             Action::Favorite => self.toggle_favorite(),
@@ -1435,6 +1495,7 @@ impl App {
     pub fn on_key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let alt = k.modifiers.contains(KeyModifiers::ALT);
+        let shift = k.modifiers.contains(KeyModifiers::SHIFT);
 
         if ctrl && matches!(k.code, KeyCode::Char('c')) {
             self.quit = true;
@@ -1544,16 +1605,20 @@ impl App {
                 }
                 return;
             }
-            InputMode::TagAdd | InputMode::TagFilter | InputMode::Note => {
+            InputMode::TagAdd | InputMode::TagFilter | InputMode::Note | InputMode::TmuxName => {
                 match k.code {
                     KeyCode::Esc => {
                         self.input.clear();
                         self.input_mode = InputMode::Normal;
+                        // Backing out of the name prompt backs out of the
+                        // resume as well, rather than leaving one armed.
+                        self.pending_tmux = None;
                     }
                     KeyCode::Enter => match self.input_mode {
                         InputMode::TagAdd => self.commit_tag_add(),
                         InputMode::TagFilter => self.commit_tag_filter(),
                         InputMode::Note => self.commit_note(),
+                        InputMode::TmuxName => self.commit_tmux_name(),
                         _ => {}
                     },
                     KeyCode::Tab => {
@@ -1593,7 +1658,14 @@ impl App {
                 Action::Resume
             }),
             KeyCode::Char('n') if ctrl => self.do_action(Action::NewWindow),
+            // ctrl+shift+t only arrives as its own key where the terminal
+            // says so -- inside tmux that needs `extended-keys on`, and
+            // without it this is indistinguishable from ctrl+t. `W` does the
+            // same thing and always gets through.
+            KeyCode::Char('T') if ctrl => self.do_action(Action::WindowTmux),
+            KeyCode::Char('t') if ctrl && shift => self.do_action(Action::WindowTmux),
             KeyCode::Char('t') if ctrl => self.do_action(Action::Tmux),
+            KeyCode::Char('W') => self.do_action(Action::WindowTmux),
 
             KeyCode::Char(' ') => self.toggle_select(),
             KeyCode::Char('f') if ctrl => self.do_action(Action::Search),
@@ -2109,6 +2181,83 @@ mod logic_tests {
         // and the offer is gone, so r does nothing again
         press(&mut a, 'r');
         assert!(a.outcome.is_none());
+    }
+
+    #[test]
+    fn w_opens_a_window_with_tmux_under_it() {
+        let mut a = app();
+        press(&mut a, 'W');
+        // it asks what to call the tmux session first
+        assert_eq!(a.input_mode, InputMode::TmuxName);
+        assert!(a.outcome.is_none(), "resumed before asking");
+
+        a.input = "eft work!".into();
+        a.on_key(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Enter,
+        ));
+        let Some(Outcome::Resume { target, .. }) = &a.outcome else {
+            panic!("no outcome");
+        };
+        assert_eq!(*target, Target::WindowTmux);
+        assert_eq!(
+            a.tmux_name, "eft-work",
+            "the name was not made safe for tmux"
+        );
+    }
+
+    #[test]
+    fn an_empty_name_keeps_the_generated_one() {
+        let mut a = app();
+        a.do_action(Action::Tmux);
+        assert_eq!(a.input_mode, InputMode::TmuxName);
+        a.on_key(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Enter,
+        ));
+        assert!(a.tmux_name.is_empty(), "should fall back to mn-<id>");
+        assert!(matches!(
+            a.outcome,
+            Some(Outcome::Resume {
+                target: Target::Tmux,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn backing_out_of_the_name_prompt_cancels_the_resume() {
+        let mut a = app();
+        a.do_action(Action::Tmux);
+        a.on_key(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Esc,
+        ));
+        assert_eq!(a.input_mode, InputMode::Normal);
+        assert!(a.outcome.is_none(), "escape left a resume armed");
+        // and the next enter must resume here, not into the abandoned tmux
+        a.do_action(Action::Resume);
+        assert!(matches!(
+            a.outcome,
+            Some(Outcome::Resume {
+                target: Target::Here,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_chat_already_in_tmux_is_not_asked_about_again() {
+        // It is already running somewhere; the question is which session to
+        // go to, not what to call a second one.
+        let mut a = app();
+        a.all[0].has_tmux = true;
+        a.all[0].tmux_session = "some-name-i-chose".into();
+        a.rebuild();
+        a.do_action(Action::Tmux);
+        assert_eq!(
+            a.input_mode,
+            InputMode::Normal,
+            "asked about an existing one"
+        );
+        assert_eq!(a.tmux_name, "some-name-i-chose");
     }
 
     #[test]

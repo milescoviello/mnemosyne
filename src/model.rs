@@ -58,8 +58,12 @@ pub struct Session {
     /// matched its working directory (so it is a guess).
     pub live_exact: bool,
     pub subagent_count: u32,
-    /// A tmux session named for this one already exists, so we can attach.
+    /// A tmux session is already running this one, so we can attach.
     pub has_tmux: bool,
+    /// What that tmux session is called. Not always `mn-<id>`: a session can
+    /// be given any name when it is created, and is then recognised by the
+    /// command it was started with rather than by what it ended up called.
+    pub tmux_session: String,
     /// The directory this session ran in is gone. Resuming still works, but
     /// lands wherever you happen to be standing, so it is worth seeing first.
     pub cwd_missing: bool,

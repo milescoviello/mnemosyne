@@ -58,7 +58,7 @@ function mn --description 'Browse, search, tag and resume Claude Code sessions (
         for line in $plan
             set -l p (string split \t -- $line)
             set -l extra (__mn_perms "$p[5]" $no_bypass $fwd)
-            __mn_wintmux "$p[2]" "$p[3]" "$p[4]" "$p[6]" -- $extra $fwd
+            __mn_wintmux "$p[2]" "$p[3]" "$p[4]" "$p[6]" "$p[7]" -- $extra $fwd
         end
     else if test "$first[1]" = tmux
         # Create every requested session detached first, then attach once --
@@ -67,7 +67,7 @@ function mn --description 'Browse, search, tag and resume Claude Code sessions (
         for line in $plan
             set -l p (string split \t -- $line)
             set -l extra (__mn_perms "$p[5]" $no_bypass $fwd)
-            set -l nm (__mn_tmux_ensure "$p[2]" "$p[3]" "$p[4]" "$p[6]" -- $extra $fwd)
+            set -l nm (__mn_tmux_ensure "$p[2]" "$p[3]" "$p[4]" "$p[6]" "$p[7]" -- $extra $fwd)
             test -z "$target"; and set target $nm
         end
         test -n "$target"; and __mn_tmux_attach $target
@@ -86,6 +86,8 @@ function __mn_tmux_ensure --description 'Make sure a tmux session exists for thi
     set -l sid $argv[2]
     set -l mdl $argv[3]
     set -l ttl $argv[4]
+    # A name you chose, or empty for the generated one.
+    set -l want $argv[5]
     set -l sep (contains -i -- -- $argv)
     set -l extra
     if test -n "$sep"; and test (count $argv) -gt $sep
@@ -97,9 +99,20 @@ function __mn_tmux_ensure --description 'Make sure a tmux session exists for thi
         return 1
     end
     set -l name "mn-"(string sub -l 8 -- $sid)
+    test -n "$want"; and set name $want
 
-    # Already there: attach to it rather than starting a second client on the
-    # same transcript. That is what resuming its latest state means.
+    # Already there, whatever it ended up called: attach rather than starting
+    # a second client on the same transcript. tmux remembers the command each
+    # pane was started with, so the chat is found by its session id and not
+    # by a name that is now yours to choose.
+    set -l running (tmux list-panes -a -F '#{session_name}	#{pane_start_command}' 2>/dev/null \
+        | string match -r '^[^\t]+\t.*--resume[ =]'$sid'.*$' | head -1)
+    if test -n "$running"
+        set -l have (string split \t -- $running)[1]
+        echo "  ▶ $have already running — resuming where it left off" >&2
+        echo $have
+        return 0
+    end
     if tmux has-session -t "="$name 2>/dev/null
         echo "  ▶ $name already running — resuming where it left off" >&2
         echo $name
@@ -128,7 +141,8 @@ function __mn_wintmux --description 'Open a resumed session in its own window, r
     # Without tmux this is just a window, which is the next best thing rather
     # than an error: the session still opens.
     if not command -q tmux
-        __mn_window $argv
+        # __mn_window does not take the tmux name, so drop it
+        __mn_window $argv[1..4] $argv[6..-1]
         return $status
     end
     set -l name (__mn_tmux_ensure $argv)

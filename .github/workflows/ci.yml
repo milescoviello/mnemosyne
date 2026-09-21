@@ -31,6 +31,12 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends fish tmux
           tools/shell-selftest.sh
+      # Drives the real binary on a real pty. Guards the one contract no Rust
+      # test can see: the interface draws on stderr and prints the chosen
+      # session on stdout, so anything that writes to stdout by accident
+      # breaks resuming without breaking a single test.
+      - name: the plan on stdout stays machine-readable
+        run: python3 tools/plan-smoke.py
       # Informational only. The rasteriser's output depends on the exact
       # DejaVu version installed, so a font bump on the runner would fail this
       # without anything actually being wrong with the repo.

@@ -95,6 +95,9 @@ WINTMUX_PLAN="${WINTMUX_PLAN}wintmux\t$tmp/no-such-folder\t22222222-3333-4444-55
 
 WINDOW_PLAN="window\t$tmp/work-a\t026bcdb5-8d88-4ad7-9f23-58649bf4f353\t\tdefault\tno model recorded\n"
 
+# a seventh field: the tmux session name chosen at the prompt
+NAMED_PLAN="wintmux\t$tmp/work-a\t026bcdb5-8d88-4ad7-9f23-58649bf4f353\t\tdefault\tnamed one\tmy-own-name\n"
+
 # ---- one shell's worth of checks ---------------------------------------
 run_shell() {
     local shell_name="$1" source_line="$2" runner="$3"
@@ -135,6 +138,28 @@ run_shell() {
         "$bin/tmux" kill-server 2>/dev/null
     else
         skip "$shell_name: tmux checks" "tmux is not installed"
+    fi
+
+    # --- a tmux session named at the prompt
+    if [ -n "$real_tmux" ]; then
+        "$bin/tmux" kill-server 2>/dev/null
+        write_plan "$NAMED_PLAN"
+        : > "$log"
+        out=$("$runner" -c "$source_line; mn" 2>&1)
+        local named; named=$("$bin/tmux" list-sessions -F '#{session_name}' 2>/dev/null)
+        has "$shell_name: the session takes the name you gave it" "my-own-name" "$named"
+        hasnt "$shell_name: and not the generated one" "mn-026bcdb5" "$named"
+
+        # the double-attach guard has to survive a name it did not choose:
+        # the chat is found by the command the pane was started with
+        : > "$log"
+        out=$("$runner" -c "$source_line; mn" 2>&1)
+        seen=$(cat "$log")
+        hasnt "$shell_name: a named session is still found again" "claude:" "$seen"
+        has "$shell_name: and attached to by its real name" "my-own-name already running" "$out"
+        "$bin/tmux" kill-server 2>/dev/null
+    else
+        skip "$shell_name: named tmux session" "tmux is not installed"
     fi
 
     # --- a plain window, and --ask

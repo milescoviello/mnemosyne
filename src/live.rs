@@ -12,7 +12,7 @@
 //! Also recovers the `--model` a live process was started with, so resuming a
 //! session doesn't silently drop it back to the default model.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct Proc {
@@ -200,20 +200,73 @@ pub fn tmux_name(session_id: &str) -> String {
     format!("{TMUX_PREFIX}{short}")
 }
 
-/// Names of every existing tmux session. Empty when no server is running,
-/// which is the normal case rather than an error.
-pub fn tmux_sessions() -> HashSet<String> {
-    let out = std::process::Command::new("tmux")
-        .args(["list-sessions", "-F", "#{session_name}"])
+/// Which Claude session each tmux session is running, by asking tmux what
+/// command it was started with.
+///
+/// Matching on the session *name* only worked while every name was ours to
+/// choose. Once a session can be named whatever you like, the name says
+/// nothing — but `pane_start_command` still carries the `--resume <uuid>`
+/// the pane was launched with, whatever the session ended up called.
+pub fn tmux_by_session_id() -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let res = std::process::Command::new("tmux")
+        .args([
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}\t#{pane_start_command}",
+        ])
         .output();
-    match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty())
-            .collect(),
-        _ => HashSet::new(),
+    let Ok(o) = res else { return out };
+    if !o.status.success() {
+        return out;
     }
+    for line in String::from_utf8_lossy(&o.stdout).lines() {
+        let Some((name, cmd)) = line.split_once('\t') else {
+            continue;
+        };
+        if let Some(id) = resume_id_in(cmd) {
+            // First pane wins: a second window on the same chat is still
+            // that chat, and the session it lives in is the one to go to.
+            out.entry(id).or_insert_with(|| name.to_string());
+        }
+    }
+    out
+}
+
+/// Pull the session id out of a command line that mentions `--resume`.
+pub fn resume_id_in(cmd: &str) -> Option<String> {
+    let words: Vec<String> = cmd
+        .split([' ', '"', '\''])
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_string())
+        .collect();
+    parse_claude_args(&words).0
+}
+
+/// tmux treats `:` and `.` as target syntax, so a name carrying either
+/// cannot be addressed afterwards. Anything else unusual is flattened for
+/// the same reason: a name you cannot type at is not a name.
+pub fn clean_tmux_name(raw: &str) -> String {
+    let mut out: String = raw
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    while out.starts_with('-') {
+        out.remove(0);
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out.truncate(32);
+    out
 }
 
 #[cfg(test)]
@@ -273,6 +326,32 @@ mod tests {
         let a = map_of(vec![proc(7, "one"), proc(9, "two")]);
         let b = map_of(vec![proc(9, "two"), proc(7, "one")]);
         assert_eq!(a.fingerprint(), b.fingerprint(), "a redraw for nothing");
+    }
+
+    #[test]
+    fn a_session_is_recognised_whatever_its_tmux_session_is_called() {
+        // The name used to be the only signal, which stopped working the
+        // moment you could choose it yourself.
+        let cmd =
+            "\"exec claude --resume 026bcdb5-8d88-4ad7-9f23-58649bf4f353 --model claude-opus-5\"";
+        assert_eq!(
+            resume_id_in(cmd).as_deref(),
+            Some("026bcdb5-8d88-4ad7-9f23-58649bf4f353")
+        );
+        assert_eq!(resume_id_in("\"exec claude\""), None);
+        assert_eq!(resume_id_in(""), None);
+    }
+
+    #[test]
+    fn a_chosen_tmux_name_is_one_tmux_can_address() {
+        // ':' and '.' are target syntax: a session carrying either cannot be
+        // attached to afterwards.
+        assert_eq!(clean_tmux_name("eft work"), "eft-work");
+        assert_eq!(clean_tmux_name("a:b.c"), "a-b-c");
+        assert_eq!(clean_tmux_name("  --trimmed--  "), "trimmed");
+        assert_eq!(clean_tmux_name(""), "");
+        assert_eq!(clean_tmux_name("!!!"), "");
+        assert!(clean_tmux_name(&"x".repeat(80)).chars().count() <= 32);
     }
 
     #[test]

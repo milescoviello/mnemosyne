@@ -106,6 +106,12 @@ single cue for "where was I".
 on one tells you its pid instead of silently attaching a second client to the
 same transcript.
 
+**Opens where you want it.** `enter` resumes in this terminal, `ctrl+n` in a
+new terminal window, `ctrl+t` in tmux, and `W` (or `ctrl+shift+t`) in a new
+terminal window *with tmux inside it* — the durable one, because closing the
+window leaves the session running. Either tmux route asks what to call the
+session first; leave it empty for the generated `mn-<id>`.
+
 **Survives a reboot.** Which sessions are open is written down every time
 `mn` runs. After a reboot it offers them back — `r` reopens each in its own
 window with tmux underneath, so closing a window no longer kills the session.
@@ -302,6 +308,31 @@ The offer is only made when a reboot has actually happened, which is
 established from `/proc/sys/kernel/random/boot_id` on Linux and from
 `kern.boottime` elsewhere. On a platform where neither can be read, the offer
 is never made on its own and `mn --reopen` is the way in.
+
+## tmux
+
+`ctrl+t` resumes inside tmux. `W` — or `ctrl+shift+t` where your terminal can
+send it — opens a **new terminal window with tmux inside it**, which is the
+combination worth knowing: the window is so you can see it, and tmux is so
+that closing the window, or logging out, leaves the work running.
+
+Both ask what to call the tmux session. `mn-026bcdb5` tells you nothing in
+`tmux ls`; `eft-work` does. Anything tmux cannot address is flattened —
+`:` and `.` are target syntax — and an empty answer keeps the generated name.
+
+A chat already running in tmux is never started twice. It is found by the
+command its pane was started with rather than by the session name, so the
+guard keeps working once names are yours to choose:
+
+```sh
+tmux list-panes -a -F '#{session_name}	#{pane_start_command}'
+```
+
+**On `ctrl+shift+t`:** a terminal can only send it as a distinct key if it
+speaks the kitty keyboard protocol, and inside tmux that additionally needs
+`set -s extended-keys on` in your tmux.conf. Without both, it arrives as
+plain `ctrl+t` and resumes in tmux the ordinary way. `W` has no such
+requirement.
 
 ## Permissions
 
