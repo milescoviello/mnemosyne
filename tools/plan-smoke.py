@@ -23,41 +23,91 @@ sessions, drives it, and checks what lands on stdout.
 import os
 import pty
 import struct
+import select
 import subprocess
 import sys
 import fcntl
 import termios
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
 
-def run(binary, home, keys, rows=24, cols=130, timeout=25):
-    """Drive the TUI, returning what it printed on stdout."""
-    main, worker = pty.openpty()
+def run(binary, home, keys, rows=24, cols=130, timeout=40):
+    """Drive the TUI, returning (stdout, what it drew, exit code).
+
+    Waiting a fixed second and hoping was enough on a laptop and was not on
+    a CI runner, where the first index build is slower: the keys arrived
+    before anything could read them, the plan came back empty, and there was
+    no clue as to why. So this waits for the interface to actually appear,
+    and keeps what it drew so a failure can say what happened.
+
+    The pty is drained by a thread throughout. Reading only between
+    keystrokes deadlocks as soon as the interface draws more than a pipe
+    buffer's worth: it blocks writing, so it never exits, so nothing reads.
+    """
+    main_fd, worker = pty.openpty()
     fcntl.ioctl(worker, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-    env = dict(os.environ, HOME=home)
-    env.pop("MNEMOSYNE_NO_SPLASH", None)
+    env = dict(os.environ, HOME=home, TERM="xterm-256color")
     proc = subprocess.Popen(
         [binary, "--no-splash", "--no-update"],
         stdin=worker, stderr=worker, stdout=subprocess.PIPE,
         close_fds=True, env=env,
     )
     os.close(worker)
-    time.sleep(1.2)
+
+    drew = bytearray()
+    done = threading.Event()
+
+    def drain():
+        while not done.is_set():
+            r, _, _ = select.select([main_fd], [], [], 0.1)
+            if not r:
+                continue
+            try:
+                chunk = os.read(main_fd, 65536)
+            except OSError:
+                return
+            if not chunk:
+                return
+            drew.extend(chunk)
+
+    reader = threading.Thread(target=drain, daemon=True)
+    reader.start()
+
+    # Wait for a full frame. The wordmark is no use as the signal: every
+    # letter is its own colour span, so the bytes "mnemosyne" never appear
+    # together. The column headings and the footer are drawn whole.
+    def drawn():
+        raw = bytes(drew)
+        return b"FOLDER" in raw or b"resume" in raw
+
+    deadline = time.time() + timeout
+    while time.time() < deadline and not drawn():
+        time.sleep(0.1)
+    appeared = drawn()
+
     for k in keys:
-        os.write(main, k.encode())
-        time.sleep(0.4)
+        os.write(main_fd, k.encode())
+        time.sleep(0.5)
+
     try:
         out, _ = proc.communicate(timeout=timeout)
+        code = proc.returncode
     except subprocess.TimeoutExpired:
         proc.kill()
         out, _ = proc.communicate()
-        os.close(main)
-        raise SystemExit("the interface never exited")
-    os.close(main)
-    return out.decode(errors="replace")
+        code = -1
+    done.set()
+    reader.join(timeout=2)
+    os.close(main_fd)
+
+    screen = bytes(drew).decode(errors="replace")
+    if not appeared:
+        screen = "[the interface never drew a frame]\n" + screen
+    return out.decode(errors="replace"), screen, code
 
 
 def main():
@@ -70,14 +120,21 @@ def main():
                    check=True, stdout=subprocess.DEVNULL)
 
     failures = []
+    context = {"screen": "", "code": 0}
 
     def check(what, ok, detail=""):
         print(f"  {'ok  ' if ok else 'FAIL'} {what}")
         if not ok:
             failures.append(f"{what}: {detail}")
 
+    def drive(keys):
+        plan, screen, code = run(binary, home, keys)
+        context["screen"], context["code"] = screen, code
+        check(f"it exited cleanly after {keys!r}", code == 0, f"exit {code}")
+        return plan
+
     # enter resumes the session under the cursor, here in this terminal
-    plan = run(binary, home, ["\r"])
+    plan = drive(["\r"])
     check("stdout carries no escape sequences", "\x1b" not in plan, repr(plan[:120]))
     check("one line for one session", len(plan.rstrip("\n").splitlines()) == 1, repr(plan))
     fields = plan.rstrip("\n").split("\t")
@@ -91,7 +148,7 @@ def main():
           fields[2] if len(fields) > 2 else "")
 
     # ctrl+t asks what to call the tmux session; the answer is the last field
-    plan = run(binary, home, ["\x14", "eft work!", "\r"])
+    plan = drive(["\x14", "eft work!", "\r"])
     check("naming a tmux session keeps stdout clean", "\x1b" not in plan, repr(plan[:120]))
     fields = plan.rstrip("\n").split("\t")
     check("the mode is tmux", fields[0] == "tmux" if fields else False, repr(fields[:1]))
@@ -99,13 +156,13 @@ def main():
           fields[-1] == "eft-work" if fields else False, repr(fields[-1:]))
 
     # an empty answer means the generated name
-    plan = run(binary, home, ["\x14", "\r"])
+    plan = drive(["\x14", "\r"])
     fields = plan.rstrip("\n").split("\t")
     check("an empty name is left empty for the shell to fill in",
           fields[-1] == "" if fields else False, repr(fields[-1:]))
 
     # quitting says nothing at all
-    plan = run(binary, home, ["q"])
+    plan = drive(["q"])
     check("quitting prints nothing", plan.strip() == "", repr(plan[:120]))
 
     print()
@@ -113,6 +170,11 @@ def main():
         print(f"{len(failures)} failed")
         for f in failures:
             print(f"  {f}")
+        # what it actually drew, so a failure on a machine you cannot see
+        # says something more useful than "empty"
+        tail = context["screen"][-1500:]
+        print("\n--- last thing the interface drew ---")
+        print(tail)
         return 1
     print("plan output is clean")
     return 0
