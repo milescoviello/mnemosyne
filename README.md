@@ -388,6 +388,16 @@ mnemosyne --restore 5                 # reopen the 5 most recent, each in a wind
 mnemosyne --reopen                    # put back what was open before the reboot
 ```
 
+`--search-mode file` means *edited through a file tool* — it matches the
+path recorded by Read, Write and Edit. A file changed by a shell command is
+not in that list, because no path was recorded; use `everything` to catch
+those too.
+
+Bad arguments are refused rather than absorbed: an unknown option, a
+`--search-mode` that is not one of the four, or a `--restore` count that is
+not a positive number all exit 2 and say what was wrong. Running the browser
+with no terminal says so, instead of reporting `No such device or address`.
+
 `--restore` skips anything already running or already in a tmux session, and
 anything whose directory has since been deleted. `--reopen` does the same,
 and works even after the offer has been dismissed — so it is the one to put
@@ -450,6 +460,13 @@ unfindable by the default search, and it was invisible because Claude's reply
 usually repeats your words, so the session still turned up. Both shapes are
 indexed. Tool *output* still is not: the string form is anchored on the
 message's role, so a `tool_result` payload stays out.
+
+**A phrase matches the word it starts.** A single word has always been a
+prefix query, so `pool` finds "pooling". A phrase was not, so
+`connection pool` missed "connection pooling" and `page fault` missed
+"page faults" — the same search behaving two ways depending on its length.
+Both are prefix queries now: on this corpus `kernel patch` went from 7 hits
+to 17, `permission mode` from 6 to 13.
 
 **The index and the scan agree.** They did not: the scan skipped `isMeta`
 lines and the index harvested them, so the same query answered differently
@@ -587,7 +604,7 @@ worth keeping as a fallback if the binary is ever missing:
 ## Development
 
 ```sh
-cargo test          # 198 tests, no network and no fixtures on disk
+cargo test          # 204 tests, no network and no fixtures on disk
 cargo clippy --all-targets -- -D warnings
 tools/shell-selftest.sh           # the fish and bash wrappers, 32 checks
 python3 tools/gen-wordmark.py     # regenerate the logo (needs Pillow)

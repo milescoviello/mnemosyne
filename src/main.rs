@@ -112,6 +112,77 @@ fn plan_line(
     Ok(true)
 }
 
+/// Flags that stand alone, and flags that take the argument after them.
+const FLAGS: &[&str] = &[
+    "-h",
+    "--help",
+    "-V",
+    "--version",
+    "--list",
+    "--json",
+    "--refresh",
+    "--stats",
+    "--reopen",
+    "--subagents",
+    "--no-splash",
+    "--no-mouse",
+    "--no-model",
+    "--no-update",
+    "--update",
+    "--check-update",
+    "--write-config",
+];
+const VALUE_FLAGS: &[&str] = &["--search", "--search-mode", "--restore"];
+
+/// Refuse what we do not understand.
+///
+/// A mistyped flag used to be ignored, which opened the browser as though
+/// nothing had happened -- the one outcome that looks like success. Values
+/// were no better: `--restore abc` quietly restored five.
+fn check_args(args: &[String]) -> std::result::Result<(), String> {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if VALUE_FLAGS.contains(&a) {
+            i += 2;
+            continue;
+        }
+        if !FLAGS.contains(&a) {
+            return Err(format!(
+                "unknown option {a:?}\ntry --help for the ones that exist"
+            ));
+        }
+        i += 1;
+    }
+
+    if let Some(v) = value_of(args, "--search-mode") {
+        if !matches!(v, "content" | "file" | "tool" | "everything" | "all") {
+            return Err(format!(
+                "unknown --search-mode {v:?}\nit is one of: content, file, tool, everything"
+            ));
+        }
+    }
+    if let Some(v) = value_of(args, "--restore") {
+        match v.parse::<usize>() {
+            Ok(0) => return Err("--restore 0 would reopen nothing".into()),
+            Ok(_) => {}
+            Err(_) => return Err(format!("--restore wants a count, not {v:?}")),
+        }
+    }
+    Ok(())
+}
+
+/// The argument after `flag`, unless that is itself a flag.
+fn value_of<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    let i = args.iter().position(|a| a == flag)?;
+    let v = args.get(i + 1)?.as_str();
+    if v.starts_with("--") {
+        None
+    } else {
+        Some(v)
+    }
+}
+
 fn main() -> Result<()> {
     // Rust ignores SIGPIPE, so a closed pipe surfaces as a write error and
     // `println!` panics. `mnemosyne --stats | head` printing a backtrace is
@@ -128,6 +199,10 @@ fn main() -> Result<()> {
     if has("-h") || has("--help") {
         print!("{HELP}");
         return Ok(());
+    }
+    if let Err(e) = check_args(&args) {
+        eprintln!("{e}");
+        std::process::exit(2);
     }
     if has("-V") || has("--version") {
         println!("mnemosyne {}", env!("CARGO_PKG_VERSION"));
@@ -276,6 +351,7 @@ fn main() -> Result<()> {
             Some("file") => search::Mode::File,
             Some("tool") => search::Mode::Tool,
             Some("everything") | Some("all") => search::Mode::Everything,
+            // anything else was rejected by check_args
             _ => search::Mode::Content,
         };
         let pool: Vec<model::Session> = sessions
@@ -495,6 +571,20 @@ fn main() -> Result<()> {
     app.show_subagents = cfg.start.subagents || has("--subagents");
     app.rebuild();
 
+    // The browser draws on stderr and reads keys from stdin, so without a
+    // terminal there is nothing to draw on. Saying so beats the errno that
+    // used to come back from the tty: "No such device or address".
+    {
+        use std::io::IsTerminal;
+        if !stderr().is_terminal() {
+            eprintln!(
+                "mnemosyne: no terminal to draw on.\n\
+                 For a script, use --list, --json or --search."
+            );
+            std::process::exit(2);
+        }
+    }
+
     enable_raw_mode()?;
     stderr().execute(EnterAlternateScreen)?;
     // Ask the terminal to tell shift and ctrl apart, so ctrl+shift+t can be
@@ -689,6 +779,63 @@ fn run<B: ratatui::backend::Backend>(
         if app.quit {
             return Ok(());
         }
+    }
+}
+
+#[cfg(test)]
+mod arg_tests {
+    use super::check_args;
+
+    fn args(s: &str) -> Vec<String> {
+        s.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn the_real_options_are_accepted() {
+        for line in [
+            "--list",
+            "--json --subagents",
+            "--search zpool",
+            "--search zpool --search-mode everything",
+            "--restore 5",
+            "--reopen --no-model",
+            "--no-splash --no-mouse --no-update",
+        ] {
+            assert!(check_args(&args(line)).is_ok(), "rejected {line:?}");
+        }
+    }
+
+    #[test]
+    fn a_mistyped_option_is_refused_rather_than_ignored() {
+        // It used to be skipped, which opened the browser as though nothing
+        // had happened -- the one outcome that looks like success.
+        let e = check_args(&args("--nosplash")).unwrap_err();
+        assert!(e.contains("--nosplash"), "{e}");
+        assert!(e.contains("--help"), "should point somewhere useful: {e}");
+    }
+
+    #[test]
+    fn a_count_has_to_be_a_count() {
+        assert!(check_args(&args("--restore abc")).is_err());
+        assert!(check_args(&args("--restore -3")).is_err());
+        assert!(check_args(&args("--restore 0")).is_err());
+        assert!(check_args(&args("--restore 12")).is_ok());
+        // omitted entirely is fine; it has a default
+        assert!(check_args(&args("--restore")).is_ok());
+    }
+
+    #[test]
+    fn an_unknown_search_mode_does_not_silently_become_content() {
+        let e = check_args(&args("--search x --search-mode bogus")).unwrap_err();
+        assert!(e.contains("content"), "should list the real ones: {e}");
+        assert!(check_args(&args("--search x --search-mode tool")).is_ok());
+    }
+
+    #[test]
+    fn a_query_that_looks_like_a_flag_is_still_a_query() {
+        // The value after --search is whatever you typed, even if it starts
+        // with a dash; it must not be checked as an option.
+        assert!(check_args(&args("--search --weird-thing")).is_ok());
     }
 }
 

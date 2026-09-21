@@ -237,8 +237,13 @@ pub fn fts_expr(query: &str) -> String {
         .collect();
     match cleaned.len() {
         0 => String::new(),
+        // The trailing `*` makes the last word a prefix, so "pool" finds
+        // "pooling". A phrase gets the same treatment: without it,
+        // "connection pool" missed "connection pooling" and "page fault"
+        // missed "page faults", while the single-word form of either would
+        // have found them. One rule, not two.
         1 => format!("\"{}\"*", cleaned[0]),
-        _ => format!("\"{}\"", cleaned.join(" ")),
+        _ => format!("\"{}\"*", cleaned.join(" ")),
     }
 }
 
@@ -346,12 +351,12 @@ mod tests {
         // one word gets a prefix match, so "nvenc" still finds "nvenc's"
         assert_eq!(fts_expr("nvenc"), r#""nvenc"*"#);
         // several words become a phrase, which is what substring meant
-        assert_eq!(fts_expr("page fault"), r#""page fault""#);
-        assert_eq!(fts_expr("  page   fault  "), r#""page fault""#);
+        assert_eq!(fts_expr("page fault"), r#""page fault"*"#);
+        assert_eq!(fts_expr("  page   fault  "), r#""page fault"*"#);
         // quotes are doubled so nothing can be read as FTS syntax
-        assert_eq!(fts_expr(r#"say "hi""#), r#""say ""hi""""#);
+        assert_eq!(fts_expr(r#"say "hi""#), r#""say ""hi"""*"#);
         // operators are inert inside a quoted term
-        assert_eq!(fts_expr("a OR b"), r#""a OR b""#);
+        assert_eq!(fts_expr("a OR b"), r#""a OR b"*"#);
         assert_eq!(fts_expr(""), "");
         assert_eq!(fts_expr("   "), "");
     }

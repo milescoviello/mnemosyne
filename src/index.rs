@@ -697,6 +697,21 @@ mod pipeline_tests {
     }
 
     #[test]
+    fn a_phrase_matches_the_word_it_starts() {
+        // A single word has always been a prefix query, so "pool" finds
+        // "pooling". A phrase was not, so "connection pool" did not --
+        // the same search behaving two ways depending on its length.
+        let (_d, idx, key) = indexed(&[
+            &said("user", "the fix was connection pooling"),
+            &said("assistant", "and 110,000 major page faults"),
+        ]);
+        for q in ["connection pool", "page fault"] {
+            let hits = idx.search_text(&crate::search::fts_expr(q)).unwrap();
+            assert_eq!(hits, vec![key.clone()], "{q:?} found nothing");
+        }
+    }
+
+    #[test]
     fn a_prompt_typed_as_a_plain_string_is_searchable() {
         // 16% of the prose in a real corpus is stored this way -- almost all
         // of it the user's own prompts -- and none of it was in the index.
