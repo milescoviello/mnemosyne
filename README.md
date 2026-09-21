@@ -45,6 +45,16 @@ title, and that is often also the last prompt, so the duplicate is suppressed
 rather than printed twice. Below about 80 columns the column is dropped and
 the rail carries the cue instead.
 
+## Wide characters
+
+Columns are measured in terminal cells, not characters. CJK and emoji occupy
+two cells each, so a title of eight characters can be sixteen columns wide;
+measuring it as eight padded the row too narrow, slid every column after it
+to the left, and pushed the last one off the edge — where clipping hid the
+evidence. Titles are also stripped of control characters, which are counted
+when a column is measured, draw nothing, and would otherwise hand an `ESC`
+in a transcript straight to your terminal.
+
 ## Mouse
 
 It is a pointer-driven list as much as a keyboard one.
@@ -432,6 +442,22 @@ that are easy to miss:
 
 Together these cut a representative query from 58 hits to 36 real ones.
 
+**What counts as prose.** A message is not always a list of content blocks;
+plenty are stored as `"content":"<the text>"`, and those are overwhelmingly
+what *you* typed rather than what Claude replied. Taking only block content
+left 16% of the prose in a real corpus — 7MB across 341 of 344 transcripts —
+unfindable by the default search, and it was invisible because Claude's reply
+usually repeats your words, so the session still turned up. Both shapes are
+indexed. Tool *output* still is not: the string form is anchored on the
+message's role, so a `tool_result` payload stays out.
+
+**The index and the scan agree.** They did not: the scan skipped `isMeta`
+lines and the index harvested them, so the same query answered differently
+depending on which engine ran — and the fallback to scanning only fires when
+the index finds *nothing*, so a partial answer never triggered it. Both now
+use one predicate, checked against the whole line rather than its first 64KB,
+because `isMeta` lands wherever the writer put it.
+
 ## Help
 
 ![the help screen](docs/help.png)
@@ -561,7 +587,7 @@ worth keeping as a fallback if the binary is ever missing:
 ## Development
 
 ```sh
-cargo test          # 172 tests, no network and no fixtures on disk
+cargo test          # 198 tests, no network and no fixtures on disk
 cargo clippy --all-targets -- -D warnings
 tools/shell-selftest.sh           # the fish and bash wrappers, 32 checks
 python3 tools/gen-wordmark.py     # regenerate the logo (needs Pillow)

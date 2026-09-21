@@ -36,7 +36,7 @@ pub fn db_path() -> PathBuf {
 ///   3  conversation prose is harvested into the full-text index
 ///   4  thinking blocks and shell commands are harvested too
 ///   5  token usage is summed per session
-pub const SCANNER_VERSION: u32 = 5;
+pub const SCANNER_VERSION: u32 = 6;
 
 /// Every column the loader expects. Compared against what the database
 /// actually has, so drift is detected rather than assumed away.
@@ -687,6 +687,40 @@ mod pipeline_tests {
         format!(
             r#"{{"parentUuid":"p","message":{{"role":"{role}","content":[{{"type":"text","text":"{text}"}}]}},"type":"{role}"}}"#
         )
+    }
+
+    /// A message stored as a bare string rather than a list of blocks.
+    fn said_plain(role: &str, text: &str) -> String {
+        format!(
+            r#"{{"parentUuid":"p","message":{{"role":"{role}","content":"{text}"}},"type":"{role}"}}"#
+        )
+    }
+
+    #[test]
+    fn a_prompt_typed_as_a_plain_string_is_searchable() {
+        // 16% of the prose in a real corpus is stored this way -- almost all
+        // of it the user's own prompts -- and none of it was in the index.
+        let (_d, idx, key) = indexed(&[
+            &said_plain("user", "help me figure out why beamng is slow"),
+            &said("assistant", "let us look at the frame times"),
+        ]);
+        let hits = idx.search_text(&crate::search::fts_expr("beamng")).unwrap();
+        assert_eq!(hits, vec![key], "the typed prompt was not indexed");
+    }
+
+    #[test]
+    fn injected_memory_is_not_searchable_prose() {
+        // The scan skipped isMeta lines and the index kept them, so a term
+        // that appeared only in an injected memory file matched in one
+        // engine and not the other.
+        let meta = r#"{"parentUuid":"p","message":{"role":"user","content":"the zpool is raidz2"},"type":"user","isMeta":true}"#;
+        let (_d, idx, _key) = indexed(&[meta, &said("assistant", "understood")]);
+        assert!(
+            idx.search_text(&crate::search::fts_expr("raidz2"))
+                .unwrap()
+                .is_empty(),
+            "injected context was indexed as if someone had said it"
+        );
     }
 
     #[test]

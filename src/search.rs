@@ -127,7 +127,10 @@ fn is_conversation(line: &[u8]) -> bool {
     if line.starts_with(b"{\"type\":\"") {
         return false;
     }
-    if memmem::find(line, b"\"isMeta\":true").is_some() {
+    // The same predicate the indexer uses. These were two separate copies of
+    // the idea and they drifted: the index harvested injected memory blobs
+    // that the scan skipped, so one query gave two answers.
+    if crate::scan::is_injected_meta(line) {
         return false;
     }
     memmem::find(line, b"\"role\":\"user\"").is_some()

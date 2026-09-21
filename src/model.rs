@@ -247,17 +247,58 @@ pub fn human_count(n: u64) -> String {
     }
 }
 
+/// How many terminal cells a string occupies.
+///
+/// Not its length in characters: CJK and emoji take two cells each, so a
+/// title of twelve characters can be twenty-four columns wide. Counting
+/// characters made every row containing one overflow its column and push
+/// the ones after it off the screen.
+pub fn width(s: &str) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    s.width()
+}
+
 /// Clip to `w` display columns, ending in an ellipsis when it had to cut.
 pub fn fit(s: &str, w: usize) -> String {
-    let n = s.chars().count();
-    if n <= w {
+    use unicode_width::UnicodeWidthChar;
+    if width(s) <= w {
         return s.to_string();
     }
-    if w <= 1 {
+    if w == 0 {
+        // A column with no room left gets nothing. Returning an ellipsis
+        // here put one column into a zero-column space.
+        return String::new();
+    }
+    if w == 1 {
         return "…".into();
     }
-    let mut out: String = s.chars().take(w - 1).collect();
+    // Leave a column for the ellipsis, and never cut a wide character in
+    // half -- half of a wide character is not half a column, it is a
+    // different character or a broken cell.
+    let mut out = String::new();
+    let mut used = 0usize;
+    for c in s.chars() {
+        let cw = c.width().unwrap_or(0);
+        if used + cw > w - 1 {
+            break;
+        }
+        out.push(c);
+        used += cw;
+    }
     out.push('…');
+    out
+}
+
+/// Clip to `w` display columns and pad to exactly that many.
+///
+/// `format!("{:<w$}", ..)` pads by character count, which is the same bug in
+/// the other direction: a row with a wide character came out short.
+pub fn pad_fit(s: &str, w: usize) -> String {
+    let mut out = fit(s, w);
+    let used = width(&out);
+    if used < w {
+        out.push_str(&" ".repeat(w - used));
+    }
     out
 }
 
@@ -285,6 +326,45 @@ mod tests {
         assert_eq!(compact_count(6_312), "6.3k");
         assert_eq!(compact_count(66_810), "67k");
         assert_eq!(compact_count(1_200_000), "1.2m");
+    }
+
+    #[test]
+    fn a_wide_character_counts_as_two_columns() {
+        // The whole column layout was built on chars().count(), so a title
+        // of twelve characters could be twenty-four columns wide and push
+        // everything after it off the screen.
+        assert_eq!(width("abc"), 3);
+        assert_eq!(width("日本語"), 6, "CJK is two cells per character");
+        assert_eq!(width("😀"), 2, "so is an emoji");
+        assert_eq!(width(""), 0);
+    }
+
+    #[test]
+    fn padding_fills_columns_rather_than_characters() {
+        for s in ["abc", "日本語", "😀x", "", "Чёрный"] {
+            for w in [0usize, 1, 2, 3, 6, 10, 20] {
+                let out = pad_fit(s, w);
+                assert_eq!(width(&out), w, "pad_fit({s:?}, {w}) = {out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn clipping_never_cuts_a_wide_character_in_half() {
+        // Half a wide character is not half a column; it is a broken cell.
+        for w in 1..12usize {
+            let out = fit("日本語です", w);
+            assert!(
+                width(&out) <= w,
+                "fit(.., {w}) = {out:?} is {} wide",
+                width(&out)
+            );
+        }
+        assert_eq!(
+            fit("日本語", 6),
+            "日本語",
+            "it fits exactly, so leave it alone"
+        );
     }
 
     #[test]

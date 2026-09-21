@@ -16,7 +16,9 @@
 
 use crate::app::{Action, App, InputMode, Row};
 use crate::art;
-use crate::model::{compact_count, fit, human_dur, human_size, reltime, short_cwd, Sort};
+use crate::model::{
+    compact_count, fit, human_dur, human_size, pad_fit, reltime, short_cwd, width, Sort,
+};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -148,16 +150,16 @@ impl Cols {
 /// Wrap to `width` on word boundaries, hard-breaking anything longer than a
 /// line. ratatui's own wrapping cannot hang-indent continuations, and a reply
 /// that wraps back to column zero is hard to read against the speaker labels.
-fn wrap_words(text: &str, width: usize) -> Vec<String> {
+fn wrap_words(text: &str, wrap_at: usize) -> Vec<String> {
     // Honour the width asked for. Clamping it upward produced lines wider
     // than the caller had room for, which is the one thing wrapping is for.
-    let width = width.max(1);
+    let wrap_at = wrap_at.max(1);
     let mut out: Vec<String> = Vec::new();
     let mut line = String::new();
     let mut len = 0usize;
     for word in text.split_whitespace() {
-        let wl = word.chars().count();
-        if wl > width {
+        let wl = width(word);
+        if wl > wrap_at {
             if len > 0 {
                 out.push(std::mem::take(&mut line));
                 len = 0;
@@ -165,17 +167,17 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
             let mut chunk = String::new();
             for ch in word.chars() {
                 chunk.push(ch);
-                if chunk.chars().count() == width {
+                if width(&chunk) >= wrap_at {
                     out.push(std::mem::take(&mut chunk));
                 }
             }
             if !chunk.is_empty() {
                 line = chunk;
-                len = line.chars().count();
+                len = width(&line);
             }
             continue;
         }
-        if len > 0 && len + 1 + wl > width {
+        if len > 0 && len + 1 + wl > wrap_at {
             out.push(std::mem::take(&mut line));
             len = 0;
         }
@@ -481,16 +483,12 @@ fn draw_reopen(f: &mut Frame, app: &mut App, area: Rect) {
 
     let room = area.width as usize;
     let fixed = MARGIN + 2 + 3; // margin, marker, the gap before the buttons
-    let width_of = |b: &[Button]| -> usize {
-        b.iter()
-            .map(|(k, l, _)| k.chars().count() + l.chars().count())
-            .sum()
-    };
+    let width_of = |b: &[Button]| -> usize { b.iter().map(|(k, l, _)| width(k) + width(l)).sum() };
 
     let mut chosen: Option<(String, &[Button])> = None;
     for buttons in [wordy, plain, terse] {
         let budget = room.saturating_sub(fixed + width_of(buttons));
-        if says[0].chars().count() <= budget {
+        if width(&says[0]) <= budget {
             chosen = Some((says[0].clone(), buttons));
             break;
         }
@@ -499,11 +497,11 @@ fn draw_reopen(f: &mut Frame, app: &mut App, area: Rect) {
         // so long as enough of it survives to be worth reading. This has to
         // be tried before the shorter wordings, or the first one that merely
         // fits always wins and the title is never shown at all.
-        if says.len() > 1 && budget > says[1].chars().count() + 8 {
+        if says.len() > 1 && budget > width(&says[1]) + 8 {
             chosen = Some((crate::model::fit(&says[0], budget), buttons));
             break;
         }
-        if let Some(say) = says.iter().find(|s| s.chars().count() <= budget) {
+        if let Some(say) = says.iter().find(|s| width(s) <= budget) {
             chosen = Some((say.clone(), buttons));
             break;
         }
@@ -529,11 +527,11 @@ fn draw_reopen(f: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(head.clone(), Style::default().fg(th().text)),
         Span::raw("   "),
     ];
-    let mut x = area.x + MARGIN as u16 + 2 + head.chars().count() as u16 + 3;
+    let mut x = area.x + MARGIN as u16 + 2 + width(&head) as u16 + 3;
 
     app.hits.banner_y = Some(area.y);
     for (k, label, action) in buttons {
-        let w = (k.chars().count() + label.chars().count()) as u16;
+        let w = (width(k) + width(label)) as u16;
         // The whole phrase is the target, not just the letter: a one-column
         // click target is not a click target. Anything that would land past
         // the edge of the screen is not one either, so it is not registered.
@@ -658,9 +656,13 @@ fn draw_wordmark(f: &mut Frame, app: &App, area: Rect) {
         }
     }
 
-    let lw: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let lw: usize = spans.iter().map(|s| width(&s.content)).sum();
     let width = area.width as usize;
-    let seg_len = |v: &Vec<Span>| v.iter().map(|s| s.content.chars().count()).sum::<usize>();
+    let seg_len = |v: &Vec<Span>| {
+        v.iter()
+            .map(|s| crate::model::width(&s.content))
+            .sum::<usize>()
+    };
     // drop the least important piece until what remains fits with a gap
     loop {
         let joined: usize =
@@ -685,8 +687,8 @@ fn draw_wordmark(f: &mut Frame, app: &App, area: Rect) {
         right.extend(v);
     }
 
-    let lw: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let rw: usize = right.iter().map(|s| s.content.chars().count()).sum();
+    let lw: usize = spans.iter().map(|s| crate::model::width(&s.content)).sum();
+    let rw: usize = right.iter().map(|s| crate::model::width(&s.content)).sum();
     spans.push(Span::raw(
         " ".repeat((area.width as usize).saturating_sub(lw + rw + MARGIN)),
     ));
@@ -711,7 +713,7 @@ fn draw_colheads(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
             return;
         }
         if let Some(s) = sort {
-            hits.push((*x, *x + text.trim().chars().count() as u16, s));
+            hits.push((*x, *x + width(text.trim()) as u16, s));
         }
         *x += w as u16;
         spans.push(Span::styled(text, Style::default().fg(th().chrome)));
@@ -807,7 +809,7 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
             // a ripple across the surface, with the band name riding it
             Row::Divider(label) => {
                 let text = format!("{label}  ");
-                let used = MARGIN + 2 + text.chars().count();
+                let used = MARGIN + 2 + crate::model::width(&text);
                 let mut sp = vec![
                     Span::raw(" ".repeat(MARGIN)),
                     Span::styled(
@@ -904,7 +906,7 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                     // dropped on a narrow terminal
                 } else if is_sub {
                     sp.push(Span::styled(
-                        format!("{:<w$} ", "└ subagent", w = c.folder),
+                        format!("{} ", pad_fit("└ subagent", c.folder)),
                         Style::default().fg(th().chrome),
                     ));
                 } else {
@@ -921,7 +923,7 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                         Style::default().fg(rgb(art::ramp(0.45 + d * 0.2)))
                     };
                     sp.push(Span::styled(
-                        format!("{:<w$} ", fit(&folder, c.folder), w = c.folder),
+                        format!("{} ", pad_fit(&folder, c.folder)),
                         fstyle,
                     ));
                 }
@@ -942,7 +944,7 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                 }
 
                 sp.push(Span::styled(
-                    format!("{:<w$}", fit(s.title(), c.title), w = c.title),
+                    pad_fit(s.title(), c.title),
                     Style::default()
                         .fg(if s.is_live() { th().bright } else { th().text })
                         .add_modifier(if row_i == cursor {
@@ -973,7 +975,7 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                 }
                 if c.model > 0 {
                     sp.push(Span::styled(
-                        format!("{:<w$}", fit(s.model_short(), c.model - 1), w = c.model),
+                        pad_fit(s.model_short(), c.model - 1) + " ",
                         Style::default().fg(th().chrome),
                     ));
                 }
@@ -1110,10 +1112,10 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
     let fact_str = facts.join(" · ");
     let title = fit(
         s.title(),
-        width.saturating_sub(fact_str.chars().count() + MARGIN * 3),
+        width.saturating_sub(crate::model::width(&fact_str) + MARGIN * 3),
     );
     let gap = width
-        .saturating_sub(title.chars().count() + fact_str.chars().count() + MARGIN * 2)
+        .saturating_sub(crate::model::width(&title) + crate::model::width(&fact_str) + MARGIN * 2)
         .max(2);
     lines.push(Line::from(vec![
         Span::raw(" ".repeat(MARGIN)),
@@ -1301,39 +1303,36 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
             ("?", " help", Some(Action::Help)),
         ];
         loop {
-            let w: usize = hints
-                .iter()
-                .map(|(a, b, _)| a.chars().count() + b.chars().count())
-                .sum();
-            if w + pos.chars().count() + 6 <= budget || hints.len() <= 2 {
+            let w: usize = hints.iter().map(|(a, b, _)| width(a) + width(b)).sum();
+            if w + width(&pos) + 6 <= budget || hints.len() <= 2 {
                 break;
             }
             hints.remove(hints.len() - 2);
         }
         for (k, d, act) in hints {
-            let kw = k.chars().count() as u16;
+            let kw = width(k) as u16;
             if let Some(a) = act {
                 app.hits
                     .footer
-                    .push((x, x + kw + d.trim_end().chars().count() as u16, a));
+                    .push((x, x + kw + width(d.trim_end()) as u16, a));
             }
             spans.push(Span::styled(k, Style::default().fg(rgb(art::ramp(0.85)))));
             spans.push(Span::styled(d, Style::default().fg(th().chrome)));
-            x += kw + d.chars().count() as u16;
+            x += kw + width(d) as u16;
         }
     } else {
         spans.push(Span::styled(
             fit(
                 &app.status,
-                (area.width as usize).saturating_sub(pos.chars().count() + 6),
+                (area.width as usize).saturating_sub(width(&pos) + 6),
             ),
             Style::default().fg(th().fav),
         ));
     }
 
-    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let used: usize = spans.iter().map(|s| width(&s.content)).sum();
     spans.push(Span::raw(" ".repeat(
-        (area.width as usize).saturating_sub(used + pos.chars().count() + MARGIN),
+        (area.width as usize).saturating_sub(used + width(&pos) + MARGIN),
     )));
     spans.push(Span::styled(pos, Style::default().fg(th().chrome)));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -1691,9 +1690,19 @@ mod render_tests {
         let buf = term.backend().buffer().clone();
         (0..h)
             .map(|y| {
-                (0..w)
-                    .map(|x| buf[(x, y)].symbol().to_string())
-                    .collect::<String>()
+                // A wide character occupies two cells: the glyph goes in the
+                // first and the second is left as a blank that the backend
+                // skips when it flushes. Reading every cell would count that
+                // blank and make a correct row look one column too wide per
+                // wide character, so step over it the way the terminal does.
+                let mut out = String::new();
+                let mut x = 0u16;
+                while x < w {
+                    let sym = buf[(x, y)].symbol();
+                    out.push_str(sym);
+                    x += (crate::model::width(sym) as u16).max(1);
+                }
+                out
             })
             .collect()
     }
@@ -1832,6 +1841,44 @@ mod render_tests {
             "the line under the wordmark should stay empty: {:?}",
             rows[1]
         );
+    }
+
+    #[test]
+    fn a_wide_title_does_not_break_the_columns() {
+        // CJK and emoji take two cells each. The layout counted characters,
+        // so a row containing them was padded too narrow and everything to
+        // its right slid left -- and since the row is clipped at the edge,
+        // the last column simply fell off. The row never looks too long;
+        // the columns just stop lining up. So that is what is asserted.
+        let mut a = app();
+        a.all[0].ai_title = "日本語のタイトル".into(); // 16 columns, 8 characters
+        a.all[1].ai_title = "an ascii title".into();
+        a.rebuild();
+
+        // wide enough that MODEL is drawn (see Cols::new)
+        for w in [120u16, 150, 178, 200] {
+            let rows = render(&mut a, w, 24);
+            let col_of = |needle: &str, line: &str| -> Option<usize> {
+                line.find(needle).map(|b| crate::model::width(&line[..b]))
+            };
+            let wide = rows
+                .iter()
+                .find(|l| l.contains("日本語"))
+                .expect("no wide row");
+            let ascii = rows
+                .iter()
+                .find(|l| l.contains("an ascii title"))
+                .expect("no ascii row");
+            let (a_col, w_col) = (col_of("opus-5", ascii), col_of("opus-5", wide));
+            assert!(
+                a_col.is_some() && w_col.is_some(),
+                "{w}: MODEL fell off:\n{wide}\n{ascii}"
+            );
+            assert_eq!(
+                a_col, w_col,
+                "{w}: the MODEL column moved when the title had wide characters\n  wide : {wide:?}\n  ascii: {ascii:?}"
+            );
+        }
     }
 
     #[test]

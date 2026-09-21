@@ -125,12 +125,22 @@ pub fn is_real_user_text(t: &str) -> bool {
     !t.is_empty() && !t.starts_with('<') && !t.starts_with("Caveat:")
 }
 
+/// Collapse whitespace, drop control characters, clip to `max` characters.
+///
+/// Control characters are dropped rather than kept for two reasons. They are
+/// counted when a column is measured but occupy no cell when drawn, so one
+/// bell in a title shifted every column after it by one. And an ESC in a
+/// title would be handed straight to the terminal, which is a transcript
+/// deciding what your screen does.
 pub fn squash(s: &str, max: usize) -> String {
     let mut out = String::with_capacity(max.min(s.len()));
     let mut space = false;
     for c in s.chars() {
         if c.is_whitespace() {
             space = true;
+            continue;
+        }
+        if c.is_control() {
             continue;
         }
         if space && !out.is_empty() {
@@ -143,6 +153,19 @@ pub fn squash(s: &str, max: usize) -> String {
         }
     }
     out
+}
+
+/// Context Claude Code injected rather than anything either party said:
+/// memory files, system reminders, command envelopes.
+///
+/// The search and the index have to agree on this. They did not: the search
+/// skipped these lines and the index harvested them, so the same query
+/// answered differently depending on which engine ran.
+/// How much prose one session may contribute to the index.
+const HARVEST_CAP: usize = 64 << 20;
+
+pub fn is_injected_meta(line: &[u8]) -> bool {
+    memmem::find(line, b"\"isMeta\":true").is_some()
 }
 
 /// Pull the prose out of a conversation line for the search index.
@@ -162,6 +185,16 @@ pub fn harvest_text(line: &[u8], out: &mut String) {
     // still finds a shell invocation rather than only chatter about it.
     harvest_values(line, b"\"command\":\"", out);
     harvest_values(line, b"\"description\":\"", out);
+    // A message is not always a list of blocks: plenty are stored as
+    // `"content":"<the text>"`. Those are overwhelmingly what the user typed,
+    // and taking only block content left 16% of the prose in this corpus --
+    // 341 of 344 transcripts -- unfindable by the default search.
+    //
+    // Anchored on the role so this takes the *message's* content and not a
+    // tool_result's, which is output rather than conversation and is what
+    // the index exists to leave out.
+    harvest_values(line, b"\"role\":\"user\",\"content\":\"", out);
+    harvest_values(line, b"\"role\":\"assistant\",\"content\":\"", out);
 }
 
 fn harvest_blocks(line: &[u8], marker: &[u8], value_key: &[u8], out: &mut String) {
@@ -359,11 +392,26 @@ fn process_line(s: &mut Session, line: &[u8], text: &mut Option<&mut String>) {
     let is_user = memmem::find(f, b"\"role\":\"user\"").is_some();
     let is_asst = !is_user && memmem::find(f, b"\"role\":\"assistant\"").is_some();
 
-    if is_user || is_asst {
+    // Whole line, not the truncated front: the search scans all of it, and
+    // the two have to reach the same verdict. `isMeta` is a top-level field
+    // and lands wherever the writer put it -- in one real transcript it sat
+    // 410 bytes from the end of a 268KB line.
+    if (is_user || is_asst) && !is_injected_meta(line) {
         if let Some(sink) = text.as_deref_mut() {
-            // bounded, so one pathological session cannot eat the index
-            if sink.len() < (8 << 20) {
+            // Bounded, so one pathological session cannot eat the index.
+            // Raised well clear of the largest real session (4.5MB here) and
+            // no longer silent: losing half a transcript's searchable text
+            // should not be something you have to measure to discover.
+            if sink.len() < HARVEST_CAP {
                 harvest_text(line, sink);
+                if sink.len() >= HARVEST_CAP {
+                    eprintln!(
+                        "mnemosyne: {} is larger than the {}MB index limit — \
+                         the rest of it will not be searchable",
+                        s.path.display(),
+                        HARVEST_CAP >> 20
+                    );
+                }
             }
         }
     }
@@ -659,6 +707,16 @@ mod tests {
     }
 
     #[test]
+    fn squash_drops_control_characters() {
+        // A bell counted as a character when a column was measured and drew
+        // nothing, so one title shifted every column after it by one. An
+        // ESC would have been handed straight to the terminal.
+        assert_eq!(squash("a\x07b", 99), "ab");
+        assert_eq!(squash("x\x1b[31mred", 99), "x[31mred");
+        assert_eq!(squash("keep \u{2014} this", 99), "keep — this");
+    }
+
+    #[test]
     fn synthetic_user_turns_are_not_titles() {
         assert!(!is_real_user_text("<command-name>/foo</command-name>"));
         assert!(!is_real_user_text("Caveat: the messages below..."));
@@ -712,6 +770,39 @@ mod harvest_tests {
         harvest_text(line, &mut out);
         assert!(out.contains("check the disk"));
         assert!(!out.to_lowercase().contains("nvenc"));
+    }
+
+    #[test]
+    fn a_message_stored_as_a_plain_string_is_harvested() {
+        // Not every message is a list of blocks; many are
+        // `"content":"<the text>"`, and those are overwhelmingly what the
+        // user typed. Taking only block content left 16% of the prose in a
+        // real corpus unfindable by the default search.
+        let line = br#"{"message":{"role":"user","content":"help me figure out why beamng is slow"},"type":"user"}"#;
+        let mut out = String::new();
+        harvest_text(line, &mut out);
+        assert!(
+            out.contains("beamng"),
+            "string content was skipped: {out:?}"
+        );
+    }
+
+    #[test]
+    fn tool_output_is_still_left_out_of_the_index() {
+        // The anchor is the role, so a tool_result's own "content" -- which
+        // is output, not conversation -- stays out.
+        let line = br#"{"message":{"role":"user","content":[{"type":"tool_result","content":"ripgrep found 4000 lines"}]},"type":"user"}"#;
+        let mut out = String::new();
+        harvest_text(line, &mut out);
+        assert!(!out.contains("ripgrep"), "tool output leaked in: {out:?}");
+    }
+
+    #[test]
+    fn injected_context_is_not_conversation() {
+        let meta = br#"{"message":{"role":"user","content":"remember the zpool is raidz2"},"type":"user","isMeta":true}"#;
+        let real = br#"{"message":{"role":"user","content":"remember the zpool is raidz2"},"type":"user"}"#;
+        assert!(is_injected_meta(meta));
+        assert!(!is_injected_meta(real));
     }
 
     #[test]
