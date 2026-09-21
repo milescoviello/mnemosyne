@@ -230,33 +230,35 @@ function __mn_term_open --description 'Run a command in a new terminal window; e
     set -l cwd $argv[1]
     set -l inner $argv[2]
 
+    set -l cmd
     for term in $MN_TERMINAL alacritty konsole kitty wezterm foot ghostty xterm
         test -z "$term"; and continue
         command -q $term; or continue
         switch $term
             case alacritty
-                command $term --working-directory "$cwd" -e fish -lc "$inner" &
+                set cmd $term --working-directory "$cwd" -e fish -lc "$inner"
             case konsole
-                command $term --workdir "$cwd" -e fish -lc "$inner" &
+                set cmd $term --workdir "$cwd" -e fish -lc "$inner"
             case kitty
-                command $term --directory "$cwd" fish -lc "$inner" &
+                set cmd $term --directory "$cwd" fish -lc "$inner"
             case wezterm
-                command $term start --cwd "$cwd" -- fish -lc "$inner" &
+                set cmd $term start --cwd "$cwd" -- fish -lc "$inner"
             case foot
-                command $term --working-directory="$cwd" fish -lc "$inner" &
+                set cmd $term --working-directory="$cwd" fish -lc "$inner"
             case ghostty
-                command $term --working-directory="$cwd" -e fish -lc "$inner" &
+                set cmd $term --working-directory="$cwd" -e fish -lc "$inner"
             case '*'
-                command $term -e fish -lc "$inner" &
+                set cmd $term -e fish -lc "$inner"
         end
-        disown
+        __mn_spawn $cmd
         echo $term
         return 0
     end
 
     # macOS has none of those. Terminal.app is told to run a script rather
     # than a command line, which keeps a shell command out of AppleScript
-    # quoting entirely.
+    # quoting entirely -- and it is spawned by the system, so it is already
+    # detached from this shell.
     if command -q osascript
         set -l tmp (mktemp -t mn-open)
         printf '#!/bin/sh\nrm -f %s\ncd %s\n%s\n' (string escape -- $tmp) (string escape -- $cwd) "$inner" >$tmp
@@ -267,4 +269,19 @@ function __mn_term_open --description 'Run a command in a new terminal window; e
         return 0
     end
     return 1
+end
+
+function __mn_spawn --description 'Start a window that outlives the terminal that asked for it'
+    # `disown` only removes the job from this shell's table -- the child keeps
+    # our process group and session, so closing the window running `mn` sends
+    # it SIGHUP and every window we just opened disappears with it. setsid
+    # gives it a session of its own. `-f` always forks, which matters because
+    # a backgrounded job is already a group leader and plain setsid would
+    # refuse.
+    if command -q setsid
+        command setsid -f $argv >/dev/null 2>&1
+    else
+        command $argv >/dev/null 2>&1 &
+        disown
+    end
 end

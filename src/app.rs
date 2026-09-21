@@ -264,6 +264,9 @@ pub struct App {
     last_click: Option<(std::time::Instant, usize)>,
     pub restore_model: bool,
     pub want_refresh: bool,
+    /// A rescan is running behind the list, which is showing cached rows in
+    /// the meantime.
+    pub indexing: bool,
     /// Whether changes are written to disk.
     ///
     /// False in tests, and for one reason: without it `cargo test` overwrote
@@ -337,6 +340,7 @@ impl App {
             last_click: None,
             restore_model,
             want_refresh: false,
+            indexing: false,
             persist: true,
             pending_tmux: None,
             tmux_name: String::new(),

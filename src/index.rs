@@ -88,6 +88,10 @@ pub struct Index {
     /// True when we could not use the on-disk cache and fell back to memory.
     /// Everything still works; it is just rebuilt on every run.
     pub ephemeral: bool,
+    /// The rows were written by an older scanner. They are still worth
+    /// showing -- a title from yesterday's logic is a title -- but they must
+    /// not be reused to skip reading a file, or the new logic never runs.
+    pub stale: bool,
 }
 
 impl Index {
@@ -159,7 +163,15 @@ impl Index {
         // and then every query fails with "no such column" and the recorded
         // version says nothing is wrong. Check the columns that are actually
         // there.
-        let mut reset = stored != Some(SCANNER_VERSION) || !schema_current(&conn);
+        // A changed schema is fatal to the old rows: a query would fail with
+        // "no such column". A changed *scanner* is not -- the columns are
+        // fine, the values are merely out of date. Throwing them away meant
+        // the first run after an update had nothing to show and sat on a
+        // splash for twelve seconds re-reading 2.5GB. Keep them, show them,
+        // and let the rescan replace them underneath.
+        let schema_ok = schema_current(&conn);
+        let stale = stored != Some(SCANNER_VERSION);
+        let mut reset = !schema_ok;
         if reset {
             conn.execute_batch("DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS body;")?;
         }
@@ -210,6 +222,11 @@ impl Index {
             conn.execute_batch("DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS body;")?;
             reset = true;
         }
+        // Only a wiped cache can claim the new version here; there is
+        // nothing left that the old scanner wrote. A merely stale cache
+        // claims it after the rescan, in `mark_current` -- recording it now
+        // would tell the very next open that everything is up to date and
+        // the new logic would never run.
         if reset {
             conn.execute(
                 "INSERT INTO meta (key,value) VALUES ('scanner_version', ?1)
@@ -220,6 +237,7 @@ impl Index {
         Ok(Index {
             conn,
             ephemeral: false,
+            stale: stale || reset,
         })
     }
 
@@ -300,6 +318,17 @@ impl Index {
             .prepare("SELECT path FROM body WHERE body MATCH ?1")?;
         let rows = st.query_map([expr], |r| r.get::<_, String>(0))?;
         Ok(rows.flatten().collect())
+    }
+
+    /// Record that the rows now match this scanner. Called once the rescan
+    /// that makes it true has finished.
+    pub fn mark_current(&self) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO meta (key,value) VALUES ('scanner_version', ?1)
+             ON CONFLICT(key) DO UPDATE SET value=?1",
+            [SCANNER_VERSION.to_string()],
+        )?;
+        Ok(())
     }
 
     /// A readable excerpt for one hit.
@@ -447,6 +476,7 @@ pub fn refresh_with_progress(
     use std::sync::atomic::Ordering;
 
     let mut idx = Index::open()?;
+    let stale = idx.stale;
     let cached = idx.load()?;
     let found = scan::discover(include_subagents);
     if let Some(p) = &progress {
@@ -457,7 +487,10 @@ pub fn refresh_with_progress(
         .par_iter()
         .filter_map(|(path, is_sub, parent)| {
             let key = path.to_string_lossy().to_string();
-            let prev = cached.get(&key);
+            // Rows from an older scanner are shown, never reused: skipping a
+            // file because its size and mtime match would leave yesterday's
+            // logic in place forever.
+            let prev = if stale { None } else { cached.get(&key) };
             // Only harvest text when the file actually needs reading; an
             // untouched transcript keeps whatever is already indexed.
             let unchanged = prev.is_some_and(|p| {
@@ -520,6 +553,9 @@ pub fn refresh_with_progress(
         .map(|(p, _, _)| p.to_string_lossy().to_string())
         .collect();
     let _ = idx.prune(&paths);
+    // Everything has been re-read with the current scanner, so the rows may
+    // now claim its version.
+    let _ = idx.mark_current();
     if let Some(p) = &progress {
         p.finished.store(true, std::sync::atomic::Ordering::Relaxed);
     }
@@ -616,12 +652,12 @@ mod tests {
     }
 
     #[test]
-    fn a_scanner_change_invalidates_the_cache() {
-        // The cache keys on (path, mtime, size), so an unchanged transcript is
-        // never re-read. Without this, a change to what the scanner derives
-        // would keep serving values produced by the old logic forever -- which
-        // is exactly what happened when permission_mode moved from last-seen
-        // to first-seen.
+    fn a_scanner_change_rescans_without_blanking_the_list() {
+        // The cache keys on (path, mtime, size), so an unchanged transcript
+        // is never re-read; a change to what the scanner derives would
+        // otherwise serve old values forever. It used to drop the rows,
+        // which meant the first run after an update had nothing to show and
+        // sat there re-reading gigabytes. Keep them, mark them stale.
         let d = tempfile::tempdir().unwrap();
         let db = d.path().join("i.db");
         {
@@ -635,10 +671,31 @@ mod tests {
             conn.execute("UPDATE meta SET value='0' WHERE key='scanner_version'", [])
                 .unwrap();
         }
+
+        let idx = Index::open_at(&db).unwrap();
+        assert!(idx.stale, "rows from an older scanner must be marked stale");
+        assert_eq!(
+            idx.load().unwrap().len(),
+            1,
+            "they are still worth showing while the rescan runs"
+        );
+
+        // Opening again must still say stale. Claiming the version here
+        // would tell the background rescan the cache was current, and the
+        // new logic would never run at all.
+        drop(idx);
         let idx = Index::open_at(&db).unwrap();
         assert!(
-            idx.load().unwrap().is_empty(),
-            "stale rows are dropped so they get rescanned"
+            idx.stale,
+            "the version was claimed before anything had been rescanned"
+        );
+
+        // Only the rescan earns it.
+        idx.mark_current().unwrap();
+        drop(idx);
+        assert!(
+            !Index::open_at(&db).unwrap().stale,
+            "after a rescan the rows are current"
         );
     }
 

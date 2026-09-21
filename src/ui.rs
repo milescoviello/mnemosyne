@@ -589,6 +589,11 @@ fn draw_wordmark(f: &mut Frame, app: &App, area: Rect) {
     if favs > 0 {
         segs.push((3, plain(format!("★{favs}"), th().fav)));
     }
+    if app.indexing {
+        // The list is showing cached rows while the rescan catches up. Say
+        // so, quietly, rather than letting numbers change with no reason.
+        segs.push((1, plain("indexing…".to_string(), th().chrome)));
+    }
     let live = app.live_shown();
     if live > 0 {
         segs.push((2, plain(format!("●{live} live"), th().live)));

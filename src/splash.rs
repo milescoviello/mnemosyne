@@ -92,11 +92,28 @@ fn bar_line(pct: f64) -> Line<'static> {
     Line::from(spans)
 }
 
-/// Returns true if the user skipped.
-pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress) -> Result<bool> {
+/// How the opening animation ended.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum End {
+    /// It ran its course, or the work finished and it stepped aside.
+    Done,
+    /// A key was pressed once there was nothing left to wait for.
+    Skipped,
+    /// ctrl+c. The caller must not wait for the scan; it should leave.
+    Aborted,
+}
+
+/// Returns how it ended.
+///
+/// `must_wait` says there is nothing cached to show yet, so the list cannot
+/// appear until the scan does. When it is false the animation plays its own
+/// short course and hands over; the scan carries on behind the list, which
+/// is the difference between a start that takes a moment and one that takes
+/// twelve seconds re-reading every transcript.
+pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress, must_wait: bool) -> Result<End> {
     let start = Instant::now();
     let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
-    let mut skipped = false;
+    let mut ended = End::Done;
     let mut bar_high = 0.0f64;
     let mut showed_counts = false;
     // Resolved once we know whether there was real work to cover. Deciding on
@@ -126,7 +143,10 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress) -> Result<bool> {
         let finished = p.finished.load(Ordering::Relaxed);
 
         if speed.is_none() {
-            if finished && ms <= WARM_IF_DONE_BY_MS {
+            // The slow pace exists to cover a scan nobody can skip. When the
+            // list is already there to fall back on, there is nothing to
+            // cover and the animation has no business holding it back.
+            if !must_wait || (finished && ms <= WARM_IF_DONE_BY_MS) {
                 speed = Some((floor_warm, REVEAL_WARM_MS));
             } else if ms > WARM_IF_DONE_BY_MS {
                 speed = Some((floor_cold, REVEAL_COLD_MS));
@@ -163,6 +183,23 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress) -> Result<bool> {
             format!("{total} transcripts · {}", human_size(bytes))
         } else {
             "recalling…".to_string()
+        };
+
+        // Waiting is only mandatory when there is nothing to fall back to.
+        let blocked = must_wait && !finished;
+        // Skipping is only offered once there is nothing left to wait for.
+        // The animation used to say "any key to skip" while the index was
+        // still being built, and pressing one dropped you onto a frozen
+        // screen until the scan finished -- the tool looked hung at exactly
+        // the moment it was working hardest. A long wait only happens on a
+        // cold cache, which is once after an update, so say that too.
+        let working = blocked;
+        let hint = if !working {
+            "any key to skip"
+        } else if elapsed >= Duration::from_secs(4) {
+            "reading every transcript — this happens once after an update · ctrl+c to leave"
+        } else {
+            "ctrl+c to leave"
         };
 
         term.draw(|f| {
@@ -261,7 +298,7 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress) -> Result<bool> {
             lines.push(bar_line(bar_high));
             lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled(
-                "any key to skip",
+                hint,
                 Style::default()
                     .fg(rgb(art::sink(art::ramp(0.4), 0.55)))
                     .add_modifier(Modifier::DIM),
@@ -279,16 +316,21 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress) -> Result<bool> {
         if event::poll(FRAME)? {
             if let Event::Key(k) = event::read()? {
                 if k.kind == KeyEventKind::Press {
-                    skipped = true;
                     if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
-                        return Ok(true);
+                        return Ok(End::Aborted);
                     }
-                    break;
+                    // While the scan is still running there is nothing to
+                    // skip to, so the keypress is swallowed rather than
+                    // dropping you onto a screen that cannot change yet.
+                    if !working {
+                        ended = End::Skipped;
+                        break;
+                    }
                 }
             }
         }
 
-        if finished && elapsed >= floor && complete {
+        if (finished || !must_wait) && elapsed >= floor && complete {
             std::thread::sleep(Duration::from_millis(160));
             break;
         }
@@ -296,5 +338,5 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress) -> Result<bool> {
             break;
         }
     }
-    Ok(skipped)
+    Ok(ended)
 }

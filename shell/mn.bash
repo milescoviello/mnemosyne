@@ -28,25 +28,27 @@ __mn_perms() {
 # Run a command in a new terminal window; print which terminal was used.
 __mn_term_open() {
     local cwd="$1" inner="$2" term
+    local -a cmd
     for term in $MN_TERMINAL alacritty konsole kitty wezterm foot ghostty xterm; do
         command -v "$term" >/dev/null 2>&1 || continue
         case "$term" in
-            alacritty) "$term" --working-directory "$cwd" -e bash -lc "$inner" & ;;
-            konsole)   "$term" --workdir "$cwd" -e bash -lc "$inner" & ;;
-            kitty)     "$term" --directory "$cwd" bash -lc "$inner" & ;;
-            wezterm)   "$term" start --cwd "$cwd" -- bash -lc "$inner" & ;;
-            foot)      "$term" --working-directory="$cwd" bash -lc "$inner" & ;;
-            ghostty)   "$term" --working-directory="$cwd" -e bash -lc "$inner" & ;;
-            *)         "$term" -e bash -lc "$inner" & ;;
+            alacritty) cmd=("$term" --working-directory "$cwd" -e bash -lc "$inner") ;;
+            konsole)   cmd=("$term" --workdir "$cwd" -e bash -lc "$inner") ;;
+            kitty)     cmd=("$term" --directory "$cwd" bash -lc "$inner") ;;
+            wezterm)   cmd=("$term" start --cwd "$cwd" -- bash -lc "$inner") ;;
+            foot)      cmd=("$term" --working-directory="$cwd" bash -lc "$inner") ;;
+            ghostty)   cmd=("$term" --working-directory="$cwd" -e bash -lc "$inner") ;;
+            *)         cmd=("$term" -e bash -lc "$inner") ;;
         esac
-        disown 2>/dev/null
+        __mn_spawn "${cmd[@]}"
         printf '%s\n' "$term"
         return 0
     done
 
     # macOS has none of those. Terminal.app is told to run a script rather
     # than a command line, which keeps a shell command out of AppleScript
-    # quoting entirely.
+    # quoting entirely -- and it is spawned by the system, so it is already
+    # detached from this shell.
     if command -v osascript >/dev/null 2>&1; then
         local tmp; tmp="$(mktemp -t mn-open)" || return 1
         printf '#!/bin/sh\nrm -f %q\ncd %q\n%s\n' "$tmp" "$cwd" "$inner" > "$tmp"
@@ -57,6 +59,22 @@ __mn_term_open() {
         return 0
     fi
     return 1
+}
+
+# Start a window that outlives the terminal that asked for it.
+#
+# `disown` only removes the job from this shell's table -- the child keeps our
+# process group and session, so closing the window running `mn` sends it
+# SIGHUP and every window we just opened disappears with it. setsid gives it a
+# session of its own; `-f` always forks, which matters because a backgrounded
+# job is already a group leader and plain setsid would refuse.
+__mn_spawn() {
+    if command -v setsid >/dev/null 2>&1; then
+        setsid -f "$@" >/dev/null 2>&1
+    else
+        "$@" >/dev/null 2>&1 &
+        disown 2>/dev/null
+    fi
 }
 
 # Make sure a tmux session exists for this chat; print its name. Progress goes

@@ -70,6 +70,16 @@ EOF
 cat > "$bin/faketerm" <<'EOF'
 #!/bin/sh
 echo "term: $*" >> "$MN_TEST_LOG"
+# Which session did we land in? If it is the caller's, closing the window
+# that ran mn takes this one down with it.
+echo "term-sid: $(ps -o sid= -p $$ | tr -d ' ')" >> "$MN_TEST_LOG"
+EOF
+
+# Prints the session id of whatever shell invoked it, so the check below
+# reads the same in fish and bash.
+cat > "$bin/mysid" <<'EOF'
+#!/bin/sh
+echo "my-sid: $(ps -o sid= -p $PPID | tr -d ' ')"
 EOF
 
 real_tmux=$(command -v tmux 2>/dev/null)
@@ -160,6 +170,23 @@ run_shell() {
         "$bin/tmux" kill-server 2>/dev/null
     else
         skip "$shell_name: named tmux session" "tmux is not installed"
+    fi
+
+    # --- the window has to outlive the shell that opened it
+    write_plan "$WINDOW_PLAN"
+    : > "$log"
+    out=$("$runner" -c "$source_line; mn; mysid" 2>&1)
+    seen=$(cat "$log")
+    local mine theirs
+    mine=$(printf '%s' "$out" | sed -n 's/^my-sid: //p' | head -1)
+    theirs=$(printf '%s' "$seen" | sed -n 's/^term-sid: //p' | head -1)
+    if [ -z "$mine" ] || [ -z "$theirs" ]; then
+        skip "$shell_name: window outlives its parent" "could not read session ids"
+    elif [ "$mine" = "$theirs" ]; then
+        bad "$shell_name: window outlives its parent" \
+            "opened in the caller's session ($mine) — closing the terminal would kill it"
+    else
+        ok "$shell_name: window outlives its parent"
     fi
 
     # --- a plain window, and --ask

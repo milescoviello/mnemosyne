@@ -272,6 +272,10 @@ fn main() -> Result<()> {
     } else {
         index::refresh(include_subagents)?
     };
+    // Nothing cached means the list has nothing to draw, so the opening
+    // animation has to cover the scan. Otherwise it does not: the cached
+    // rows go up straight away and the rescan lands underneath them.
+    let cold_start = sessions.is_empty();
 
     if has("--stats") {
         let main: Vec<_> = sessions.iter().filter(|s| !s.is_subagent).collect();
@@ -626,19 +630,40 @@ fn main() -> Result<()> {
         });
     }
 
+    // The rescan, if it is still running when the list goes up.
+    let mut indexing: Option<std::thread::JoinHandle<Result<Vec<model::Session>>>> = None;
     if use_splash {
         let p = index::Progress::default();
         let p2 = p.clone();
         let handle = std::thread::spawn(move || index::refresh_with_progress(true, Some(p2)));
-        let _ = splash::run(&mut term, &p);
-        if let Ok(Ok(fresh)) = handle.join() {
-            let mut fresh = fresh;
-            fresh.sort_by_key(|s| std::cmp::Reverse(s.mtime));
-            app.all = fresh;
-            app.live = live::live_map();
-            app.recompute_totals();
-            app.apply_overlay();
-            app.rebuild();
+        // ctrl+c during the animation has to leave immediately. Joining
+        // first would have blocked on the very scan the user was trying to
+        // escape, on a screen that could no longer change.
+        if let Ok(splash::End::Aborted) = splash::run(&mut term, &p, cold_start) {
+            let _ = disable_raw_mode();
+            let _ = execute!(
+                term.backend_mut(),
+                DisableMouseCapture,
+                LeaveAlternateScreen
+            );
+            let _ = term.show_cursor();
+            std::process::exit(130);
+        }
+        if cold_start {
+            // With nothing cached there is no list to show without it, so
+            // this is the one case that waits.
+            if let Ok(Ok(fresh)) = handle.join() {
+                let mut fresh = fresh;
+                fresh.sort_by_key(|s| std::cmp::Reverse(s.mtime));
+                app.all = fresh;
+                app.live = live::live_map();
+                app.recompute_totals();
+                app.apply_overlay();
+                app.rebuild();
+            }
+        } else {
+            app.indexing = true;
+            indexing = Some(handle);
         }
     }
 
@@ -649,7 +674,7 @@ fn main() -> Result<()> {
     workspace::record(app.open_sessions(), live::detection_supported());
     app.load_reopen();
 
-    let res = run(&mut term, &mut app, &updated);
+    let res = run(&mut term, &mut app, &updated, &mut indexing);
     let _ = execute!(term.backend_mut(), event::PopKeyboardEnhancementFlags);
     disable_raw_mode()?;
     let _ = execute!(term.backend_mut(), DisableMouseCapture);
@@ -702,10 +727,14 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// The rescan running behind the list, if there is one.
+type Indexing = Option<std::thread::JoinHandle<Result<Vec<model::Session>>>>;
+
 fn run<B: ratatui::backend::Backend>(
     term: &mut Terminal<B>,
     app: &mut App,
     updated: &std::sync::Arc<std::sync::Mutex<Option<update::Found>>>,
+    indexing: &mut Indexing,
 ) -> Result<()> {
     let mut last_live = Instant::now();
     loop {
@@ -721,6 +750,23 @@ fn run<B: ratatui::backend::Backend>(
         }
 
         app.absorb_deep();
+
+        // The rescan started behind the list; fold it in the moment it
+        // lands, rather than making anyone wait for it up front.
+        if indexing.as_ref().is_some_and(|h| h.is_finished()) {
+            if let Some(h) = indexing.take() {
+                app.indexing = false;
+                if let Ok(Ok(fresh)) = h.join() {
+                    let mut fresh = fresh;
+                    fresh.sort_by_key(|s| std::cmp::Reverse(s.mtime));
+                    app.all = fresh;
+                    app.live = live::live_map();
+                    app.recompute_totals();
+                    app.apply_overlay();
+                    app.rebuild();
+                }
+            }
+        }
 
         if app.update_notice.is_none() {
             if let Ok(g) = updated.try_lock() {

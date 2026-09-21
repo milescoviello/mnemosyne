@@ -230,6 +230,27 @@ would make every session match any word in yours; they are stripped. And
 base64 image payloads spell short words by chance, so the exhaustive scan
 rejects matches inside them.
 
+## Starting up
+
+The list goes up from the cache, and any rescan runs behind it. That is the
+whole rule, and it is what keeps a start under a second whatever the index
+is doing.
+
+An update that changes what the scanner derives used to be the exception: the
+cached rows were thrown away, so there was nothing to draw and the animation
+sat there for twelve seconds re-reading 2.5GB — on this corpus, two
+transcripts alone are 403MB and 367MB. Rows written by an older scanner are
+kept and shown now. They are never *reused* to skip reading a file, and the
+new version is only recorded once a full rescan has actually happened, so
+the new logic cannot be skipped; the rows are just something honest to look
+at while it runs. The header says `indexing…` until it lands.
+
+The one case that still waits is a genuinely empty cache — a first run, or
+after deleting `index.db` — because there is nothing to show instead. There
+the animation reports progress, does not offer to skip (it would drop you on
+a screen that cannot change yet), and says the wait happens once. `ctrl+c`
+leaves at any point.
+
 ## The opening animation
 
 Mnemosyne is the spring of memory in the underworld — the counter-pool to
@@ -397,6 +418,11 @@ Bad arguments are refused rather than absorbed: an unknown option, a
 `--search-mode` that is not one of the four, or a `--restore` count that is
 not a positive number all exit 2 and say what was wrong. Running the browser
 with no terminal says so, instead of reporting `No such device or address`.
+
+Windows opened for you are started with `setsid`, in a session of their own.
+`disown` is not enough: it only removes the job from the shell's table, so
+the child keeps the shell's process group and session, and closing the
+terminal you ran `mn` in sent SIGHUP to every window it had just opened.
 
 `--restore` skips anything already running or already in a tmux session, and
 anything whose directory has since been deleted. `--reopen` does the same,
