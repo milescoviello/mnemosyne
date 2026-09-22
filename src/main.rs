@@ -671,13 +671,7 @@ fn main() -> Result<()> {
             // With nothing cached there is no list to show without it, so
             // this is the one case that waits.
             if let Ok(Ok(fresh)) = handle.join() {
-                let mut fresh = fresh;
-                fresh.sort_by_key(|s| std::cmp::Reverse(s.mtime));
-                app.all = fresh;
-                app.live = live::live_map();
-                app.recompute_totals();
-                app.apply_overlay();
-                app.rebuild();
+                app.absorb_rescan(fresh);
             }
         } else {
             app.indexing = true;
@@ -700,11 +694,17 @@ fn main() -> Result<()> {
     term.show_cursor()?;
     res?;
 
-    if let Some(Outcome::Resume { targets, target }) = &app.outcome {
-        // What is about to be launched counts as open: it will be, moments
-        // from now, and nothing else will be watching when it happens.
+    // What was handed over counts as open: it will be running moments from
+    // now and nothing else is watching when it happens. This has to include
+    // the windows opened while the browser stayed up, not just a final
+    // choice -- they are the ones a reboot would otherwise forget.
+    {
         let mut open = app.open_sessions();
-        for t in targets {
+        let outcome_targets = match &app.outcome {
+            Some(Outcome::Resume { targets, .. }) => targets.clone(),
+            None => Vec::new(),
+        };
+        for t in app.launched.iter().chain(outcome_targets.iter()) {
             if !open.iter().any(|e| e.id == t.id) {
                 open.push(workspace::Entry {
                     id: t.id.clone(),
@@ -716,11 +716,9 @@ fn main() -> Result<()> {
             }
         }
         workspace::record(open, live::detection_supported());
-        if *target == app::Target::WindowTmux {
-            // The offer was taken, so it is not made again.
-            workspace::clear_previous();
-        }
+    }
 
+    if let Some(Outcome::Resume { targets, target }) = &app.outcome {
         // Several selections cannot share this terminal, so they become
         // windows unless tmux was asked for explicitly.
         let mode = if *target == app::Target::Here && targets.len() > 1 {
@@ -804,13 +802,7 @@ fn run<B: ratatui::backend::Backend>(
             if let Some(h) = indexing.take() {
                 app.indexing = false;
                 if let Ok(Ok(fresh)) = h.join() {
-                    let mut fresh = fresh;
-                    fresh.sort_by_key(|s| std::cmp::Reverse(s.mtime));
-                    app.all = fresh;
-                    app.live = live::live_map();
-                    app.recompute_totals();
-                    app.apply_overlay();
-                    app.rebuild();
+                    app.absorb_rescan(fresh);
                 }
             }
         }
@@ -846,15 +838,9 @@ fn run<B: ratatui::backend::Backend>(
 
         if app.want_refresh {
             app.want_refresh = false;
-            let sessions = index::refresh(true)?;
-            let mut fresh = sessions;
-            fresh.sort_by_key(|s| std::cmp::Reverse(s.mtime));
-            app.all = fresh;
-            app.recompute_totals();
+            let fresh = index::refresh(true)?;
             app.meta = meta::Meta::load();
-            app.live = live::live_map();
-            app.apply_overlay();
-            app.rebuild();
+            app.absorb_rescan(fresh);
             app.status = format!("reindexed — {} sessions", app.item_count());
         }
 

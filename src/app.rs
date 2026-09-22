@@ -271,6 +271,10 @@ pub struct App {
     /// chosen. Opening a window elsewhere is no reason to close the picker,
     /// so these are streamed out and the browser stays where it is.
     pub to_open: Vec<(Target, Vec<ResumeTarget>)>,
+    /// Everything handed over during this run. They will be running moments
+    /// from now and nothing else is watching, so they belong in the record
+    /// of what was open -- which is what a reboot is put back from.
+    pub launched: Vec<ResumeTarget>,
     /// Whether changes are written to disk.
     ///
     /// False in tests, and for one reason: without it `cargo test` overwrote
@@ -346,6 +350,7 @@ impl App {
             want_refresh: false,
             indexing: false,
             to_open: Vec::new(),
+            launched: Vec::new(),
             persist: true,
             pending_tmux: None,
             tmux_name: String::new(),
@@ -701,7 +706,12 @@ impl App {
     }
 
     pub fn current(&self) -> Option<&Session> {
-        self.current_idx().map(|i| &self.all[i])
+        // `get`, not an index. The view holds positions into `all`, and the
+        // two are briefly out of step whenever a finished rescan replaces
+        // the sessions: `rebuild` asks what the cursor is on before it
+        // rebuilds, so a shorter list panicked with an index out of bounds
+        // rather than simply having nothing there.
+        self.current_idx().and_then(|i| self.all.get(i))
     }
 
     /// Sessions we could actually point at a running process.
@@ -903,6 +913,38 @@ impl App {
         out
     }
 
+    /// Fold in a finished rescan without moving the reader.
+    ///
+    /// The rows are replaced underneath whatever is on screen, and they are
+    /// sorted by recency, so holding the cursor at the same index would put
+    /// it on a different session almost every time. It follows the session
+    /// it was on instead.
+    pub fn absorb_rescan(&mut self, mut fresh: Vec<Session>) {
+        let was = self.current().map(|s| s.id.clone());
+        fresh.sort_by_key(|s| std::cmp::Reverse(s.mtime));
+        // Drop the old view before the sessions it points into.
+        self.view.clear();
+        self.cursor = 0;
+        self.all = fresh;
+        self.live = crate::live::live_map();
+        self.recompute_totals();
+        self.apply_overlay();
+        self.rebuild();
+        if let Some(id) = was {
+            self.focus_id(&id);
+        }
+    }
+
+    /// Put the cursor back on a session, if it is still in view.
+    pub fn focus_id(&mut self, id: &str) {
+        if let Some(i) = self.view.iter().position(|r| match r {
+            Row::Item(i) | Row::Sub(i) => self.all[*i].id == id,
+            _ => false,
+        }) {
+            self.cursor = i;
+        }
+    }
+
     /// Load the offer, if a reboot left one outstanding.
     pub fn load_reopen(&mut self) {
         let w = crate::workspace::load();
@@ -938,6 +980,7 @@ impl App {
             .collect();
         // Same as any other window: hand them over and stay open, so the
         // list is still there when they appear.
+        self.launched.extend(targets.iter().cloned());
         self.to_open.push((Target::WindowTmux, targets));
         self.reopen.clear();
         if self.persist {
@@ -1059,6 +1102,7 @@ impl App {
             } else {
                 format!("{n} sessions")
             };
+            self.launched.extend(targets.iter().cloned());
             self.to_open.push((target, targets));
             self.selected.clear();
             self.status = format!("opening {what} in a new window");
@@ -2228,6 +2272,66 @@ mod logic_tests {
         a.do_action(Action::NewWindow);
         assert!(!a.quit);
         assert_eq!(a.to_open.len(), 2, "the second one did not queue");
+    }
+
+    #[test]
+    fn the_rescan_landing_does_not_move_you() {
+        // The rescan now finishes behind the list, so the rows are replaced
+        // under you while you are reading them. Keeping the cursor on the
+        // same *index* would move you to a different session whenever the
+        // order changed, which is most of the time -- it sorts by recency.
+        let mut a = app();
+        a.move_by(2);
+        let was = a.current().map(|s| s.id.clone()).expect("no row");
+
+        // what the background rescan does: newer data, different order
+        let mut fresh = corpus();
+        fresh.reverse();
+        fresh[0].mtime += 10_000;
+        a.absorb_rescan(fresh);
+
+        assert_eq!(
+            a.current().map(|s| s.id.clone()),
+            Some(was),
+            "the cursor jumped to another session when the index landed"
+        );
+        assert_cursor_valid(&a);
+    }
+
+    #[test]
+    fn a_rescan_that_removes_rows_cannot_strand_the_cursor() {
+        let mut a = app();
+        a.goto_bottom();
+        a.absorb_rescan(vec![session("only-one", "all that is left", "/home/u", 0)]);
+        assert_cursor_valid(&a);
+        assert_eq!(a.item_count(), 1);
+    }
+
+    #[test]
+    fn a_window_opened_mid_session_is_still_recorded() {
+        // The record of what was open is what a reboot is put back from.
+        // Once windows streamed out instead of ending the run, they stopped
+        // appearing in the final outcome -- and so stopped being recorded,
+        // which would have quietly lost exactly the sessions you opened.
+        let mut a = app();
+        a.do_action(Action::NewWindow);
+        a.move_by(1);
+        a.do_action(Action::NewWindow);
+        assert_eq!(a.launched.len(), 2, "opened windows were not remembered");
+        assert!(
+            a.launched
+                .iter()
+                .all(|t| !t.id.is_empty() && !t.cwd.is_empty()),
+            "a record with no id or folder cannot be reopened"
+        );
+    }
+
+    #[test]
+    fn taking_the_reboot_offer_is_remembered_too() {
+        let mut a = app();
+        offer(&mut a, &["aaaaaaaa-1", "bbbbbbbb-2"]);
+        press(&mut a, 'r');
+        assert_eq!(a.launched.len(), 2);
     }
 
     #[test]
