@@ -1791,6 +1791,11 @@ mod render_tests {
             // line in the layout
             offer(&mut a, 3);
             let _ = render(&mut a, w, h);
+            // and with the rescan still running, which adds a chip to the
+            // header that has to fit like every other one
+            a.indexing = true;
+            let _ = render(&mut a, w, h);
+            a.indexing = false;
         }
     }
 

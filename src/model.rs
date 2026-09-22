@@ -368,6 +368,22 @@ mod tests {
     }
 
     #[test]
+    fn a_transcript_from_the_future_does_not_break_the_list() {
+        // Transcripts arrive from other machines, and not all of their clocks
+        // agree. A negative age must clamp, not underflow into nonsense.
+        let now = chrono::Utc::now().timestamp();
+        for skew in [60_i64, 3600, 86_400, 86_400 * 400] {
+            let t = now + skew;
+            let r = reltime(t);
+            assert!(
+                !r.is_empty() && r.chars().count() <= 5,
+                "reltime({skew}) = {r:?}"
+            );
+            let _ = human_dur(-skew);
+        }
+    }
+
+    #[test]
     fn fit_never_splits_a_character() {
         assert_eq!(fit("hello", 10), "hello");
         assert_eq!(fit("hello", 5), "hello");

@@ -1076,8 +1076,15 @@ impl App {
                 // A waiting tmux session is as strong a signal as an exact pid
                 // match: resuming here would fork a second client instead of
                 // picking up where that one left off.
-                if (s.live_exact || s.has_tmux) && self.selected.is_empty() {
-                    self.status = if s.has_tmux {
+                // `launched` covers what this run has just opened. The
+                // other two read the process table, which is polled every
+                // few seconds -- opening a window and pressing enter beats
+                // that poll, and a guard you can outrun is not a guard.
+                let just_opened = self.launched.iter().any(|t| t.id == s.id);
+                if (s.live_exact || s.has_tmux || just_opened) && self.selected.is_empty() {
+                    self.status = if just_opened && !s.has_tmux && !s.live_exact {
+                        "already opened in a window just now".to_string()
+                    } else if s.has_tmux {
                         format!(
                             "{} is already running in tmux — ctrl+t attaches to it",
                             s.tmux_session
@@ -2305,6 +2312,30 @@ mod logic_tests {
         a.absorb_rescan(vec![session("only-one", "all that is left", "/home/u", 0)]);
         assert_cursor_valid(&a);
         assert_eq!(a.item_count(), 1);
+    }
+
+    #[test]
+    fn a_session_just_opened_elsewhere_is_not_resumed_here_as_well() {
+        // The guard against a second client on one transcript reads the
+        // process table, which is polled every few seconds. Opening a
+        // window and pressing enter on the same row beats that poll, and
+        // the whole point of the guard is that it should not be beatable.
+        let mut a = app();
+        a.do_action(Action::NewWindow);
+        assert_eq!(a.launched.len(), 1);
+        let opened = a.launched[0].id.clone();
+        assert_eq!(a.current().map(|s| s.id.clone()), Some(opened));
+
+        a.do_action(Action::Resume);
+        assert!(
+            !a.quit,
+            "it resumed here on top of the window it just opened"
+        );
+        assert!(
+            a.status.contains("already"),
+            "it should say why, got {:?}",
+            a.status
+        );
     }
 
     #[test]
