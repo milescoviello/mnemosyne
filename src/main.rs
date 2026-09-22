@@ -312,8 +312,19 @@ fn main() -> Result<()> {
             println!("claude processes {}", lm.count);
         }
         let m = meta::Meta::load();
-        println!("favourites      {}", m.favorite_count());
-        println!("tags            {}", m.all_tags().len());
+        // Counted against the sessions that exist, so this agrees with the
+        // list rather than with a file that outlives it.
+        let known: std::collections::HashSet<String> =
+            sessions.iter().map(|s| s.id.clone()).collect();
+        let sum = m.summary(&known);
+        println!("favourites      {}", sum.favourites);
+        println!("tags            {}", sum.tags);
+        if sum.orphans > 0 {
+            println!(
+                "orphaned marks  {} (favourites, tags or notes on transcripts that are gone)",
+                sum.orphans
+            );
+        }
         if let Ok(i) = index::Index::open() {
             println!("indexed bodies  {}", i.text_rows().unwrap_or(0));
         }

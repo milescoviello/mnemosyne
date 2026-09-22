@@ -570,6 +570,12 @@ anything is drawn. That file is edited by hand and synced between machines,
 and everything in it reaches a terminal — an escape sequence in a note is a
 file deciding what your screen does.
 
+Marks outlive the transcripts they are on: retention deletes a session, the
+favourite stays, and it comes back if the session ever does. Counts are
+taken against the sessions that exist, so the header and `--stats` agree
+with the list rather than with a file that has outlived it; `--stats` says
+how many marks no longer reach anything.
+
 Only `meta.json` cannot be regenerated, so it is written via a temp file and
 rename and kept deliberately small and readable. `workspace.json` is written
 the same way; losing it costs you one reopen offer and nothing else.
@@ -676,7 +682,7 @@ worth keeping as a fallback if the binary is ever missing:
 ## Development
 
 ```sh
-cargo test          # 227 tests, no network and no fixtures on disk
+cargo test          # 229 tests, no network and no fixtures on disk
 cargo clippy --all-targets -- -D warnings
 tools/shell-selftest.sh           # the fish and bash wrappers, 50 checks
 python3 tools/gen-wordmark.py     # regenerate the logo (needs Pillow)

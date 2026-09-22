@@ -585,7 +585,7 @@ fn draw_wordmark(f: &mut Frame, app: &App, area: Rect) {
             ),
         ));
     }
-    let favs = app.meta.favorite_count();
+    let favs = app.favourites_shown();
     if favs > 0 {
         segs.push((3, plain(format!("★{favs}"), th().fav)));
     }

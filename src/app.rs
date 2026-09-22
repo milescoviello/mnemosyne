@@ -739,6 +739,16 @@ impl App {
     /// no `--resume` cannot be tied to a transcript. Counting processes here
     /// meant the header could say "4 live" with nothing in the list marked,
     /// which reads as a bug.
+    /// Favourites among the sessions that exist, which is what the list
+    /// marks. The overlay outlives transcripts, so counting its entries
+    /// showed a star total nothing on screen accounted for.
+    pub fn favourites_shown(&self) -> usize {
+        self.all
+            .iter()
+            .filter(|s| s.favorite && !s.is_subagent)
+            .count()
+    }
+
     pub fn live_shown(&self) -> usize {
         self.all
             .iter()
@@ -2783,6 +2793,28 @@ mod logic_tests {
         assert_eq!(
             a.cursor, first_selectable,
             "the top of the list, skipping the date band above it"
+        );
+    }
+
+    #[test]
+    fn the_star_count_matches_the_starred_rows() {
+        // meta.json outlives the transcripts it refers to, so counting its
+        // entries put a number in the header that no row accounted for.
+        let mut meta = crate::meta::Meta::default();
+        meta.toggle_favorite("aaaaaaaa-1"); // a session that exists
+        meta.toggle_favorite("long-gone-session"); // one that does not
+        let a = app_with(meta, true);
+
+        let starred = a
+            .all
+            .iter()
+            .filter(|s| s.favorite && !s.is_subagent)
+            .count();
+        assert_eq!(starred, 1, "fixture should have exactly one real favourite");
+        assert_eq!(
+            a.favourites_shown(),
+            starred,
+            "the header promised a star the list does not have"
         );
     }
 

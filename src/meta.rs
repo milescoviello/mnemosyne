@@ -34,6 +34,15 @@ pub struct Meta {
     pub sessions: BTreeMap<String, Entry>,
 }
 
+/// Counts of what the overlay marks, split from what it no longer reaches.
+#[derive(Default, Debug, PartialEq)]
+pub struct Summary {
+    pub favourites: usize,
+    pub tags: usize,
+    /// Entries whose session is not in the corpus any more.
+    pub orphans: usize,
+}
+
 pub fn meta_path() -> PathBuf {
     crate::index::state_dir().join("meta.json")
 }
@@ -72,6 +81,29 @@ impl Meta {
         }
         std::fs::rename(tmp, p)?;
         Ok(())
+    }
+
+    /// What this overlay actually describes, given the sessions that exist.
+    ///
+    /// Entries outlive their transcripts -- retention deletes those, and
+    /// the overlay is deliberately never pruned, so a favourite survives a
+    /// session coming back. Counting them regardless meant `--stats` could
+    /// report favourites that nothing in the list was marked with.
+    pub fn summary(&self, known: &std::collections::HashSet<String>) -> Summary {
+        let mut s = Summary::default();
+        let mut tags = std::collections::HashSet::new();
+        for (id, e) in &self.sessions {
+            if known.contains(id) {
+                if e.favorite {
+                    s.favourites += 1;
+                }
+                tags.extend(e.tags.iter().cloned());
+            } else {
+                s.orphans += 1;
+            }
+        }
+        s.tags = tags.len();
+        s
     }
 
     pub fn get(&self, id: &str) -> Option<&Entry> {
@@ -152,10 +184,6 @@ impl Meta {
         let mut v: Vec<(String, usize)> = m.into_iter().collect();
         v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         v
-    }
-
-    pub fn favorite_count(&self) -> usize {
-        self.sessions.values().filter(|e| e.favorite).count()
     }
 }
 
@@ -278,6 +306,35 @@ mod tests {
         assert!(e.favorite);
         assert_eq!(e.tags, vec!["homelab"]);
         assert_eq!(e.note, "the important one");
+    }
+
+    #[test]
+    fn counts_describe_what_is_actually_attached() {
+        // meta.json outlives the transcripts it refers to: retention
+        // deletes them, and an entry for a session that no longer exists
+        // still counted. --stats said "favourites 2" while the list showed
+        // none, which is two parts of the tool disagreeing about the same
+        // thing.
+        let mut m = Meta::default();
+        m.toggle_favorite("alive-1");
+        m.toggle_favorite("gone-1");
+        m.add_tag("alive-1", "here");
+        m.add_tag("gone-2", "nowhere");
+
+        let known: std::collections::HashSet<String> =
+            ["alive-1".to_string()].into_iter().collect();
+        let sum = m.summary(&known);
+        assert_eq!(sum.favourites, 1, "counted a favourite with no session");
+        assert_eq!(sum.tags, 1, "counted a tag on a session that is gone");
+        assert_eq!(sum.orphans, 2, "gone-1 and gone-2");
+
+        // and with everything present, nothing is orphaned
+        let all: std::collections::HashSet<String> = ["alive-1", "gone-1", "gone-2"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let sum = m.summary(&all);
+        assert_eq!((sum.favourites, sum.tags, sum.orphans), (2, 2, 0));
     }
 
     #[test]
