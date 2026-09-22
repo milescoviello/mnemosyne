@@ -247,6 +247,23 @@ pub fn fts_expr(query: &str) -> String {
     }
 }
 
+/// Parents of the subagents that matched.
+///
+/// A subagent is not something you resume on its own; the session that
+/// spawned it is. The browser reveals the parent when the answer was found
+/// in one of its children, and the command line did not -- so the same
+/// query gave two different answers depending on where you asked it.
+pub fn parents_of_hits(
+    sessions: &[crate::model::Session],
+    hits: &HashMap<String, String>,
+) -> std::collections::HashSet<String> {
+    sessions
+        .iter()
+        .filter(|s| s.is_subagent && hits.contains_key(&s.path.to_string_lossy().to_string()))
+        .filter_map(|s| s.parent.clone())
+        .collect()
+}
+
 /// A readable excerpt of indexed prose around the first mention.
 ///
 /// FTS5 has `snippet()` for this, and it costs about 80ms per document --
@@ -400,6 +417,32 @@ mod tests {
         assert_eq!(fts_expr("a OR b"), r#""a OR b"*"#);
         assert_eq!(fts_expr(""), "");
         assert_eq!(fts_expr("   "), "");
+    }
+
+    #[test]
+    fn a_match_inside_a_subagent_points_at_its_parent() {
+        // You cannot resume a subagent; the session that spawned it is the
+        // thing to open. The browser knew that and the command line did
+        // not, so `--search zpool` missed a session whose only mention was
+        // inside one of its children.
+        use crate::app::fixtures::corpus;
+        let all = corpus();
+        let sub = all
+            .iter()
+            .find(|s| s.is_subagent)
+            .expect("fixture has subagents");
+        let mut hits = HashMap::new();
+        hits.insert(sub.path.to_string_lossy().to_string(), "…".to_string());
+
+        let parents = parents_of_hits(&all, &hits);
+        assert_eq!(parents.len(), 1);
+        assert!(parents.contains(sub.parent.as_deref().unwrap()));
+
+        // a hit on a top-level session contributes no parent
+        let top = all.iter().find(|s| !s.is_subagent).unwrap();
+        let mut hits = HashMap::new();
+        hits.insert(top.path.to_string_lossy().to_string(), "…".to_string());
+        assert!(parents_of_hits(&all, &hits).is_empty());
     }
 
     #[test]

@@ -528,6 +528,13 @@ usually repeats your words, so the session still turned up. Both shapes are
 indexed. Tool *output* still is not: the string form is anchored on the
 message's role, so a `tool_result` payload stays out.
 
+**A match in a subagent counts for its parent.** You cannot resume a
+subagent; the session that spawned it is the thing to open. The browser
+revealed the parent when the answer was inside a child, and `--search` did
+not — so the same query gave two answers depending on where you asked it.
+Both use one rule now. `--subagents` still controls whether the children
+are *listed*; it no longer decides whether they are searched.
+
 **Every hit says why it matched.** `--search` prints an excerpt around the
 first mention. It used to be blank on the default (indexed) search and
 filled only on the slow one, because excerpts were fetched per visible row
@@ -690,7 +697,7 @@ worth keeping as a fallback if the binary is ever missing:
 ## Development
 
 ```sh
-cargo test          # 235 tests, no network and no fixtures on disk
+cargo test          # 236 tests, no network and no fixtures on disk
 cargo clippy --all-targets -- -D warnings
 tools/shell-selftest.sh           # the fish and bash wrappers, 50 checks
 python3 tools/gen-wordmark.py     # regenerate the logo (needs Pillow)

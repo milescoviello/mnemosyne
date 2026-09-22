@@ -371,11 +371,10 @@ fn main() -> Result<()> {
             // anything else was rejected by check_args
             _ => search::Mode::Content,
         };
-        let pool: Vec<model::Session> = sessions
-            .iter()
-            .filter(|s| has("--subagents") || !s.is_subagent)
-            .cloned()
-            .collect();
+        // Always search everything, including subagents. What is *listed*
+        // depends on the flag, but a match hiding in a child should never
+        // make the session it belongs to invisible.
+        let pool: Vec<model::Session> = sessions.to_vec();
         let t = Instant::now();
         let (mut hits, how) = search::run(&pool, q, mode);
         // The indexed path returns paths and fetches excerpts per visible
@@ -396,9 +395,19 @@ fn main() -> Result<()> {
                 }
             }
         }
+        // A subagent is not something you resume; its parent is. Without
+        // --subagents the children are not listed, so the sessions they
+        // belong to stand in for them -- the same rule the browser uses.
+        let parents = search::parents_of_hits(&pool, &hits);
+        let show_subs = has("--subagents");
         let mut rows: Vec<&model::Session> = pool
             .iter()
-            .filter(|s| hits.contains_key(&s.path.to_string_lossy().to_string()))
+            .filter(|s| {
+                if s.is_subagent {
+                    return show_subs && hits.contains_key(&s.path.to_string_lossy().to_string());
+                }
+                hits.contains_key(&s.path.to_string_lossy().to_string()) || parents.contains(&s.id)
+            })
             .collect();
         rows.sort_by_key(|s| std::cmp::Reverse(s.mtime));
         for s in &rows {
