@@ -429,6 +429,26 @@ anything whose directory has since been deleted. `--reopen` does the same,
 and works even after the offer has been dismissed — so it is the one to put
 in a login script if you would rather not be asked.
 
+## Why re-indexing is quick
+
+A full re-index took 39 seconds, and almost none of it was reading
+transcripts. Tokenising all 157MB of prose costs **1.7s**; the other 41
+seconds were the deletes. `body` is an FTS5 table and `path` is declared
+`UNINDEXED`, so `DELETE FROM body WHERE path = ?` reads the entire table —
+once per transcript, eleven hundred times over.
+
+A small `body_ref` table maps a path to its rowid, which FTS5 deletes
+directly. Nothing else changed:
+
+| | before | after |
+|---|---|---|
+| build from nothing | 39s | **1.8s** |
+| re-index after an update | 39s | **3.6s** |
+| warm, nothing changed | 0.4s | 0.4s |
+
+The map has to stay in step with the rows or the wrong text gets deleted,
+so the schema check counts both and rebuilds if they ever disagree.
+
 ## How it stays fast
 
 The corpus this was built against is 2.5 GB across ~1,100 transcripts, with
@@ -630,7 +650,7 @@ worth keeping as a fallback if the binary is ever missing:
 ## Development
 
 ```sh
-cargo test          # 204 tests, no network and no fixtures on disk
+cargo test          # 206 tests, no network and no fixtures on disk
 cargo clippy --all-targets -- -D warnings
 tools/shell-selftest.sh           # the fish and bash wrappers, 32 checks
 python3 tools/gen-wordmark.py     # regenerate the logo (needs Pillow)

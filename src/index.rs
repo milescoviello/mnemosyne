@@ -69,6 +69,15 @@ const EXPECTED_COLUMNS: &[&str] = &[
     "agent_id",
 ];
 
+/// FTS5 columns are not indexed for equality, so `WHERE path = ?` scans the
+/// whole table. Deleting a row that way cost 41 of the 43 seconds a full
+/// re-index took -- 1100 deletes, each reading everything. This maps a path
+/// to its rowid, which FTS5 *can* delete by directly.
+const BODY_REF: &str = "CREATE TABLE IF NOT EXISTS body_ref (
+    path TEXT PRIMARY KEY,
+    rid  INTEGER NOT NULL
+)";
+
 fn schema_current(conn: &Connection) -> bool {
     let Ok(mut st) = conn.prepare("PRAGMA table_info(sessions)") else {
         return false;
@@ -80,7 +89,18 @@ fn schema_current(conn: &Connection) -> bool {
     if have.is_empty() {
         return false; // no table yet
     }
-    EXPECTED_COLUMNS.iter().all(|c| have.contains(*c))
+    if !EXPECTED_COLUMNS.iter().all(|c| have.contains(*c)) {
+        return false;
+    }
+    // The rowid map has to exist, and has to describe the rows that are
+    // there: half a map would delete the wrong text or none at all.
+    let refs: i64 = conn
+        .query_row("SELECT count(*) FROM body_ref", [], |r| r.get(0))
+        .unwrap_or(-1);
+    let bodies: i64 = conn
+        .query_row("SELECT count(*) FROM body", [], |r| r.get(0))
+        .unwrap_or(-1);
+    refs >= 0 && bodies >= 0 && refs == bodies
 }
 
 pub struct Index {
@@ -173,7 +193,9 @@ impl Index {
         let stale = stored != Some(SCANNER_VERSION);
         let mut reset = !schema_ok;
         if reset {
-            conn.execute_batch("DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS body;")?;
+            conn.execute_batch(
+            "DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS body; DROP TABLE IF EXISTS body_ref;",
+        )?;
         }
 
         conn.execute_batch(
@@ -216,10 +238,15 @@ impl Index {
             );
             "#,
         )?;
+        conn.execute_batch(BODY_REF)?;
 
         // Only claim the version once the tables really match it.
         if !schema_current(&conn) {
-            conn.execute_batch("DROP TABLE IF EXISTS sessions; DROP TABLE IF EXISTS body;")?;
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS sessions;
+                 DROP TABLE IF EXISTS body;
+                 DROP TABLE IF EXISTS body_ref;",
+            )?;
             reset = true;
         }
         // Only a wiped cache can claim the new version here; there is
@@ -292,12 +319,23 @@ impl Index {
     pub fn store_text(&mut self, rows: &[(String, String)]) -> Result<()> {
         let tx = self.conn.transaction()?;
         {
-            let mut del = tx.prepare("DELETE FROM body WHERE path = ?1")?;
+            // Delete by rowid, never by path: `path` is UNINDEXED, so
+            // `WHERE path = ?` reads the entire table. Doing that once per
+            // transcript was 41 of the 43 seconds a full re-index took.
+            let mut find = tx.prepare("SELECT rid FROM body_ref WHERE path = ?1")?;
+            let mut del = tx.prepare("DELETE FROM body WHERE rowid = ?1")?;
+            let mut unref = tx.prepare("DELETE FROM body_ref WHERE path = ?1")?;
             let mut ins = tx.prepare("INSERT INTO body (path, text) VALUES (?1, ?2)")?;
+            let mut reref =
+                tx.prepare("INSERT OR REPLACE INTO body_ref (path, rid) VALUES (?1, ?2)")?;
             for (path, text) in rows {
-                del.execute([path])?;
+                if let Ok(rid) = find.query_row([path], |r| r.get::<_, i64>(0)) {
+                    del.execute([rid])?;
+                }
+                unref.execute([path])?;
                 if !text.is_empty() {
                     ins.execute(params![path, text])?;
+                    reref.execute(params![path, tx.last_insert_rowid()])?;
                 }
             }
         }
@@ -318,6 +356,15 @@ impl Index {
             .prepare("SELECT path FROM body WHERE body MATCH ?1")?;
         let rows = st.query_map([expr], |r| r.get::<_, String>(0))?;
         Ok(rows.flatten().collect())
+    }
+
+    /// How many paths the rowid map knows about. Should always equal the
+    /// number of text rows.
+    #[cfg(test)]
+    pub fn rowid_map_len(&self) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row("SELECT count(*) FROM body_ref", [], |r| r.get(0))?)
     }
 
     /// Record that the rows now match this scanner. Called once the rescan
@@ -344,7 +391,11 @@ impl Index {
     }
 
     pub fn existing_text(&self, path: &str) -> Result<Option<String>> {
-        let mut st = self.conn.prepare("SELECT text FROM body WHERE path = ?1")?;
+        // Through the rowid map, for the same reason the deletes are:
+        // `path` is UNINDEXED, so matching on it reads the whole table.
+        let mut st = self.conn.prepare(
+            "SELECT b.text FROM body b JOIN body_ref r ON b.rowid = r.rid WHERE r.path = ?1",
+        )?;
         let mut rows = st.query([path])?;
         Ok(match rows.next()? {
             Some(r) => Some(r.get(0)?),
@@ -434,10 +485,15 @@ impl Index {
                 // The indexed text has to go with it. Missing this leaked a
                 // row per deleted transcript, and since nothing ages out of
                 // the index on its own it only ever grew.
-                let mut sb = tx.prepare("DELETE FROM body WHERE path=?1")?;
+                let mut sfind = tx.prepare("SELECT rid FROM body_ref WHERE path=?1")?;
+                let mut sb = tx.prepare("DELETE FROM body WHERE rowid=?1")?;
+                let mut sunref = tx.prepare("DELETE FROM body_ref WHERE path=?1")?;
                 for p in gone {
                     st.execute([p])?;
-                    sb.execute([p])?;
+                    if let Ok(rid) = sfind.query_row([p], |r| r.get::<_, i64>(0)) {
+                        sb.execute([rid])?;
+                    }
+                    sunref.execute([p])?;
                 }
             }
             tx.commit()?;
@@ -623,6 +679,60 @@ mod tests {
         let loaded = idx.load().unwrap();
         assert!(loaded.contains_key("/a.jsonl"));
         assert!(!loaded.contains_key("/b.jsonl"));
+    }
+
+    #[test]
+    fn re_storing_text_replaces_it_rather_than_piling_up() {
+        // Replacing a transcript's text used to be a DELETE matched on an
+        // UNINDEXED column, which reads the whole table: 41 of the 43
+        // seconds a full re-index took. It goes through a rowid map now, so
+        // the map has to stay in step or the old text is never removed.
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("i.db");
+        let mut idx = Index::open_at(&db).unwrap();
+        idx.store(&[sample("/a.jsonl", "one")]).unwrap();
+
+        idx.store_text(&[("/a.jsonl".into(), "the first text".into())])
+            .unwrap();
+        idx.store_text(&[("/a.jsonl".into(), "the second text".into())])
+            .unwrap();
+
+        assert_eq!(idx.text_rows().unwrap(), 1, "the old row was left behind");
+        assert!(
+            idx.search_text("\"first\"*").unwrap().is_empty(),
+            "replaced text is still findable"
+        );
+        assert_eq!(idx.search_text("\"second\"*").unwrap().len(), 1);
+        assert_eq!(idx.rowid_map_len().unwrap(), 1, "the map drifted");
+
+        // and emptying it removes both sides
+        idx.store_text(&[("/a.jsonl".into(), String::new())])
+            .unwrap();
+        assert_eq!(idx.text_rows().unwrap(), 0);
+        assert_eq!(idx.rowid_map_len().unwrap(), 0, "the map kept a dead entry");
+    }
+
+    #[test]
+    fn a_drifted_rowid_map_forces_a_rebuild() {
+        // A map that does not describe the rows would delete the wrong text,
+        // or none. Better to notice and start again than to quietly rot.
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("i.db");
+        {
+            let mut idx = Index::open_at(&db).unwrap();
+            idx.store(&[sample("/a.jsonl", "one")]).unwrap();
+            idx.store_text(&[("/a.jsonl".into(), "some text".into())])
+                .unwrap();
+        }
+        {
+            let conn = Connection::open(&db).unwrap();
+            conn.execute("DELETE FROM body_ref", []).unwrap();
+        }
+        let idx = Index::open_at(&db).unwrap();
+        assert!(
+            idx.load().unwrap().is_empty(),
+            "a half-written map should have reset the cache"
+        );
     }
 
     #[test]
