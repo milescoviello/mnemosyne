@@ -47,11 +47,15 @@ fn stamp_path() -> PathBuf {
 ///
 /// Zero means every start, which is the default: the check is a background
 /// thread nothing waits on, so the only cost of asking is a request.
-pub fn check_due(every_hours: u64) -> bool {
+/// The stamp is a path rather than a fixed location so the tests can use a
+/// temporary one. They used to read and *write* the real file in whatever
+/// home the suite ran in, which made one of them pass only on a machine
+/// that had not run mnemosyne lately.
+pub fn check_due_at(stamp: &Path, every_hours: u64) -> bool {
     if every_hours == 0 {
         return true;
     }
-    let Ok(meta) = std::fs::metadata(stamp_path()) else {
+    let Ok(meta) = std::fs::metadata(stamp) else {
         return true;
     };
     let Ok(modified) = meta.modified() else {
@@ -64,9 +68,14 @@ pub fn check_due(every_hours: u64) -> bool {
 }
 
 fn touch_stamp() {
-    let p = stamp_path();
-    let _ = std::fs::create_dir_all(p.parent().unwrap());
-    let _ = std::fs::write(p, chrono::Utc::now().to_rfc3339());
+    touch_stamp_at(&stamp_path());
+}
+
+fn touch_stamp_at(stamp: &Path) {
+    if let Some(dir) = stamp.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(stamp, chrono::Utc::now().to_rfc3339());
 }
 
 /// `0.2.0` -> `[0, 2, 0]`, ignoring a leading `v` and anything after a dash.
@@ -251,7 +260,19 @@ pub fn auto(every_hours: u64) -> Option<Found> {
 /// The check, with the network call injectable so the ordering around the
 /// stamp can be tested without one.
 pub fn auto_with(every_hours: u64, fetch: impl FnOnce() -> Option<String>) -> Option<Found> {
-    if !check_due(every_hours) {
+    auto_full(&stamp_path(), every_hours, fetch, install_latest)
+}
+
+/// The whole decision, with the stamp, the network and the installer all
+/// handed in. Nothing here reaches the network or replaces a binary unless
+/// the caller says so, which is what makes the upgrade path testable at all.
+pub fn auto_full(
+    stamp: &Path,
+    every_hours: u64,
+    fetch: impl FnOnce() -> Option<String>,
+    install: impl FnOnce() -> anyhow::Result<String>,
+) -> Option<Found> {
+    if !check_due_at(stamp, every_hours) {
         return None;
     }
     // Record the check only once GitHub has actually answered. Stamping
@@ -259,12 +280,12 @@ pub fn auto_with(every_hours: u64, fetch: impl FnOnce() -> Option<String>) -> Op
     // session closed mid-download burned the whole window without having
     // installed anything.
     let tag = fetch()?;
-    touch_stamp();
+    touch_stamp_at(stamp);
     if !is_newer(&tag, current()) {
         return None;
     }
     let version = tag.trim_start_matches('v').to_string();
-    match install_latest() {
+    match install() {
         Ok(v) => Some(Found::Installed(v)),
         Err(_) => Some(Found::Available(version)),
     }
@@ -285,8 +306,22 @@ mod tests {
         // shorter is not automatically older
         assert!(!is_newer("0.2", "0.2.0"));
         assert!(is_newer("0.3", "0.2.9"));
+        // Double digits are where a string comparison would go wrong, and
+        // this project is about to reach them.
+        assert!(is_newer("0.4.10", "0.4.9"), "0.4.10 is newer than 0.4.9");
+        assert!(is_newer("0.10.0", "0.9.9"));
+        assert!(!is_newer("0.4.9", "0.4.10"));
+        assert!(is_newer("1.0.0", "0.100.0"));
+        // and a tag that is not a version at all must not read as an update
+        assert!(!is_newer("nightly", "0.4.8"));
+        assert!(!is_newer("", "0.4.8"));
         // a tag we cannot parse must never look like an upgrade
         assert!(!is_newer("nightly", "0.2.0"));
+    }
+
+    /// A stamp of our own, so the suite never reads or writes the real one.
+    fn stamp(dir: &tempfile::TempDir) -> std::path::PathBuf {
+        dir.path().join("last-update-check")
     }
 
     #[test]
@@ -294,36 +329,79 @@ mod tests {
         // The stamp is what suppresses the next attempt, so writing it for a
         // check that never reached GitHub would silence retries for the whole
         // window. Also covers a session closed mid-download.
-        let before = std::fs::metadata(stamp_path())
-            .and_then(|m| m.modified())
-            .ok();
-        let got = auto_with(0, || None);
+        let d = tempfile::tempdir().unwrap();
+        let p = stamp(&d);
+        let got = auto_full(&p, 0, || None, || panic!("must not install"));
         assert_eq!(got, None);
-        let after = std::fs::metadata(stamp_path())
-            .and_then(|m| m.modified())
-            .ok();
-        assert_eq!(before, after, "stamped without hearing back from GitHub");
+        assert!(!p.exists(), "stamped without hearing back from GitHub");
     }
 
     #[test]
-    fn being_current_is_recorded_so_we_do_not_ask_again_immediately() {
+    fn being_current_stamps_but_installs_nothing() {
+        let d = tempfile::tempdir().unwrap();
+        let p = stamp(&d);
         let v = format!("v{}", current());
-        assert_eq!(auto_with(0, move || Some(v)), None, "nothing to do");
+        let got = auto_full(&p, 0, move || Some(v), || panic!("must not install"));
+        assert_eq!(got, None, "nothing to do");
+        assert!(p.exists(), "a real answer from GitHub should be recorded");
     }
 
     #[test]
-    fn zero_hours_means_every_start() {
-        // the default: no interval to wait out
-        assert!(check_due(0));
-        assert!(check_due(0));
+    fn a_newer_tag_installs_and_says_so() {
+        // The upgrade path itself, which nothing could reach before without
+        // actually downloading a release over the top of the binary.
+        let d = tempfile::tempdir().unwrap();
+        let got = auto_full(
+            &stamp(&d),
+            0,
+            || Some("v99.0.0".into()),
+            || Ok("99.0.0".into()),
+        );
+        assert_eq!(got, Some(Found::Installed("99.0.0".into())));
+    }
+
+    #[test]
+    fn an_install_that_fails_still_tells_you_there_is_one() {
+        let d = tempfile::tempdir().unwrap();
+        let got = auto_full(
+            &stamp(&d),
+            0,
+            || Some("v99.0.0".into()),
+            || Err(anyhow::anyhow!("no room on device")),
+        );
+        assert_eq!(
+            got,
+            Some(Found::Available("99.0.0".into())),
+            "a failed install must not pass as up to date"
+        );
     }
 
     #[test]
     fn a_check_is_due_when_there_is_no_record_of_one() {
         // first run on a machine must not skip the check
-        let missing = std::env::temp_dir().join("mnemosyne-no-such-stamp-xyz");
-        let _ = std::fs::remove_file(&missing);
-        assert!(check_due(24));
+        let d = tempfile::tempdir().unwrap();
+        assert!(check_due_at(&stamp(&d), 24), "no stamp means never checked");
+    }
+
+    #[test]
+    fn a_fresh_stamp_holds_the_next_check_off() {
+        let d = tempfile::tempdir().unwrap();
+        let p = stamp(&d);
+        touch_stamp_at(&p);
+        assert!(!check_due_at(&p, 24), "checked seconds ago, asked again");
+        assert!(check_due_at(&p, 0), "zero hours means every start");
+    }
+
+    #[test]
+    fn an_old_stamp_lets_the_next_check_through() {
+        let d = tempfile::tempdir().unwrap();
+        let p = stamp(&d);
+        touch_stamp_at(&p);
+        let f = std::fs::File::options().write(true).open(&p).unwrap();
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
+        f.set_times(std::fs::FileTimes::new().set_modified(long_ago))
+            .unwrap();
+        assert!(check_due_at(&p, 24), "two days old and still not due");
     }
 }
 

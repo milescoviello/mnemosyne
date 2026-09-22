@@ -40,10 +40,18 @@ pub fn meta_path() -> PathBuf {
 
 impl Meta {
     pub fn load() -> Meta {
-        match std::fs::read(meta_path()) {
+        let mut m: Meta = match std::fs::read(meta_path()) {
             Ok(b) => serde_json::from_slice(&b).unwrap_or_default(),
             Err(_) => Meta::default(),
+        };
+        // Clean on the way in, not only on the way out. This file is edited
+        // by hand and synced between machines, and everything in it is
+        // drawn to a terminal -- an escape sequence in a note is a file
+        // deciding what your screen does.
+        for e in m.sessions.values_mut() {
+            e.note = clean_note(&e.note);
         }
+        m
     }
 
     /// Write via temp file + rename, keeping a few generations behind it.
@@ -100,7 +108,7 @@ impl Meta {
 
     pub fn set_note(&mut self, id: &str, note: &str) {
         let e = self.sessions.entry(id.to_string()).or_default();
-        e.note = note.trim().to_string();
+        e.note = clean_note(note);
         self.gc(id);
     }
 
@@ -172,6 +180,13 @@ fn rotate_backups(path: &std::path::Path) {
         let _ = std::fs::rename(from, to);
     }
     let _ = std::fs::write(newest, current);
+}
+
+/// A note, with anything that would reach the terminal as an instruction
+/// taken out. `squash` drops control characters and folds whitespace; the
+/// cap stops one note pushing everything else off a rail.
+fn clean_note(note: &str) -> String {
+    crate::scan::squash(note.trim(), 500)
 }
 
 pub fn normalize_tag(t: &str) -> String {
@@ -263,6 +278,26 @@ mod tests {
         assert!(e.favorite);
         assert_eq!(e.tags, vec!["homelab"]);
         assert_eq!(e.note, "the important one");
+    }
+
+    #[test]
+    fn a_note_cannot_carry_terminal_instructions() {
+        // meta.json is hand-editable and synced between machines, and
+        // every part of it is drawn to a terminal.
+        let mut m = Meta::default();
+        m.set_note("abc", "red \x1b[31m and a \x07 bell\nand a newline");
+        let note = &m.get("abc").unwrap().note;
+        assert!(!note.contains('\u{1b}'), "escape survived: {note:?}");
+        assert!(!note.contains('\u{7}'), "bell survived: {note:?}");
+        assert!(!note.contains('\n'), "newline survived: {note:?}");
+        assert!(note.contains("red") && note.contains("bell"), "{note:?}");
+    }
+
+    #[test]
+    fn a_tag_is_reduced_to_something_safe_to_draw() {
+        assert_eq!(normalize_tag(" Eft Work "), "eft-work");
+        assert_eq!(normalize_tag("esc\x1b[31m"), "esc31m");
+        assert_eq!(normalize_tag("\x07"), "");
     }
 
     #[test]

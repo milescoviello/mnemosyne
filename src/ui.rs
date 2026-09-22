@@ -1683,7 +1683,7 @@ fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
 #[cfg(test)]
 mod render_tests {
     use super::*;
-    use crate::app::fixtures::app;
+    use crate::app::fixtures::{app, app_with};
     use crate::app::{App, HelpPage, InputMode};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -1851,6 +1851,33 @@ mod render_tests {
             "the line under the wordmark should stay empty: {:?}",
             rows[1]
         );
+    }
+
+    #[test]
+    fn a_note_or_tag_cannot_smuggle_escapes_onto_the_screen() {
+        // Titles are cleaned by the scanner, but notes and tags come from
+        // meta.json -- a file you can edit by hand and that gets synced
+        // between machines. Anything drawn from it reaches the terminal, so
+        // an escape sequence in a note would be a file deciding what your
+        // screen does.
+        let mut meta = crate::meta::Meta::default();
+        meta.set_note("aaaaaaaa-1", "danger \x1b[31m red \x07 bell");
+        meta.add_tag("aaaaaaaa-1", "ok-tag");
+        let mut a = app_with(meta, true);
+        a.show_preview = true;
+        a.rebuild();
+
+        for (w, h) in sizes() {
+            if h < 18 {
+                continue;
+            }
+            for line in render(&mut a, w, h) {
+                assert!(
+                    !line.contains('\u{1b}') && !line.contains('\u{7}'),
+                    "{w}x{h}: an escape from meta.json reached the screen: {line:?}"
+                );
+            }
+        }
     }
 
     #[test]

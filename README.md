@@ -565,6 +565,11 @@ and are never required.
 | `~/.claude/mnemosyne/meta.json` | your favourites, tags and notes |
 | `~/.claude/mnemosyne/workspace.json` | which sessions were open, for reopening after a reboot |
 
+Notes and tags out of `meta.json` are cleaned of control characters before
+anything is drawn. That file is edited by hand and synced between machines,
+and everything in it reaches a terminal — an escape sequence in a note is a
+file deciding what your screen does.
+
 Only `meta.json` cannot be regenerated, so it is written via a temp file and
 rename and kept deliberately small and readable. `workspace.json` is written
 the same way; losing it costs you one reopen offer and nothing else.
@@ -671,7 +676,7 @@ worth keeping as a fallback if the binary is ever missing:
 ## Development
 
 ```sh
-cargo test          # 208 tests, no network and no fixtures on disk
+cargo test          # 220 tests, no network and no fixtures on disk
 cargo clippy --all-targets -- -D warnings
 tools/shell-selftest.sh           # the fish and bash wrappers, 50 checks
 python3 tools/gen-wordmark.py     # regenerate the logo (needs Pillow)
