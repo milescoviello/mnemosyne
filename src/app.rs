@@ -642,6 +642,21 @@ impl App {
         self.ensure_on_item(1);
     }
 
+    /// Open every parent that has children.
+    ///
+    /// The interface expands one at a time, which is right when you are
+    /// reading it. A flat dump has no such gesture, so "reveal subagents"
+    /// there can only mean all of them.
+    pub fn expand_all(&mut self) {
+        let ids: Vec<String> = self
+            .all
+            .iter()
+            .filter(|s| !s.is_subagent && s.subagent_count > 0)
+            .map(|s| s.id.clone())
+            .collect();
+        self.expanded.extend(ids);
+    }
+
     fn push_subs(&self, rows: &mut Vec<Row>, parent_idx: usize) {
         if !self.show_subagents {
             return;
@@ -1899,6 +1914,21 @@ mod logic_tests {
             a.cursor,
             a.view.len()
         );
+    }
+
+    #[test]
+    fn a_flat_listing_can_actually_include_subagents() {
+        // --list and --json have no way to expand a parent, so revealing
+        // subagents there has to mean showing them. The flag claimed to
+        // "start with subagent transcripts revealed" and changed nothing:
+        // 348 rows with it, 348 without, while --stats counted 755.
+        let mut a = app();
+        a.show_subagents = true;
+        a.expand_all();
+        a.rebuild();
+        let subs = a.view.iter().filter(|r| matches!(r, Row::Sub(_))).count();
+        assert!(subs > 0, "revealing subagents revealed none");
+        assert_eq!(subs, a.all.iter().filter(|s| s.is_subagent).count());
     }
 
     #[test]

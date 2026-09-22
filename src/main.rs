@@ -55,7 +55,9 @@ usage: mnemosyne [options]
   --reopen         put back the sessions that were open before the machine
                    last rebooted, each in a window backed by tmux
 
-  --subagents      start with subagent transcripts revealed
+  --subagents      include subagent transcripts (in --list and --json they
+                   are listed under their parent; in the browser, revealed
+                   so → can expand one)
   --no-splash      skip the opening animation (or set MNEMOSYNE_NO_SPLASH=1)
   --no-mouse       start with mouse reporting off (toggle in-app with M)
   --write-config   write a commented config file and exit
@@ -505,6 +507,11 @@ fn main() -> Result<()> {
             restore_model,
         );
         app.show_subagents = has("--subagents");
+        if app.show_subagents {
+            // Nothing here can expand a parent, so revealing subagents has
+            // to mean showing them. Without this the flag changed nothing.
+            app.expand_all();
+        }
         app.rebuild();
         if has("--json") {
             let mut out = Vec::new();
