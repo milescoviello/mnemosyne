@@ -469,7 +469,11 @@ impl App {
         match self.date {
             DateRange::All => {}
             DateRange::Today => {
-                if now - s.mtime > 86_400 {
+                // The same rule the heading uses. A rolling 24 hours put
+                // sessions from yesterday afternoon under a "yesterday"
+                // band while the "today" filter still showed them: two
+                // things labelled today, disagreeing on screen.
+                if date_band(s.mtime) != "today" {
                     return false;
                 }
             }
@@ -1137,6 +1141,11 @@ impl App {
 
     fn start_deep(&mut self) {
         let q = self.deep.trim().to_string();
+        // Bump first, and for an empty query too. The generation is what
+        // says which answer belongs to what you asked; leaving it alone
+        // when the box is cleared means a search already in flight still
+        // counts as current, and its hits land on a screen you cleared.
+        self.deep_generation += 1;
         if q.is_empty() {
             self.deep_hits = None;
             self.deep_parent_hits.clear();
@@ -1144,7 +1153,6 @@ impl App {
             self.rebuild();
             return;
         }
-        self.deep_generation += 1;
         let generation = self.deep_generation;
         let mode = self.deep_mode;
         let tx = self.deep_tx.clone();
@@ -1417,6 +1425,10 @@ impl App {
                 self.deep.clear();
                 self.deep_hits = None;
                 self.deep_parent_hits.clear();
+                // Same reason as clearing the box: a search still running
+                // would otherwise count as current and put its hits back.
+                self.deep_generation += 1;
+                self.deep_busy = false;
                 self.tag_filter = None;
                 self.fav_only = false;
                 self.live_only = false;
@@ -1917,6 +1929,167 @@ mod logic_tests {
     }
 
     #[test]
+    fn the_filter_matches_every_field_it_claims_to() {
+        // "/ narrows by title, folder, branch, tag or id" -- each of those
+        // is a separate haystack entry, and dropping one would go unnoticed
+        // because the others still work.
+        let mut a = app();
+        a.all[0].git_branch = "feature/oled-panel".into();
+        a.all[0].last_prompt = "the distinctive trailing thing".into();
+        a.meta.add_tag("aaaaaaaa-1", "hardware");
+        a.apply_overlay();
+
+        let id = a.all[0].id.clone();
+        for (what, needle) in [
+            ("title", "today's work"),
+            ("folder", "/home/u"),
+            ("branch", "oled-panel"),
+            ("tag", "hardware"),
+            ("last prompt", "distinctive trailing"),
+            ("id", id.as_str()),
+            ("title, differently cased", "TODAY'S WORK"),
+        ] {
+            a.fuzzy = needle.to_string();
+            a.rebuild();
+            let found = a.view.iter().any(|r| match r {
+                Row::Item(i) => a.all[*i].id == id,
+                _ => false,
+            });
+            assert!(found, "filtering by {what} ({needle:?}) did not find it");
+        }
+
+        a.fuzzy = "zzzz-definitely-not-there".into();
+        a.rebuild();
+        assert_eq!(
+            a.item_count(),
+            0,
+            "a filter matching nothing matched something"
+        );
+    }
+
+    #[test]
+    fn a_cleared_search_stays_cleared_when_its_answer_turns_up() {
+        // The search runs on a thread and is matched to the query by a
+        // generation number. Clearing did not bump it, so a query already
+        // in flight still counted as current: clear the box and the hits
+        // reappear a moment later, from a search you abandoned.
+        let mut a = app();
+        a.deep = "zpool".into();
+        a.start_deep();
+        let stale = a.deep_generation;
+
+        a.deep.clear();
+        a.start_deep();
+        assert!(a.deep_hits.is_none(), "clearing should drop the hits");
+
+        // the abandoned search finishes now
+        let mut hits = HashMap::new();
+        hits.insert("/p/aaaaaaaa-1.jsonl".to_string(), "…zpool…".to_string());
+        a.deep_tx
+            .send(DeepResult {
+                generation: stale,
+                hits,
+            })
+            .unwrap();
+        a.absorb_deep();
+
+        assert!(
+            a.deep_hits.is_none(),
+            "an abandoned search put its results back on screen"
+        );
+    }
+
+    #[test]
+    fn clearing_the_filters_also_abandons_a_running_search() {
+        let mut a = app();
+        a.deep = "zpool".into();
+        a.start_deep();
+        let stale = a.deep_generation;
+        a.do_action(Action::Clear);
+
+        let mut hits = HashMap::new();
+        hits.insert("/p/aaaaaaaa-1.jsonl".to_string(), "…".to_string());
+        a.deep_tx
+            .send(DeepResult {
+                generation: stale,
+                hits,
+            })
+            .unwrap();
+        a.absorb_deep();
+        assert!(a.deep_hits.is_none(), "c cleared it and it came back");
+        assert!(!a.deep_busy);
+    }
+
+    #[test]
+    fn a_later_search_wins_over_an_earlier_one() {
+        let mut a = app();
+        a.deep = "first".into();
+        a.start_deep();
+        let first = a.deep_generation;
+        a.deep = "second".into();
+        a.start_deep();
+
+        let mut hits = HashMap::new();
+        hits.insert("/p/aaaaaaaa-1.jsonl".to_string(), "stale".to_string());
+        a.deep_tx
+            .send(DeepResult {
+                generation: first,
+                hits,
+            })
+            .unwrap();
+        a.absorb_deep();
+        assert!(
+            a.deep_hits.is_none() || a.deep_hits.as_ref().unwrap().is_empty(),
+            "results from the previous query were shown"
+        );
+    }
+
+    #[test]
+    fn every_sort_actually_sorts_by_what_it_says() {
+        // A comparator pointing at the wrong field, or the wrong way round,
+        // looks plausible on screen: the list is still in *an* order.
+        let mut a = app();
+        a.show_subagents = false;
+        for _ in 0..8 {
+            let sort = a.sort;
+            a.rebuild();
+            let seen: Vec<&Session> = a
+                .view
+                .iter()
+                .filter_map(|r| match r {
+                    Row::Item(i) => Some(&a.all[*i]),
+                    _ => None,
+                })
+                .collect();
+
+            // favourites float to the top, so check the order within each
+            // group rather than across the boundary
+            for group in seen.chunk_by(|x, y| x.favorite == y.favorite) {
+                for pair in group.windows(2) {
+                    let (x, y) = (pair[0], pair[1]);
+                    let ok = match sort {
+                        Sort::Recency => x.mtime >= y.mtime,
+                        Sort::Size => x.size >= y.size,
+                        Sort::Entries => x.entries >= y.entries,
+                        Sort::Duration => x.duration_secs() >= y.duration_secs(),
+                        Sort::Title => x.title().to_lowercase() <= y.title().to_lowercase(),
+                        Sort::Folder => x.cwd <= y.cwd,
+                        Sort::Tokens => x.total_tokens() >= y.total_tokens(),
+                    };
+                    assert!(
+                        ok,
+                        "{:?}: {:?} came before {:?}",
+                        sort,
+                        x.title(),
+                        y.title()
+                    );
+                }
+            }
+            a.do_action(Action::CycleSort);
+        }
+    }
+
+    #[test]
     fn a_flat_listing_can_actually_include_subagents() {
         // --list and --json have no way to expand a parent, so revealing
         // subagents there has to mean showing them. The flag claimed to
@@ -2075,6 +2248,43 @@ mod logic_tests {
         a.do_action(Action::FavOnly);
         assert_eq!(a.item_count(), 1);
         assert!(a.current().unwrap().favorite);
+    }
+
+    #[test]
+    fn the_today_filter_and_the_today_band_mean_the_same_day() {
+        // The band is calendar-based -- "today" is this date, in local time
+        // -- while the filter was a rolling 24 hours. At nine in the
+        // morning, a session from yesterday afternoon sat under a
+        // "yesterday" heading and was still shown by the "today" filter.
+        use chrono::{Local, TimeZone};
+        let midnight = Local::now()
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .and_then(|d| Local.from_local_datetime(&d).single())
+            .expect("local midnight")
+            .timestamp();
+
+        // just before and just after local midnight, plus a rolling-24h
+        // point that is calendar-yesterday
+        for (label, t) in [
+            ("a minute into today", midnight + 60),
+            ("a minute before midnight", midnight - 60),
+            ("late yesterday", midnight - 3600),
+            ("earlier today", Local::now().timestamp() - 5),
+        ] {
+            let mut a = app();
+            a.all[0].mtime = t;
+            a.date = DateRange::Today;
+            a.rebuild();
+            let shown = a.view.iter().any(|r| matches!(r, Row::Item(0)));
+            let banded_today = date_band(t) == "today";
+            assert_eq!(
+                shown,
+                banded_today,
+                "{label}: the filter says {shown} and the band says {:?}",
+                date_band(t)
+            );
+        }
     }
 
     #[test]
