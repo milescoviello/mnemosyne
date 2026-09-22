@@ -150,61 +150,79 @@ mn() {
         esac
     done
 
-    local plan
-    plan="$(mnemosyne "${mine[@]}")" || return $?
-    [ -z "$plan" ] && return 0
-
-    local mode cwd sid mdl prm ttl tmx line
-    __mn_split "$(printf '%s\n' "$plan" | head -1)" mode cwd sid mdl prm ttl tmx
-
-    if [ "$mode" = "here" ]; then
-        local extra=(); mapfile -t extra < <(__mn_perms "$prm" "$no_bypass" "${fwd[@]}")
-        if [ -d "$cwd" ]; then cd "$cwd" || return 1
-        else echo "folder is gone: $cwd — resuming from $PWD"; fi
-        local margs=(); [ -n "$mdl" ] && margs=(--model "$mdl")
-        echo "▶ $ttl"
-        claude --resume "$sid" "${margs[@]}" "${extra[@]}" "${fwd[@]}"
-        return
-    fi
-
-    if [ "$mode" = "tmux" ]; then
-        # Create every requested session detached first, then attach once —
-        # attaching inside the loop would block on the first one.
-        local target="" nm
-        while IFS= read -r line; do
-            __mn_split "$line" mode cwd sid mdl prm ttl tmx
-            local extra=(); mapfile -t extra < <(__mn_perms "$prm" "$no_bypass" "${fwd[@]}")
-            nm="$(__mn_tmux_ensure "$cwd" "$sid" "$mdl" "$ttl" "$tmx" -- "${extra[@]}" "${fwd[@]}")" || continue
-            [ -z "$target" ] && target="$nm"
-        done < <(printf '%s\n' "$plan")
-        [ -n "$target" ] && __mn_tmux_attach "$target"
-        return
-    fi
-
-    # window, or wintmux: a window each, with tmux underneath so that closing
-    # the window leaves the session running instead of killing it.
-    local term inner name
-    while IFS= read -r line; do
+    # Read the plan as it is produced, not after the browser exits. A
+    # session opened in a window of its own does not need the picker to close
+    # first, so mnemosyne hands those over while it is still running and this
+    # loop acts on each as it arrives. Only `here` and `tmux` need this
+    # terminal, and those arrive last, on the way out.
+    #
+    # Process substitution, not a pipe: the loop has to run in this shell or
+    # the `cd` below would happen in a subshell and be lost.
+    # Progress is collected, not printed: the browser is still on screen
+    # while these run, and writing over it is what made it look like mn had
+    # half-exited. It all comes out once the screen is ours again.
+    local finally="" tmux_first="" notes="" line mode cwd sid mdl prm ttl tmx nm term inner name
+    # __mn_tmux_ensure prints the session name on stdout and its progress on
+    # stderr, so the two have to stay apart: the name is a value, the
+    # progress is for you to read afterwards.
+    local errf; errf="$(mktemp)" || return 1
+    # Read on fd 3, not stdin, and give every command in the body /dev/null
+    # for input. Otherwise the loop's stdin is the pipe and anything that
+    # reads stdin -- tmux does -- swallows the next plan line, so the second
+    # window never opens. It would take keystrokes from the browser too,
+    # which is still running and reading the terminal.
+    while IFS= read -r line <&3; do
+        [ -z "$line" ] && continue
         __mn_split "$line" mode cwd sid mdl prm ttl tmx
-        [ -d "$cwd" ] || { echo "  ✗ folder gone, skipping: $cwd"; continue; }
         local extra=(); mapfile -t extra < <(__mn_perms "$prm" "$no_bypass" "${fwd[@]}")
         local margs=(); [ -n "$mdl" ] && margs=(--model "$mdl")
 
-        if [ "$mode" = "wintmux" ] && command -v tmux >/dev/null 2>&1; then
-            name="$(__mn_tmux_ensure "$cwd" "$sid" "$mdl" "$ttl" "$tmx" -- "${extra[@]}" "${fwd[@]}")" || continue
-            if term="$(__mn_term_open "$cwd" "exec tmux attach-session -t =$name")"; then
-                echo "  ▶ $ttl  ($term → tmux $name)"
-            else
-                echo "  ▶ $ttl  (tmux $name — no terminal to show it in; ctrl+t attaches)"
-            fi
-            continue
-        fi
+        { case "$mode" in
+            here)
+                finally="$line"
+                ;;
+            tmux)
+                nm="$(__mn_tmux_ensure "$cwd" "$sid" "$mdl" "$ttl" "$tmx" -- "${extra[@]}" "${fwd[@]}" 2>>"$errf")" \
+                    && [ -z "$tmux_first" ] && tmux_first="$nm"
+                ;;
+            wintmux)
+                [ -d "$cwd" ] || { notes+="  ✗ folder gone, skipping: $cwd"$'\n'; continue; }
+                if command -v tmux >/dev/null 2>&1; then
+                    name="$(__mn_tmux_ensure "$cwd" "$sid" "$mdl" "$ttl" "$tmx" -- "${extra[@]}" "${fwd[@]}" 2>>"$errf")" || continue
+                    if term="$(__mn_term_open "$cwd" "exec tmux attach-session -t =$name")"; then
+                        notes+="  ▶ $ttl  ($term → tmux $name)"$'\n'
+                    else
+                        notes+="  ▶ $ttl  (tmux $name — no terminal to show it in; ctrl+t attaches)"$'\n'
+                    fi
+                else
+                    inner="cd $(printf %q "$cwd"); exec claude --resume $sid ${margs[*]} ${extra[*]} ${fwd[*]}"
+                    term="$(__mn_term_open "$cwd" "$inner")" && notes+="  ▶ $ttl  ($term)"$'\n'
+                fi
+                ;;
+            *)
+                [ -d "$cwd" ] || { notes+="  ✗ folder gone, skipping: $cwd"$'\n'; continue; }
+                inner="cd $(printf %q "$cwd"); exec claude --resume $sid ${margs[*]} ${extra[*]} ${fwd[*]}"
+                if term="$(__mn_term_open "$cwd" "$inner")"; then
+                    notes+="  ▶ $ttl  ($term)"$'\n'
+                else
+                    notes+="  ✗ no terminal emulator found (set \$MN_TERMINAL)"$'\n'
+                fi
+                ;;
+        esac; } </dev/null
+    done 3< <(mnemosyne "${mine[@]}")
 
-        inner="cd $(printf %q "$cwd"); exec claude --resume $sid ${margs[*]} ${extra[*]} ${fwd[*]}"
-        if term="$(__mn_term_open "$cwd" "$inner")"; then
-            echo "  ▶ $ttl  ($term)"
-        else
-            echo "  ✗ no terminal emulator found (set \$MN_TERMINAL)"
-        fi
-    done < <(printf '%s\n' "$plan")
+    notes="$(cat "$errf")"$'\n'"$notes"; rm -f "$errf"
+    printf '%s' "$notes" | grep -v '^$'
+    if [ -n "$tmux_first" ]; then __mn_tmux_attach "$tmux_first"; return 0; fi
+    [ -z "$finally" ] && return 0
+
+    # Landing in this terminal: the cd has to happen here, which is the whole
+    # reason this is a function.
+    __mn_split "$finally" mode cwd sid mdl prm ttl tmx
+    local extra=(); mapfile -t extra < <(__mn_perms "$prm" "$no_bypass" "${fwd[@]}")
+    local margs=(); [ -n "$mdl" ] && margs=(--model "$mdl")
+    if [ -d "$cwd" ]; then cd "$cwd" || return 1
+    else echo "folder is gone: $cwd — resuming from $PWD"; fi
+    echo "▶ $ttl"
+    claude --resume "$sid" "${margs[@]}" "${extra[@]}" "${fwd[@]}"
 }

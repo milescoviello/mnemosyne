@@ -267,6 +267,10 @@ pub struct App {
     /// A rescan is running behind the list, which is showing cached rows in
     /// the meantime.
     pub indexing: bool,
+    /// Sessions to open in their own window, handed to the shell as they are
+    /// chosen. Opening a window elsewhere is no reason to close the picker,
+    /// so these are streamed out and the browser stays where it is.
+    pub to_open: Vec<(Target, Vec<ResumeTarget>)>,
     /// Whether changes are written to disk.
     ///
     /// False in tests, and for one reason: without it `cargo test` overwrote
@@ -341,6 +345,7 @@ impl App {
             restore_model,
             want_refresh: false,
             indexing: false,
+            to_open: Vec::new(),
             persist: true,
             pending_tmux: None,
             tmux_name: String::new(),
@@ -931,11 +936,15 @@ impl App {
                 title: e.title.clone(),
             })
             .collect();
-        self.outcome = Some(Outcome::Resume {
-            targets,
-            target: Target::WindowTmux,
-        });
-        self.quit = true;
+        // Same as any other window: hand them over and stay open, so the
+        // list is still there when they appear.
+        self.to_open.push((Target::WindowTmux, targets));
+        self.reopen.clear();
+        if self.persist {
+            crate::workspace::clear_previous();
+        }
+        self.status = "reopening them in their own windows".into();
+        self.rebuild();
     }
 
     pub fn targets(&self) -> Vec<ResumeTarget> {
@@ -1039,6 +1048,22 @@ impl App {
                     return;
                 }
             }
+        }
+        // A window of its own does not need this one: hand it to the shell
+        // and carry on browsing. Only landing *here*, or attaching in this
+        // terminal, requires the picker to get out of the way.
+        if matches!(target, Target::Window | Target::WindowTmux) {
+            let n = targets.len();
+            let what = if n == 1 {
+                targets[0].title.clone()
+            } else {
+                format!("{n} sessions")
+            };
+            self.to_open.push((target, targets));
+            self.selected.clear();
+            self.status = format!("opening {what} in a new window");
+            self.rebuild();
+            return;
         }
         self.outcome = Some(Outcome::Resume { targets, target });
         self.quit = true;
@@ -2110,9 +2135,7 @@ mod logic_tests {
         let mut a = app();
         offer(&mut a, &["aaaaaaaa-1", "bbbbbbbb-2"]);
         press(&mut a, 'r');
-        let Some(Outcome::Resume { targets, target }) = &a.outcome else {
-            panic!("the offer did nothing");
-        };
+        let (target, targets) = a.to_open.first().expect("the offer did nothing");
         assert_eq!(targets.len(), 2, "only part of the set came back");
         assert_eq!(
             *target,
@@ -2122,7 +2145,7 @@ mod logic_tests {
         // the recorded permission mode has to survive, or a restored session
         // comes back asking about every edit
         assert_eq!(targets[0].perms, "bypassPermissions");
-        assert!(a.quit);
+        assert!(!a.quit, "they open in their own windows; the picker stays");
     }
 
     #[test]
@@ -2145,9 +2168,7 @@ mod logic_tests {
         );
 
         press(&mut a, 'r');
-        let Some(Outcome::Resume { targets, .. }) = &a.outcome else {
-            panic!("nothing reopened");
-        };
+        let (_, targets) = a.to_open.first().expect("nothing reopened");
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].id, "bbbbbbbb-2");
     }
@@ -2184,7 +2205,40 @@ mod logic_tests {
         );
         // and the offer is gone, so r does nothing again
         press(&mut a, 'r');
-        assert!(a.outcome.is_none());
+        assert!(a.outcome.is_none() && a.to_open.is_empty());
+    }
+
+    #[test]
+    fn opening_a_window_leaves_the_picker_open() {
+        // A window of its own does not need this one. Closing the browser
+        // every time meant you could not open a second session without
+        // starting over, and it looked like the tool had crashed.
+        let mut a = app();
+        a.do_action(Action::NewWindow);
+        assert!(!a.quit, "the picker closed to open a window elsewhere");
+        assert!(
+            a.outcome.is_none(),
+            "it should be streamed, not held to exit"
+        );
+        assert_eq!(a.to_open.len(), 1);
+        assert_eq!(a.to_open[0].0, Target::Window);
+
+        // and again, so several can be opened in one sitting
+        a.move_by(1);
+        a.do_action(Action::NewWindow);
+        assert!(!a.quit);
+        assert_eq!(a.to_open.len(), 2, "the second one did not queue");
+    }
+
+    #[test]
+    fn landing_here_still_closes_it() {
+        // Resuming in this terminal does need the picker gone: the shell has
+        // to cd and hand the terminal over.
+        let mut a = app();
+        a.do_action(Action::Resume);
+        assert!(a.quit);
+        assert!(a.outcome.is_some());
+        assert!(a.to_open.is_empty());
     }
 
     #[test]
@@ -2199,10 +2253,12 @@ mod logic_tests {
         a.on_key(crossterm::event::KeyEvent::from(
             crossterm::event::KeyCode::Enter,
         ));
-        let Some(Outcome::Resume { target, .. }) = &a.outcome else {
-            panic!("no outcome");
-        };
+        let (target, _) = a.to_open.first().expect("nothing was opened");
         assert_eq!(*target, Target::WindowTmux);
+        assert!(
+            !a.quit,
+            "a window of its own is no reason to close the picker"
+        );
         assert_eq!(
             a.tmux_name, "eft-work",
             "the name was not made safe for tmux"
@@ -2280,7 +2336,10 @@ mod logic_tests {
         let mut a = app();
         assert!(a.reopen.is_empty());
         press(&mut a, 'r');
-        assert!(a.outcome.is_none(), "a stray keystroke opened windows");
+        assert!(
+            a.outcome.is_none() && a.to_open.is_empty(),
+            "a stray keystroke opened windows"
+        );
         assert!(!a.quit);
     }
 
@@ -2290,7 +2349,10 @@ mod logic_tests {
         offer(&mut a, &["aaaaaaaa-1"]);
         press(&mut a, 'x');
         assert!(a.reopen.is_empty(), "the offer stayed up");
-        assert!(a.outcome.is_none(), "dismissing must not open anything");
+        assert!(
+            a.outcome.is_none() && a.to_open.is_empty(),
+            "dismissing must not open anything"
+        );
         assert!(
             a.status.contains("--reopen"),
             "dismissing should say how to change your mind: {}",

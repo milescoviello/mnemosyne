@@ -230,6 +230,27 @@ would make every session match any word in yours; they are stripped. And
 base64 image payloads spell short words by chance, so the exhaustive scan
 rejects matches inside them.
 
+## Opening several at once
+
+`enter` hands this terminal over, so the browser has to close for it. A
+window of its own does not: `ctrl+n`, `W` and `ctrl+shift+t` open the
+session elsewhere and **leave the picker where it is**, so you can open a
+second and a third without starting over.
+
+That works because the plan is streamed. `mnemosyne` prints each choice as
+you make it and keeps running; the shell reads the lines as they arrive
+rather than waiting for the process to exit, and only `here` and `tmux`
+arrive on the way out. Two details this depends on:
+
+- The shell's progress lines are held back until the browser has finished
+  with the screen. Printing them immediately drew over the interface, which
+  looked like the tool had half-crashed.
+- Inside `while read`, the loop's stdin *is* the pipe, so any command in the
+  body that reads stdin eats the next plan line — `tmux` does exactly that,
+  and the second window never opened. bash reads on fd 3; both shells give
+  the loop body `/dev/null` for input, which also stops it taking keystrokes
+  from the browser that is still running.
+
 ## Starting up
 
 The list goes up from the cache, and any rescan runs behind it. That is the
@@ -650,9 +671,9 @@ worth keeping as a fallback if the binary is ever missing:
 ## Development
 
 ```sh
-cargo test          # 206 tests, no network and no fixtures on disk
+cargo test          # 208 tests, no network and no fixtures on disk
 cargo clippy --all-targets -- -D warnings
-tools/shell-selftest.sh           # the fish and bash wrappers, 32 checks
+tools/shell-selftest.sh           # the fish and bash wrappers, 50 checks
 python3 tools/gen-wordmark.py     # regenerate the logo (needs Pillow)
 python3 tools/demo-corpus.py /tmp/demo-home        # invented sessions
 HOME=/tmp/demo-home python3 tools/screenshot.py docs/list.png 150 24

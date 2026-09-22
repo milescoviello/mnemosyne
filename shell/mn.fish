@@ -29,55 +29,68 @@ function mn --description 'Browse, search, tag and resume Claude Code sessions (
         end
     end
 
-    set -l plan (mnemosyne $mine)
-    or return $status
-    test -z "$plan"; and return 0
-
-
-    set -l first (string split \t -- $plan[1])
-    if test "$first[1]" = here
-        set -l cwd $first[2]
-        set -l sid $first[3]
-        set -l mdl $first[4]
-        set -l prm $first[5]
-        set -l ttl $first[6]
-        set -l extra (__mn_perms "$prm" $no_bypass $fwd)
-        if test -d "$cwd"
-            cd "$cwd"
-        else
-            echo "folder is gone: $cwd — resuming from "(pwd)
-        end
-        set -l margs
-        test -n "$mdl"; and set margs --model $mdl
-        echo "▶ $ttl"
-        claude --resume $sid $margs $extra $fwd
-    else if test "$first[1]" = wintmux
-        # A window each, with tmux underneath: closing the window leaves the
-        # session running instead of killing it. That is what makes reopening
-        # after a reboot safe to do in bulk.
-        for line in $plan
-            set -l p (string split \t -- $line)
+    # Read the plan as it is produced, not after the browser exits.
+    # A session opened in a window of its own does not need the picker to
+    # close first, so mnemosyne hands those over while it is still running
+    # and this loop acts on each one as it arrives. Only `here` and `tmux`
+    # need this terminal, and those arrive last, on the way out.
+    set -l finally ""
+    set -l tmux_first ""
+    # Progress is collected, not printed. The browser is still on screen
+    # while these run, and writing over it is what made it look like mn had
+    # half-exited. It all comes out once the screen is ours again.
+    set -l notes
+    mnemosyne $mine | while read -l line
+        test -z "$line"; and continue
+        set -l p (string split \t -- $line)
+        # Everything in here gets /dev/null for input. Inside a `while read`
+        # the loop's stdin *is* the pipe, so any command that reads stdin
+        # swallows the next plan line -- tmux does exactly that, and the
+        # second window never opened. It would take keystrokes from the
+        # browser too, which is still running and reading the terminal.
+        begin
             set -l extra (__mn_perms "$p[5]" $no_bypass $fwd)
-            __mn_wintmux "$p[2]" "$p[3]" "$p[4]" "$p[6]" "$p[7]" -- $extra $fwd
-        end
-    else if test "$first[1]" = tmux
-        # Create every requested session detached first, then attach once --
-        # attaching inside the loop would block on the first one.
-        set -l target
-        for line in $plan
-            set -l p (string split \t -- $line)
-            set -l extra (__mn_perms "$p[5]" $no_bypass $fwd)
-            set -l nm (__mn_tmux_ensure "$p[2]" "$p[3]" "$p[4]" "$p[6]" "$p[7]" -- $extra $fwd)
-            test -z "$target"; and set target $nm
-        end
-        test -n "$target"; and __mn_tmux_attach $target
-    else
-        for line in $plan
-            set -l p (string split \t -- $line)
-            set -l extra (__mn_perms "$p[5]" $no_bypass $fwd)
-            __mn_window "$p[2]" "$p[3]" "$p[4]" "$p[6]" -- $extra $fwd
-        end
+            switch $p[1]
+                case here
+                    set finally $line
+                case tmux
+                    # Create each detached as it arrives; attach once, after.
+                    set -l nm (__mn_tmux_ensure "$p[2]" "$p[3]" "$p[4]" "$p[6]" "$p[7]" -- $extra $fwd)
+                    test -z "$tmux_first"; and set tmux_first $nm
+                case wintmux
+                    set -a notes (__mn_wintmux "$p[2]" "$p[3]" "$p[4]" "$p[6]" "$p[7]" -- $extra $fwd 2>&1)
+                case '*'
+                    set -a notes (__mn_window "$p[2]" "$p[3]" "$p[4]" "$p[6]" -- $extra $fwd 2>&1)
+            end
+        end </dev/null
     end
+
+    for n in $notes
+        echo $n
+    end
+    if test -n "$tmux_first"
+        __mn_tmux_attach $tmux_first
+        return 0
+    end
+    test -z "$finally"; and return 0
+
+    # Landing in this terminal: the cd has to happen here, which is the whole
+    # reason this is a function.
+    set -l p (string split \t -- $finally)
+    set -l cwd $p[2]
+    set -l sid $p[3]
+    set -l mdl $p[4]
+    set -l ttl $p[6]
+    set -l extra (__mn_perms "$p[5]" $no_bypass $fwd)
+    if test -d "$cwd"
+        cd "$cwd"
+    else
+        echo "folder is gone: $cwd — resuming from "(pwd)
+    end
+    set -l margs
+    test -n "$mdl"; and set margs --model $mdl
+    echo "▶ $ttl"
+    claude --resume $sid $margs $extra $fwd
 end
 
 function __mn_tmux_ensure --description 'Make sure a tmux session exists for this chat; echo its name'

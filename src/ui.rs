@@ -1949,9 +1949,7 @@ mod render_tests {
             row: y,
             modifiers: crossterm::event::KeyModifiers::NONE,
         });
-        let Some(crate::app::Outcome::Resume { targets, .. }) = &a.outcome else {
-            panic!("clicking reopen did nothing");
-        };
+        let (_, targets) = a.to_open.first().expect("clicking reopen did nothing");
         assert_eq!(targets.len(), 2);
     }
 
@@ -1971,7 +1969,10 @@ mod render_tests {
             modifiers: crossterm::event::KeyModifiers::NONE,
         });
         assert!(a.reopen.is_empty(), "the offer stayed up");
-        assert!(a.outcome.is_none(), "declining opened something");
+        assert!(
+            a.outcome.is_none() && a.to_open.is_empty(),
+            "declining opened something"
+        );
     }
 
     #[test]
@@ -1987,7 +1988,10 @@ mod render_tests {
             row: y,
             modifiers: crossterm::event::KeyModifiers::NONE,
         });
-        assert!(a.outcome.is_none(), "the margin acted as a button");
+        assert!(
+            a.outcome.is_none() && a.to_open.is_empty(),
+            "the margin acted as a button"
+        );
         assert_eq!(a.reopen.len(), 2);
     }
 

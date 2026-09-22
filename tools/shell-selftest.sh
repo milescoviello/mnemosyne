@@ -105,6 +105,9 @@ WINTMUX_PLAN="${WINTMUX_PLAN}wintmux\t$tmp/no-such-folder\t22222222-3333-4444-55
 
 WINDOW_PLAN="window\t$tmp/work-a\t026bcdb5-8d88-4ad7-9f23-58649bf4f353\t\tdefault\tno model recorded\n"
 
+# landing in this terminal: the one case that needs the shell to cd
+HERE_PLAN="here\t$tmp/work-b\t33333333-4444-5555-6666-777777777777\tclaude-opus-5\tplan\tright here\n"
+
 # a seventh field: the tmux session name chosen at the prompt
 NAMED_PLAN="wintmux\t$tmp/work-a\t026bcdb5-8d88-4ad7-9f23-58649bf4f353\t\tdefault\tnamed one\tmy-own-name\n"
 
@@ -201,6 +204,17 @@ run_shell() {
     out=$("$runner" -c "$source_line; mn --ask" 2>&1)
     seen=$(cat "$log")
     hasnt "$shell_name: --ask refuses to skip permissions" "--dangerously-skip-permissions" "$seen"
+
+    # --- landing in this terminal
+    write_plan "$HERE_PLAN"
+    : > "$log"
+    out=$("$runner" -c "$source_line; mn; pwd" 2>&1)
+    seen=$(cat "$log")
+    has "$shell_name: resuming here runs claude" \
+        "claude: --resume 33333333-4444-5555-6666-777777777777 --model claude-opus-5" "$seen"
+    has "$shell_name: and maps the recorded permission mode" "--permission-mode plan" "$seen"
+    has "$shell_name: and the shell cd'd there" "$tmp/work-b" "$out"
+    has "$shell_name: and says which session" "right here" "$out"
 
     # --- our flags are ours, claude's are claude's
     : > "$log"

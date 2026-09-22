@@ -751,6 +751,29 @@ fn run<B: ratatui::backend::Backend>(
 
         app.absorb_deep();
 
+        // Sessions chosen for a window of their own go to the shell straight
+        // away, while the browser stays up. Flushed line by line, because
+        // the shell is reading them as they arrive rather than waiting for
+        // this process to exit.
+        if !app.to_open.is_empty() {
+            let mut out = std::io::stdout().lock();
+            for (target, targets) in std::mem::take(&mut app.to_open) {
+                for t in &targets {
+                    let _ = plan_line(
+                        &mut out,
+                        target.tag(),
+                        &t.cwd,
+                        &t.id,
+                        &t.model,
+                        &t.perms,
+                        &t.title,
+                        &app.tmux_name,
+                    );
+                }
+            }
+            let _ = out.flush();
+        }
+
         // The rescan started behind the list; fold it in the moment it
         // lands, rather than making anyone wait for it up front.
         if indexing.as_ref().is_some_and(|h| h.is_finished()) {
