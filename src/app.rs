@@ -1252,11 +1252,22 @@ impl App {
             if self.tag_filter.as_deref() == Some(crate::meta::normalize_tag(from).as_str()) {
                 self.tag_filter = Some(crate::meta::normalize_tag(to));
             }
-            self.status = format!(
-                "renamed #{} to #{} on {n} session(s)",
-                from.trim(),
-                to.trim()
+            // Say what happened. "renamed #keeper to # on 0 session(s)" is
+            // three quarters of a success report for something that did not
+            // occur.
+            let (f, t) = (
+                crate::meta::normalize_tag(from),
+                crate::meta::normalize_tag(to),
             );
+            self.status = if f.is_empty() || t.is_empty() {
+                "a rename wants both halves: old>new".to_string()
+            } else if f == t {
+                format!("#{f} is already its own name")
+            } else if n == 0 {
+                format!("nothing is tagged #{f}")
+            } else {
+                format!("renamed #{f} to #{t} on {n} session(s)")
+            };
             self.input.clear();
             self.input_mode = InputMode::Normal;
             self.apply_overlay();
@@ -1271,24 +1282,53 @@ impl App {
             return;
         }
         let many = targets.len();
-        if let Some(t) = raw.strip_prefix('-') {
+        // One list, split the same way whichever direction it goes. Adding
+        // took "eft rig" as two tags while removing took it as one called
+        // "eft-rig", so `-eft rig` asked for something nothing had -- and
+        // said it had removed them.
+        let names: Vec<String> = raw
+            .trim_start_matches('-')
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .map(crate::meta::normalize_tag)
+            .filter(|t| !t.is_empty())
+            .collect();
+
+        if raw.starts_with('-') {
+            let mut gone = 0usize;
             for id in &targets {
-                self.meta.remove_tag(id, t);
-            }
-            self.status = format!("removed #{t} from {many} session(s)");
-        } else if !raw.is_empty() {
-            for id in &targets {
-                for t in raw.split(|c: char| c == ',' || c.is_whitespace()) {
-                    if !t.is_empty() {
-                        self.meta.add_tag(id, t);
+                for t in &names {
+                    if self
+                        .meta
+                        .get(id)
+                        .is_some_and(|e| e.tags.iter().any(|x| x == t))
+                    {
+                        self.meta.remove_tag(id, t);
+                        gone += 1;
                     }
                 }
             }
-            self.status = if many == 1 {
-                format!("tagged {raw}")
-            } else {
-                format!("tagged {many} sessions {raw}")
+            // Say what happened, not what was asked for.
+            self.status = match gone {
+                0 => format!(
+                    "nothing to remove: no session here has #{}",
+                    names.join(" #")
+                ),
+                n => format!("removed #{} ({n} in all)", names.join(" #")),
             };
+        } else if !names.is_empty() {
+            for id in &targets {
+                for t in &names {
+                    self.meta.add_tag(id, t);
+                }
+            }
+            let what = names.join(" #");
+            self.status = if many == 1 {
+                format!("tagged #{what}")
+            } else {
+                format!("tagged {many} sessions #{what}")
+            };
+        } else if !raw.is_empty() {
+            self.status = format!("{raw:?} leaves nothing a tag can be made of");
         }
         if self.persist {
             let _ = self.meta.save();
@@ -2327,6 +2367,113 @@ mod logic_tests {
         a.expanded.clear();
         a.rebuild();
         assert_eq!(subs(&a), 0);
+    }
+
+    fn tags_of(a: &App, id: &str) -> Vec<String> {
+        a.meta.get(id).map(|e| e.tags.clone()).unwrap_or_default()
+    }
+
+    fn type_tag(a: &mut App, text: &str) {
+        a.input = text.into();
+        a.commit_tag_add();
+    }
+
+    #[test]
+    fn removing_several_tags_works_the_way_adding_them_does() {
+        // "eft rig" adds two tags. "-eft rig" looked like it removed the
+        // same two and instead asked for one tag called "eft-rig", which
+        // nothing has -- while the status line said it had removed them.
+        let mut a = app();
+        let id = a.all[0].id.clone();
+        a.cursor = a
+            .view
+            .iter()
+            .position(|r| matches!(r, Row::Item(i) if a.all[*i].id == id))
+            .unwrap();
+
+        type_tag(&mut a, "eft rig, spare");
+        assert_eq!(tags_of(&a, &id), vec!["eft", "rig", "spare"]);
+
+        type_tag(&mut a, "-eft rig");
+        assert_eq!(
+            tags_of(&a, &id),
+            vec!["spare"],
+            "removing two at once left them behind"
+        );
+    }
+
+    #[test]
+    fn renaming_onto_an_existing_tag_merges_rather_than_duplicating() {
+        let mut a = app();
+        let id = a.all[0].id.clone();
+        a.cursor = a
+            .view
+            .iter()
+            .position(|r| matches!(r, Row::Item(i) if a.all[*i].id == id))
+            .unwrap();
+        type_tag(&mut a, "draft final");
+        type_tag(&mut a, "draft>final");
+        assert_eq!(
+            tags_of(&a, &id),
+            vec!["final"],
+            "a tag ended up on the session twice"
+        );
+    }
+
+    #[test]
+    fn a_rename_that_cannot_happen_says_so() {
+        let mut a = app();
+        let id = a.all[0].id.clone();
+        a.cursor = a
+            .view
+            .iter()
+            .position(|r| matches!(r, Row::Item(i) if a.all[*i].id == id))
+            .unwrap();
+        type_tag(&mut a, "keeper");
+
+        // no new name at all
+        type_tag(&mut a, "keeper>");
+        assert_eq!(tags_of(&a, &id), vec!["keeper"], "the tag was lost");
+        assert!(
+            !a.status.contains("renamed #keeper to #"),
+            "claimed a rename with nothing to rename to: {:?}",
+            a.status
+        );
+
+        // a name nothing carries
+        type_tag(&mut a, "nosuchtag>other");
+        assert!(
+            !a.status.contains("renamed #nosuchtag to #other on 0"),
+            "reads as success: {:?}",
+            a.status
+        );
+    }
+
+    #[test]
+    fn a_tag_operation_that_changed_nothing_does_not_claim_otherwise() {
+        let mut a = app();
+        let id = a.all[0].id.clone();
+        a.cursor = a
+            .view
+            .iter()
+            .position(|r| matches!(r, Row::Item(i) if a.all[*i].id == id))
+            .unwrap();
+
+        type_tag(&mut a, "-never-had-this");
+        assert!(
+            !a.status.contains("removed #never-had-this from 1"),
+            "said it removed a tag that was not there: {:?}",
+            a.status
+        );
+
+        // a name that survives nothing of itself is not a tag
+        type_tag(&mut a, "!!!");
+        assert!(tags_of(&a, &id).is_empty(), "{:?}", tags_of(&a, &id));
+        assert!(
+            !a.status.starts_with("tagged !!!"),
+            "claimed to tag with nothing: {:?}",
+            a.status
+        );
     }
 
     #[test]
