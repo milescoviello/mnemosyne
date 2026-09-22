@@ -49,7 +49,8 @@ check_every_hours = 0
 [start]
 mouse = true           # false is the same as --no-mouse
 preview = true         # the bottom rail
-subagents = false      # reveal subagent transcripts immediately
+subagents = false      # show the ⌁ counts from the start, so → can
+                       # expand a session's children without pressing `a` first
 "##;
 
 fn d_true() -> bool {
