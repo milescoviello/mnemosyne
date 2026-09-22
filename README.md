@@ -528,6 +528,14 @@ usually repeats your words, so the session still turned up. Both shapes are
 indexed. Tool *output* still is not: the string form is anchored on the
 message's role, so a `tool_result` payload stays out.
 
+**Every hit says why it matched.** `--search` prints an excerpt around the
+first mention. It used to be blank on the default (indexed) search and
+filled only on the slow one, because excerpts were fetched per visible row
+— right for the browser, wrong for a command that prints everything and
+exits. Asking FTS5 for them costs about 80ms a document: fine for a normal
+query, eighty-five seconds for a word in every transcript. Cutting the
+window out of the stored prose does the whole corpus in under a second.
+
 **A phrase matches the word it starts.** A single word has always been a
 prefix query, so `pool` finds "pooling". A phrase was not, so
 `connection pool` missed "connection pooling" and `page fault` missed
@@ -682,7 +690,7 @@ worth keeping as a fallback if the binary is ever missing:
 ## Development
 
 ```sh
-cargo test          # 229 tests, no network and no fixtures on disk
+cargo test          # 235 tests, no network and no fixtures on disk
 cargo clippy --all-targets -- -D warnings
 tools/shell-selftest.sh           # the fish and bash wrappers, 50 checks
 python3 tools/gen-wordmark.py     # regenerate the logo (needs Pillow)

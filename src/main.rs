@@ -377,7 +377,25 @@ fn main() -> Result<()> {
             .cloned()
             .collect();
         let t = Instant::now();
-        let (hits, how) = search::run(&pool, q, mode);
+        let (mut hits, how) = search::run(&pool, q, mode);
+        // The indexed path returns paths and fetches excerpts per visible
+        // row, which is right for the browser and wrong here: this prints
+        // every hit once and then exits, so the column that says *why* a
+        // session matched came out empty on the default search.
+        if how == search::How::Indexed {
+            let expr = search::fts_expr(q);
+            if let Ok(idx) = index::Index::open() {
+                if let Ok(all) = idx.excerpts(&expr, q) {
+                    for (path, snip) in hits.iter_mut() {
+                        if snip.is_empty() {
+                            if let Some(s) = all.get(path) {
+                                snip.clone_from(s);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let mut rows: Vec<&model::Session> = pool
             .iter()
             .filter(|s| hits.contains_key(&s.path.to_string_lossy().to_string()))

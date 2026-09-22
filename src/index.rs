@@ -379,15 +379,41 @@ impl Index {
     }
 
     /// A readable excerpt for one hit.
-    pub fn snippet_for(&self, path: &str, expr: &str) -> Option<String> {
-        self.conn
+    /// Excerpts for every hit, cut from the stored prose.
+    ///
+    /// Built one row at a time and never held as whole documents, so the
+    /// memory stays flat whether the query matches five sessions or every
+    /// one of them.
+    pub fn excerpts(&self, expr: &str, needle: &str) -> Result<HashMap<String, String>> {
+        let mut st = self
+            .conn
+            .prepare("SELECT path, text FROM body WHERE body MATCH ?1")?;
+        let mut out = HashMap::new();
+        let mut rows = st.query([expr])?;
+        while let Some(r) = rows.next()? {
+            let path: String = r.get(0)?;
+            let text: String = r.get(1)?;
+            out.insert(path, crate::search::excerpt(&text, needle));
+        }
+        Ok(out)
+    }
+
+    /// One row's excerpt, for the row you are actually looking at.
+    ///
+    /// Reads that row's prose and cuts the window out of it. FTS5's own
+    /// `snippet()` re-runs the match to build one, which on a large
+    /// transcript is most of a tenth of a second -- per row, as the cursor
+    /// moves.
+    pub fn excerpt_for(&self, path: &str, needle: &str) -> Option<String> {
+        let text: String = self
+            .conn
             .query_row(
-                "SELECT snippet(body, 1, '', '', '…', 16) FROM body
-                 WHERE path = ?1 AND body MATCH ?2",
-                params![path, expr],
-                |r| r.get::<_, String>(0),
+                "SELECT b.text FROM body b JOIN body_ref r ON b.rowid = r.rid WHERE r.path = ?1",
+                params![path],
+                |r| r.get(0),
             )
-            .ok()
+            .ok()?;
+        Some(crate::search::excerpt(&text, needle))
     }
 
     pub fn existing_text(&self, path: &str) -> Result<Option<String>> {
@@ -1003,9 +1029,25 @@ mod pipeline_tests {
     fn an_excerpt_comes_back_for_a_hit() {
         let (_d, idx, key) = indexed(&[&said("user", "the quick brown fox jumped over it")]);
         let snip = idx
-            .snippet_for(&key, &crate::search::fts_expr("brown"))
+            .excerpt_for(&key, "brown")
             .expect("a hit has an excerpt");
         assert!(snip.to_lowercase().contains("brown"), "{snip:?}");
+    }
+
+    #[test]
+    fn every_hit_gets_an_excerpt_in_one_pass() {
+        // The command line prints every hit and exits, so it wants them all
+        // at once. Asking FTS5 for a snippet per row cost eighty-five
+        // seconds on a word that appears in every transcript.
+        let (_d, idx, key) = indexed(&[
+            &said("user", "the connection pool was exhausted"),
+            &said("assistant", "the pool is the problem"),
+        ]);
+        let all = idx
+            .excerpts(&crate::search::fts_expr("pool"), "pool")
+            .unwrap();
+        assert_eq!(all.len(), 1, "one transcript, one excerpt");
+        assert!(all[&key].to_lowercase().contains("pool"), "{:?}", all[&key]);
     }
 
     #[test]

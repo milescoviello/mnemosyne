@@ -786,10 +786,10 @@ impl App {
         if let Some(hit) = self.snippet_cache.get(&path) {
             return Some(hit.clone());
         }
-        let expr = self.deep_expr.clone()?;
+        let needle = self.deep.trim().to_string();
         let text = crate::index::Index::open()
             .ok()
-            .and_then(|i| i.snippet_for(&path, &expr))?;
+            .and_then(|i| i.excerpt_for(&path, &needle))?;
         self.snippet_cache.insert(path, text.clone());
         Some(text)
     }

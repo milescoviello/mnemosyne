@@ -247,6 +247,47 @@ pub fn fts_expr(query: &str) -> String {
     }
 }
 
+/// A readable excerpt of indexed prose around the first mention.
+///
+/// FTS5 has `snippet()` for this, and it costs about 80ms per document --
+/// nothing for a normal search, and eighty-five seconds for a word that
+/// appears in every transcript. Cutting the window out of the stored text
+/// does the same job for the whole corpus in under a second.
+pub fn excerpt(text: &str, needle: &str) -> String {
+    const PAD: usize = 90;
+    let hay = text.as_bytes();
+    // The whole phrase first, then its words. FTS tokenises on punctuation,
+    // so "page fault" matches a transcript that only ever wrote
+    // "page-fault" -- the query never appears in it literally, and landing
+    // on the first word is far more use than the opening line.
+    let lowered = needle.trim().to_lowercase();
+    let at = find_ci(hay, lowered.as_bytes()).or_else(|| {
+        lowered
+            .split_whitespace()
+            .find_map(|w| find_ci(hay, w.as_bytes()))
+    });
+    let Some(at) = at else {
+        // Nothing of the query is in the text: a prefix match on a longer
+        // word. The opening line still says what the session was about.
+        return crate::scan::squash(text, 160);
+    };
+    let lo = at.saturating_sub(PAD);
+    let hi = (at + PAD).min(hay.len());
+    // never split a character in half
+    let lo = (lo..=at).find(|&i| text.is_char_boundary(i)).unwrap_or(at);
+    let hi = (hi..=hay.len())
+        .find(|&i| text.is_char_boundary(i))
+        .unwrap_or(hay.len());
+    let mut out = crate::scan::squash(&text[lo..hi], 200);
+    if lo > 0 {
+        out.insert(0, '…');
+    }
+    if hi < hay.len() {
+        out.push('…');
+    }
+    out
+}
+
 /// Scan one file, returning the first readable hit.
 fn search_file(path: &std::path::Path, needle: &[u8], mode: Mode) -> Option<String> {
     use std::io::{BufRead, BufReader};
@@ -359,6 +400,51 @@ mod tests {
         assert_eq!(fts_expr("a OR b"), r#""a OR b"*"#);
         assert_eq!(fts_expr(""), "");
         assert_eq!(fts_expr("   "), "");
+    }
+
+    #[test]
+    fn an_excerpt_shows_the_term_in_its_surroundings() {
+        let text = "a ".repeat(200) + "the zpool is degraded" + &" b".repeat(200);
+        let e = excerpt(&text, "zpool");
+        assert!(e.contains("zpool"), "{e:?}");
+        assert!(e.contains('…'), "cut from the middle, so it should say so");
+        assert!(e.chars().count() <= 210, "{} chars", e.chars().count());
+    }
+
+    #[test]
+    fn an_excerpt_never_splits_a_character() {
+        // The window is measured in bytes; the text is not.
+        let text = format!(
+            "{}日本語のながいテキスト{}",
+            "あ".repeat(100),
+            "い".repeat(100)
+        );
+        let e = excerpt(&text, "ながい");
+        assert!(e.contains("ながい"), "{e:?}");
+    }
+
+    #[test]
+    fn a_phrase_written_with_punctuation_still_lands_on_the_word() {
+        // FTS splits on punctuation, so "page fault" matches text that only
+        // ever says "page-fault". The excerpt should still show it rather
+        // than falling back to the opening line.
+        let text = "x ".repeat(200) + "a burst of page-faults under load" + &" y".repeat(200);
+        let e = excerpt(&text, "page fault");
+        assert!(e.contains("page-fault"), "{e:?}");
+    }
+
+    #[test]
+    fn a_prefix_match_without_the_literal_word_still_shows_something() {
+        // "connection pool" matches "connection pooling", so the query
+        // itself need not appear anywhere in the text.
+        let e = excerpt("we fixed the connection pooling at last", "connection pool");
+        assert!(!e.is_empty());
+        assert!(e.contains("pooling"), "{e:?}");
+    }
+
+    #[test]
+    fn an_excerpt_of_nothing_is_empty_not_a_panic() {
+        assert_eq!(excerpt("", "zpool"), "");
     }
 
     #[test]
