@@ -304,7 +304,15 @@ pub fn pad_fit(s: &str, w: usize) -> String {
 
 /// `/home/miles/OS-DEV` -> `~/OS-DEV`
 pub fn short_cwd(cwd: &str) -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
+    short_cwd_in(cwd, &std::env::var("HOME").unwrap_or_default())
+}
+
+/// The same, with the home directory handed in. Its test used to set
+/// `HOME` for the whole process to get a known value -- and every other
+/// test that draws a folder column reads `HOME` too, so the suite failed
+/// now and then depending on which ran first. Environment variables are
+/// global; a test must never write one.
+pub fn short_cwd_in(cwd: &str, home: &str) -> String {
     if cwd == home {
         "~".into()
     } else if !home.is_empty() && cwd.starts_with(&format!("{home}/")) {
@@ -407,12 +415,49 @@ mod tests {
 
     #[test]
     fn home_is_abbreviated() {
-        std::env::set_var("HOME", "/home/u");
-        assert_eq!(short_cwd("/home/u"), "~");
-        assert_eq!(short_cwd("/home/u/proj"), "~/proj");
+        let h = "/home/u";
+        assert_eq!(short_cwd_in("/home/u", h), "~");
+        assert_eq!(short_cwd_in("/home/u/proj", h), "~/proj");
         // a path that merely starts with the same letters is left alone
-        assert_eq!(short_cwd("/home/us2/proj"), "/home/us2/proj");
-        assert_eq!(short_cwd("/etc"), "/etc");
+        assert_eq!(short_cwd_in("/home/us2/proj", h), "/home/us2/proj");
+        assert_eq!(short_cwd_in("/etc", h), "/etc");
+        // and an unknown home abbreviates nothing
+        assert_eq!(short_cwd_in("/home/u/proj", ""), "/home/u/proj");
+    }
+
+    #[test]
+    fn no_test_writes_to_the_process_environment() {
+        // Environment variables are shared by every test running at once.
+        // One of them setting HOME made an unrelated filter test fail about
+        // one run in several, which is the worst kind of failure to chase.
+        for f in [
+            "app.rs",
+            "ui.rs",
+            "model.rs",
+            "index.rs",
+            "scan.rs",
+            "search.rs",
+            "meta.rs",
+            "update.rs",
+            "workspace.rs",
+            "live.rs",
+            "main.rs",
+            "preview.rs",
+            "config.rs",
+            "splash.rs",
+            "art.rs",
+        ] {
+            let src = std::fs::read_to_string(format!("{}/src/{f}", env!("CARGO_MANIFEST_DIR")))
+                .unwrap_or_default();
+            // this test names the functions it forbids, so skip its own text
+            let body = src
+                .split("fn no_test_writes_to_the_process_environment")
+                .next()
+                .unwrap();
+            for bad in ["env::set_var(", "env::remove_var("] {
+                assert!(!body.contains(bad), "{f} calls {bad}");
+            }
+        }
     }
 
     #[test]
