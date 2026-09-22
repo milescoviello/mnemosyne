@@ -739,6 +739,50 @@ impl App {
     /// no `--resume` cannot be tied to a transcript. Counting processes here
     /// meant the header could say "4 live" with nothing in the list marked,
     /// which reads as a bug.
+    /// What the list is showing, truthfully.
+    ///
+    /// Turning one filter off used to announce "all sessions" whatever else
+    /// was still on -- a tag filter narrowing it to one, say. This names
+    /// what is still filtering, so the message matches the list under it.
+    pub fn view_note(&self) -> String {
+        let shown = self.item_count();
+        let mut on: Vec<String> = Vec::new();
+        if !self.fuzzy.trim().is_empty() {
+            on.push(format!("/{}", self.fuzzy.trim()));
+        }
+        if self.deep_hits.is_some() {
+            on.push(format!("search “{}”", self.deep.trim()));
+        }
+        if let Some(t) = &self.tag_filter {
+            on.push(format!("#{t}"));
+        }
+        if self.fav_only {
+            on.push("favourites".into());
+        }
+        if self.live_only {
+            on.push("running".into());
+        }
+        if self.date != DateRange::All {
+            on.push(self.date.label());
+        }
+        if on.is_empty() {
+            format!("all {shown} sessions")
+        } else {
+            format!("{shown} shown — still filtered by {}", on.join(", "))
+        }
+    }
+
+    /// After a reindex: what the index holds, and what of it is on screen.
+    pub fn reindex_message(&self) -> String {
+        let total = self.all.iter().filter(|s| !s.is_subagent).count();
+        let shown = self.item_count();
+        if shown == total {
+            format!("reindexed — {total} sessions")
+        } else {
+            format!("reindexed — {total} sessions, {shown} shown by the current filters")
+        }
+    }
+
     /// Favourites among the sessions that exist, which is what the list
     /// marks. The overlay outlives transcripts, so counting its entries
     /// showed a star total nothing on screen accounted for.
@@ -1214,12 +1258,23 @@ impl App {
             }
             self.deep_hits = Some(r.hits);
             self.deep_busy = false;
-            self.status = format!(
-                "{n} session(s) match “{}” in {}",
-                self.deep,
-                self.deep_mode.label()
-            );
             self.rebuild();
+            // Count the list, not the search. With a tag filter or a date
+            // range also on, the two differ, and saying "3 match" over a
+            // list of one leaves you unable to tell which number is wrong.
+            let shown = self.item_count();
+            self.status = if shown == n {
+                format!(
+                    "{shown} session(s) match “{}” in {}",
+                    self.deep,
+                    self.deep_mode.label()
+                )
+            } else {
+                format!(
+                    "{shown} of {n} matching “{}” shown — other filters are on",
+                    self.deep
+                )
+            };
         }
     }
 
@@ -1342,6 +1397,7 @@ impl App {
     fn commit_note(&mut self) {
         let Some(i) = self.current_idx() else { return };
         let id = self.all[i].id.clone();
+        let had = !self.all[i].note.is_empty();
         self.meta.set_note(&id, &self.input);
         if self.persist {
             let _ = self.meta.save();
@@ -1351,7 +1407,12 @@ impl App {
             .get(&id)
             .map(|e| e.note.clone())
             .unwrap_or_default();
-        self.status = "note saved".into();
+        // An empty note clears it; "note saved" said the opposite.
+        self.status = match (had, self.all[i].note.is_empty()) {
+            (_, false) => "note saved".into(),
+            (true, true) => "note removed".into(),
+            (false, true) => "no note to save".into(),
+        };
         self.input.clear();
         self.input_mode = InputMode::Normal;
     }
@@ -1431,12 +1492,12 @@ impl App {
             }
             Action::FavOnly => {
                 self.fav_only = !self.fav_only;
-                self.status = if self.fav_only {
-                    "favourites only".into()
-                } else {
-                    "all sessions".into()
-                };
                 self.rebuild();
+                self.status = if self.fav_only {
+                    format!("favourites only — {}", self.view_note())
+                } else {
+                    self.view_note()
+                };
             }
             Action::LiveOnly => {
                 if !self.live.supported {
@@ -1445,12 +1506,12 @@ impl App {
                     return;
                 }
                 self.live_only = !self.live_only;
-                self.status = if self.live_only {
-                    "running only".into()
-                } else {
-                    "all sessions".into()
-                };
                 self.rebuild();
+                self.status = if self.live_only {
+                    format!("running only — {}", self.view_note())
+                } else {
+                    self.view_note()
+                };
             }
             Action::Subagents => {
                 self.show_subagents = !self.show_subagents;
@@ -2014,6 +2075,143 @@ mod logic_tests {
             a.item_count(),
             0,
             "a filter matching nothing matched something"
+        );
+    }
+
+    fn deliver_hits(a: &mut App, paths: &[&str]) {
+        let mut hits = HashMap::new();
+        for p in paths {
+            hits.insert((*p).to_string(), "…".to_string());
+        }
+        a.deep_tx
+            .send(DeepResult {
+                generation: a.deep_generation,
+                hits,
+            })
+            .unwrap();
+        a.absorb_deep();
+    }
+
+    #[test]
+    fn clearing_a_note_says_it_was_cleared() {
+        let mut a = app();
+        let id = a.all[0].id.clone();
+        a.cursor = a
+            .view
+            .iter()
+            .position(|r| matches!(r, Row::Item(i) if a.all[*i].id == id))
+            .unwrap();
+
+        a.input = "remember the raidz2".into();
+        a.commit_note();
+        assert_eq!(a.status, "note saved");
+        assert_eq!(a.current().unwrap().note, "remember the raidz2");
+
+        a.input.clear();
+        a.commit_note();
+        assert!(a.current().unwrap().note.is_empty());
+        assert_eq!(a.status, "note removed", "it said {:?}", a.status);
+
+        a.input = "   ".into();
+        a.commit_note();
+        assert_ne!(a.status, "note saved", "nothing was saved");
+    }
+
+    #[test]
+    fn turning_one_filter_off_does_not_claim_they_are_all_off() {
+        // Toggling favourites-only off said "all sessions" while a tag
+        // filter was still narrowing the list to one.
+        let mut a = app();
+        a.tag_filter = Some("eft".into());
+        a.rebuild();
+        a.do_action(Action::FavOnly); // on
+        a.do_action(Action::FavOnly); // off again
+        assert!(
+            !a.status.contains("all sessions"),
+            "claimed everything is shown while #eft is still filtering: {:?}",
+            a.status
+        );
+        assert!(
+            a.status.contains(&a.item_count().to_string()),
+            "should say how many are shown: {:?}",
+            a.status
+        );
+
+        // with genuinely nothing else on, "all" is true and may be said
+        let mut a = app();
+        a.do_action(Action::LiveOnly);
+        a.do_action(Action::LiveOnly);
+        assert!(a.status.contains("all"), "{:?}", a.status);
+    }
+
+    #[test]
+    fn the_reindex_message_counts_the_index_not_the_filter() {
+        // After R it said "reindexed — 1 sessions" because one row was
+        // visible, when the index held hundreds.
+        let mut a = app();
+        a.fuzzy = "ancient".into();
+        a.rebuild();
+        assert_eq!(a.item_count(), 1);
+        let msg = a.reindex_message();
+        let total = a.all.iter().filter(|s| !s.is_subagent).count();
+        assert!(
+            msg.contains(&total.to_string()),
+            "reported the filter, not the index: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn the_match_count_describes_the_list_you_are_looking_at() {
+        // The count came from the search, the list came from the search
+        // *and* every other filter. With a tag filter or a date range also
+        // on, the header claimed matches the list did not show, and there
+        // was no way to tell which number was wrong.
+        let mut a = app();
+        a.deep = "thing".into();
+        a.start_deep();
+        deliver_hits(
+            &mut a,
+            &[
+                "/p/aaaaaaaa-1.jsonl",
+                "/p/bbbbbbbb-2.jsonl",
+                "/p/cccccccc-3.jsonl",
+            ],
+        );
+        let count_in = |s: &str| {
+            s.split_whitespace()
+                .next()
+                .and_then(|n| n.parse::<usize>().ok())
+                .expect("a count")
+        };
+        assert_eq!(
+            count_in(&a.status),
+            a.item_count(),
+            "unfiltered, these must agree"
+        );
+
+        // the realistic order: a filter is already on when you search
+        let mut a = app();
+        a.fav_only = true;
+        a.deep = "thing".into();
+        a.start_deep();
+        deliver_hits(
+            &mut a,
+            &[
+                "/p/aaaaaaaa-1.jsonl",
+                "/p/bbbbbbbb-2.jsonl",
+                "/p/cccccccc-3.jsonl",
+            ],
+        );
+        assert_eq!(
+            count_in(&a.status),
+            a.item_count(),
+            "the header promised matches the list does not show: {:?}",
+            a.status
+        );
+        assert!(
+            a.status.contains("other filters"),
+            "it should say why the numbers differ: {:?}",
+            a.status
         );
     }
 

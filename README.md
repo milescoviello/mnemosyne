@@ -697,7 +697,7 @@ worth keeping as a fallback if the binary is ever missing:
 ## Development
 
 ```sh
-cargo test          # 240 tests, no network and no fixtures on disk
+cargo test          # 244 tests, no network and no fixtures on disk
 cargo clippy --all-targets -- -D warnings
 tools/shell-selftest.sh           # the fish and bash wrappers, 50 checks
 python3 tools/gen-wordmark.py     # regenerate the logo (needs Pillow)

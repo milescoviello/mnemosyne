@@ -886,7 +886,7 @@ fn run<B: ratatui::backend::Backend>(
             let fresh = index::refresh(true)?;
             app.meta = meta::Meta::load();
             app.absorb_rescan(fresh);
-            app.status = format!("reindexed — {} sessions", app.item_count());
+            app.status = app.reindex_message();
         }
 
         // keep the running/not-running markers honest without re-reading disk
