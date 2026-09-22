@@ -111,6 +111,11 @@ HERE_PLAN="here\t$tmp/work-b\t33333333-4444-5555-6666-777777777777\tclaude-opus-
 # a seventh field: the tmux session name chosen at the prompt
 NAMED_PLAN="wintmux\t$tmp/work-a\t026bcdb5-8d88-4ad7-9f23-58649bf4f353\t\tdefault\tnamed one\tmy-own-name\n"
 
+# two different chats asking for the same name, which is what selecting
+# several and naming them once produces
+CLASH_PLAN="wintmux\t$tmp/work-a\t026bcdb5-8d88-4ad7-9f23-58649bf4f353\t\tdefault\tfirst chat\tbatch\n"
+CLASH_PLAN="${CLASH_PLAN}wintmux\t$tmp/work-b\t11111111-2222-3333-4444-555555555555\t\tdefault\tsecond chat\tbatch\n"
+
 # ---- one shell's worth of checks ---------------------------------------
 run_shell() {
     local shell_name="$1" source_line="$2" runner="$3"
@@ -204,6 +209,29 @@ run_shell() {
     out=$("$runner" -c "$source_line; mn --ask" 2>&1)
     seen=$(cat "$log")
     hasnt "$shell_name: --ask refuses to skip permissions" "--dangerously-skip-permissions" "$seen"
+
+    # --- one name, several chats
+    if [ -n "$real_tmux" ]; then
+        "$bin/tmux" kill-server 2>/dev/null
+        write_plan "$CLASH_PLAN"
+        : > "$log"
+        out=$("$runner" -c "$source_line; mn" 2>&1)
+        seen=$(cat "$log")
+        local names started
+        names=$("$bin/tmux" list-sessions -F '#{session_name}' 2>/dev/null | sort | tr '\n' ' ')
+        started=$(grep -c '^claude: --resume' <<< "$seen")
+        if [ "$started" = "2" ]; then
+            ok "$shell_name: both chats actually started"
+        else
+            bad "$shell_name: both chats actually started" \
+                "started $started; one name for several chats used to collapse them into one"
+        fi
+        has "$shell_name: the first takes the name" "batch" "$names"
+        has "$shell_name: the second gets its own" "batch-2" "$names"
+        "$bin/tmux" kill-server 2>/dev/null
+    else
+        skip "$shell_name: one name several chats" "tmux is not installed"
+    fi
 
     # --- landing in this terminal
     write_plan "$HERE_PLAN"

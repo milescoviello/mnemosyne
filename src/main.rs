@@ -589,6 +589,24 @@ fn main() -> Result<()> {
         }
     }
 
+    // Put the terminal back if anything panics from here on. Without this a
+    // panic left raw mode on, the alternate screen up, mouse reporting on and
+    // the keyboard in the protocol we asked for -- an unusable shell, with
+    // the message explaining it painted onto a screen you cannot see.
+    {
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = disable_raw_mode();
+            let _ = execute!(
+                stderr(),
+                event::PopKeyboardEnhancementFlags,
+                DisableMouseCapture,
+                LeaveAlternateScreen
+            );
+            default_hook(info);
+        }));
+    }
+
     enable_raw_mode()?;
     stderr().execute(EnterAlternateScreen)?;
     // Ask the terminal to tell shift and ctrl apart, so ctrl+shift+t can be
@@ -747,6 +765,12 @@ fn run<B: ratatui::backend::Backend>(
                 Event::Resize(_, _) => {}
                 _ => {}
             }
+        }
+
+        // Fault injection, so the terminal-restoring panic hook can be
+        // tested for real rather than reasoned about.
+        if std::env::var_os("MNEMOSYNE_PANIC_TEST").is_some() {
+            panic!("deliberate panic for the terminal-restore test");
         }
 
         app.absorb_deep();

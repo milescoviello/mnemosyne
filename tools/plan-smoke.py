@@ -35,7 +35,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
 
-def run(binary, home, keys, rows=24, cols=130, timeout=40):
+def run(binary, home, keys, rows=24, cols=130, timeout=40, extra_env=None):
     """Drive the TUI, returning (stdout, what it drew, exit code).
 
     Waiting a fixed second and hoping was enough on a laptop and was not on
@@ -51,6 +51,8 @@ def run(binary, home, keys, rows=24, cols=130, timeout=40):
     main_fd, worker = pty.openpty()
     fcntl.ioctl(worker, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
     env = dict(os.environ, HOME=home, TERM="xterm-256color")
+    if extra_env:
+        env.update(extra_env)
     proc = subprocess.Popen(
         [binary, "--no-splash", "--no-update"],
         stdin=worker, stderr=worker, stdout=subprocess.PIPE,
@@ -164,6 +166,20 @@ def main():
     # quitting says nothing at all
     plan = drive(["q"])
     check("quitting prints nothing", plan.strip() == "", repr(plan[:120]))
+
+    # a panic must hand the terminal back. Without it you are left in raw
+    # mode, on the alternate screen, with the keyboard in a protocol your
+    # shell does not speak -- and the message saying so painted on a screen
+    # you can no longer see.
+    _, screen, code = run(binary, home, [], timeout=30,
+                          extra_env={"MNEMOSYNE_PANIC_TEST": "1"})
+    check("a panic exits, rather than hanging", code == 101, f"exit {code}")
+    for what, seq in (("leaves the alternate screen", "\x1b[?1049l"),
+                      ("pops the keyboard protocol", "\x1b[<1u"),
+                      ("turns mouse reporting off", "\x1b[?1006l")):
+        check(f"a panic {what}", seq in screen, "not found in the output")
+    check("a panic still says what happened", "deliberate panic" in screen,
+          repr(screen[-200:]))
 
     print()
     if failures:

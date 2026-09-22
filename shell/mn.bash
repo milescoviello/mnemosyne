@@ -99,10 +99,15 @@ __mn_tmux_ensure() {
         printf '%s\n' "$have"
         return 0
     fi
+    # The name is taken, and not by this chat -- the check above would have
+    # found it. Attaching anyway would drop you into someone else's session
+    # claiming it was yours. It also happens whenever several chats are
+    # opened under one chosen name, which used to collapse them all into a
+    # single session running only the first.
     if tmux has-session -t "=$name" 2>/dev/null; then
-        echo "  ▶ $name already running — resuming where it left off" >&2
-        printf '%s\n' "$name"
-        return 0
+        local n=2
+        while tmux has-session -t "=$name-$n" 2>/dev/null; do n=$((n + 1)); done
+        name="$name-$n"
     fi
     [ -d "$cwd" ] || { echo "  ✗ folder gone, skipping: $cwd" >&2; return 1; }
 

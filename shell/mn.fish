@@ -126,10 +126,17 @@ function __mn_tmux_ensure --description 'Make sure a tmux session exists for thi
         echo $have
         return 0
     end
+    # The name is taken, and not by this chat -- the check above would have
+    # found it. Attaching anyway would drop you into someone else's session
+    # claiming it was yours. It also happens whenever several chats are
+    # opened under one chosen name, which used to collapse them all into a
+    # single session running only the first.
     if tmux has-session -t "="$name 2>/dev/null
-        echo "  ▶ $name already running — resuming where it left off" >&2
-        echo $name
-        return 0
+        set -l n 2
+        while tmux has-session -t "="$name-$n 2>/dev/null
+            set n (math $n + 1)
+        end
+        set name $name-$n
     end
 
     if not test -d "$cwd"
