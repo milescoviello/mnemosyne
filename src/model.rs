@@ -188,19 +188,32 @@ pub fn reltime(epoch: i64) -> String {
 
 pub fn human_size(b: u64) -> String {
     const U: [&str; 5] = ["B", "K", "M", "G", "T"];
+    if b < 1024 {
+        return format!("{b}B");
+    }
     let mut v = b as f64;
     let mut i = 0;
     while v >= 1024.0 && i < U.len() - 1 {
         v /= 1024.0;
         i += 1;
     }
-    if i == 0 {
-        format!("{}{}", b, U[0])
-    } else if v < 10.0 {
-        format!("{v:.1}{}", U[i])
-    } else {
-        format!("{v:.0}{}", U[i])
+    // One decimal below ten, none above -- judged on what will be shown,
+    // not on the raw value, or 9.96 came out as "10.0" and 1023.9 as
+    // "1024" of a unit that should have rolled over.
+    let shown = |v: f64| {
+        let one = format!("{v:.1}");
+        if one.len() <= 3 {
+            one
+        } else {
+            format!("{v:.0}")
+        }
+    };
+    let mut text = shown(v);
+    if text == "1024" && i < U.len() - 1 {
+        text = shown(v / 1024.0);
+        i += 1;
     }
+    format!("{text}{}", U[i])
 }
 
 pub fn human_dur(secs: i64) -> String {
@@ -220,30 +233,44 @@ pub fn human_dur(secs: i64) -> String {
 
 /// 412 -> "412", 6312 -> "6.3k", 1_200_000 -> "1.2m"
 pub fn compact_count(n: u32) -> String {
+    // Rounded in whole numbers, and the unit chosen from the rounded value:
+    // picking it first made 9,960 "10.0k" and 999,600 "1000k".
+    let n = u64::from(n);
+    let tenths_k = (n + 50) / 100;
+    let k = (n + 500) / 1_000;
+    let tenths_m = (n + 50_000) / 100_000;
+    let tenths_b = (n + 50_000_000) / 100_000_000;
     if n < 1000 {
         format!("{n}")
-    } else if n < 1_000_000 {
-        let v = n as f64 / 1000.0;
-        if v < 10.0 {
-            format!("{v:.1}k")
-        } else {
-            format!("{v:.0}k")
-        }
+    } else if tenths_k < 100 {
+        format!("{}.{}k", tenths_k / 10, tenths_k % 10)
+    } else if k < 1000 {
+        format!("{k}k")
+    } else if tenths_m < 10_000 {
+        format!("{}.{}m", tenths_m / 10, tenths_m % 10)
     } else {
-        format!("{:.1}m", n as f64 / 1_000_000.0)
+        format!("{}.{}b", tenths_b / 10, tenths_b % 10)
     }
 }
 
 /// Like `compact_count` but for the larger numbers token totals reach.
 pub fn human_count(n: u64) -> String {
+    // As compact_count: round, then pick the unit, so 999,600 is "1.0m".
+    let n = u128::from(n);
+    let k = (n + 500) / 1_000;
+    let tenths_m = (n + 50_000) / 100_000;
+    let hundredths_b = (n + 5_000_000) / 10_000_000;
+    let hundredths_t = (n + 5_000_000_000) / 10_000_000_000;
     if n < 1_000 {
         format!("{n}")
-    } else if n < 1_000_000 {
-        format!("{:.0}k", n as f64 / 1_000.0)
-    } else if n < 1_000_000_000 {
-        format!("{:.1}m", n as f64 / 1_000_000.0)
+    } else if k < 1_000 {
+        format!("{k}k")
+    } else if tenths_m < 10_000 {
+        format!("{}.{}m", tenths_m / 10, tenths_m % 10)
+    } else if hundredths_b < 100_000 {
+        format!("{}.{:02}b", hundredths_b / 100, hundredths_b % 100)
     } else {
-        format!("{:.2}b", n as f64 / 1_000_000_000.0)
+        format!("{}.{:02}t", hundredths_t / 100, hundredths_t % 100)
     }
 }
 
@@ -334,6 +361,75 @@ mod tests {
         assert_eq!(compact_count(6_312), "6.3k");
         assert_eq!(compact_count(66_810), "67k");
         assert_eq!(compact_count(1_200_000), "1.2m");
+    }
+
+    #[test]
+    fn a_number_that_rounds_up_takes_the_next_unit() {
+        // The unit used to be chosen before rounding, so a value just under
+        // a boundary rounded up past it and kept the smaller unit.
+        assert_eq!(compact_count(9_960), "10k", "not 10.0k");
+        assert_eq!(compact_count(999_600), "1.0m", "not 1000k");
+        assert_eq!(human_size(10_200), "10K", "not 10.0K");
+        assert_eq!(human_size(1_048_500), "1.0M", "not 1024K");
+        assert_eq!(human_count(999_600), "1.0m", "not 1000k");
+        assert_eq!(human_count(999_960_000), "1.00b", "not 1000.0m");
+        // and just under stays where it was
+        assert_eq!(compact_count(9_940), "9.9k");
+        assert_eq!(human_size(1_047_000), "1022K");
+    }
+
+    #[test]
+    fn no_number_is_shown_at_or_past_its_units_limit() {
+        // Every threshold, from just below to just above, for all three.
+        // What is shown must be under 1000 of its unit (1024 for sizes),
+        // and a decimal is only ever shown below ten -- one rule, checked
+        // everywhere rather than at a few chosen examples.
+        fn split(s: &str) -> (f64, &str) {
+            let at = s.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(s.len());
+            (
+                s[..at].parse().unwrap_or_else(|_| panic!("{s:?}")),
+                &s[at..],
+            )
+        }
+        let near = |edge: u64| (edge.saturating_sub(2_000)..edge + 2_000).step_by(7);
+        let mut edges: Vec<u64> = Vec::new();
+        // 10, 100, 1000 of each unit: where a decimal is dropped, and where
+        // the unit rolls over.
+        for p in 0..4 {
+            let k = 1000u64.pow(p + 1);
+            edges.extend([k / 100, k / 10, k]);
+        }
+        for n in edges
+            .iter()
+            .flat_map(|&e| near(e))
+            .chain(near(4_294_967_295))
+        {
+            if let Ok(small) = u32::try_from(n) {
+                let s = compact_count(small);
+                let (v, unit) = split(&s);
+                assert!(v < 1000.0, "compact_count({n}) = {s}");
+                if s.contains('.') && unit != "m" {
+                    assert!(v < 10.0, "compact_count({n}) = {s}");
+                }
+            }
+            let s = human_count(n);
+            let (v, _) = split(&s);
+            assert!(v < 1000.0, "human_count({n}) = {s}");
+        }
+        for p in 1..5u32 {
+            let k = 1024u64.pow(p);
+            for n in (k * 9 - 3_000..k * 11)
+                .step_by((k / 512) as usize)
+                .chain(k - 3_000..k + 3_000)
+            {
+                let s = human_size(n);
+                let (v, _) = split(&s);
+                assert!(v < 1024.0, "human_size({n}) = {s}");
+                if s.contains('.') {
+                    assert!(v < 10.0, "human_size({n}) = {s}");
+                }
+            }
+        }
     }
 
     #[test]
