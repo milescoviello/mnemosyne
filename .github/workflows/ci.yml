@@ -25,11 +25,13 @@ jobs:
         run: cargo test
       - name: build release
         run: cargo build --release
-      # The wrappers are shell, so cargo test never sees them. This runs both
-      # against stub binaries and a private tmux socket.
+      # The wrappers are shell, so cargo test never sees them. This runs them
+      # under bash, zsh and fish, against stub binaries and a private tmux
+      # socket. zsh because the installer hands it mn.bash, and zsh is what
+      # a Mac opens by default.
       - name: shell wrappers
         run: |
-          sudo apt-get install -y --no-install-recommends fish tmux
+          sudo apt-get install -y --no-install-recommends fish tmux zsh
           tools/shell-selftest.sh
       # Drives the real binary on a real pty. Guards the one contract no Rust
       # test can see: the interface draws on stderr and prints the chosen

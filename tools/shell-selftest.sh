@@ -57,14 +57,22 @@ hasnt() { case "$3" in *"$2"*) bad "$1" "should not contain: $2" ;; *) ok "$1" ;
 plan_file="$tmp/plan"
 cat > "$bin/mnemosyne" <<EOF
 #!/bin/sh
+# what it was asked, one bracket per argument so a split value shows
+{ printf 'mnemosyne:'; printf ' [%s]' "\$@"; echo; } >> "\$MN_TEST_LOG.mn"
 cat "$plan_file"
+exit \${MN_STUB_EXIT:-0}
 EOF
 
 cat > "$bin/claude" <<'EOF'
 #!/bin/sh
 echo "claude: $*" >> "$MN_TEST_LOG"
-# stay alive so the tmux session it belongs to stays alive with it
-sleep 20
+# the same again, one bracket per argument, so a split one shows
+{ printf 'claude-args:'; printf ' [%s]' "$@"; echo; } >> "$MN_TEST_LOG"
+echo "claude-pwd: $(pwd)" >> "$MN_TEST_LOG"
+# Stay alive so the tmux session it belongs to stays alive with it. Only
+# there: anywhere else it is waited for, and twenty seconds a time adds up.
+[ -n "$TMUX" ] && sleep 20
+exit 0
 EOF
 
 cat > "$bin/faketerm" <<'EOF'
@@ -73,6 +81,18 @@ echo "term: $*" >> "$MN_TEST_LOG"
 # Which session did we land in? If it is the caller's, closing the window
 # that ran mn takes this one down with it.
 echo "term-sid: $(ps -o sid= -p $$ | tr -d ' ')" >> "$MN_TEST_LOG"
+# Run what the window would have run, when asked: `-e <shell> -lc <command>`.
+# Not as a login shell, though -- that rereads /etc/profile, which on some
+# systems resets PATH, and then `claude` would be the real one rather than
+# the stub. fish without its config, for the same reason.
+[ "${MN_TERM_RUN:-}" = 1 ] || exit 0
+while [ $# -gt 0 ] && [ "$1" != -e ]; do shift; done
+[ $# -ge 4 ] || exit 0
+sh_=$2; cmd_=$4
+case "$sh_" in
+    fish) exec fish --no-config -c "$cmd_" ;;
+    *) exec "$sh_" -c "$cmd_" ;;
+esac
 EOF
 
 # Prints the session id of whatever shell invoked it, so the check below
@@ -94,9 +114,25 @@ chmod +x "$bin"/*
 
 export PATH="$bin:$PATH"
 export MN_TERMINAL=faketerm
+# Run from inside tmux, these would say so, and the wrappers read them: it
+# picks switch-client over attach-session. The result should not depend on
+# where the test happens to be run from.
+unset TMUX TMUX_PANE
 export MN_TEST_LOG="$log"
 
 write_plan() { printf '%b' "$1" > "$plan_file"; }
+
+# Windows are started detached, and tmux starts its pane on its own time,
+# so what they did shows up in the log a moment later. $1 text, $2 file.
+wait_for() {
+    local i=0
+    while [ $i -lt 50 ]; do
+        grep -qF -- "$1" "$2" 2>/dev/null && return 0
+        sleep 0.1
+        i=$((i + 1))
+    done
+    return 1
+}
 
 # tab-separated, as mnemosyne prints it
 WINTMUX_PLAN="wintmux\t$tmp/work-a\t026bcdb5-8d88-4ad7-9f23-58649bf4f353\tclaude-opus-5\tbypassPermissions\tthe api gateway timeout\n"
@@ -119,6 +155,9 @@ CLASH_PLAN="${CLASH_PLAN}wintmux\t$tmp/work-b\t11111111-2222-3333-4444-555555555
 # ---- one shell's worth of checks ---------------------------------------
 run_shell() {
     local shell_name="$1" source_line="$2" runner="$3"
+    # what the new window runs its command with, which for zsh is bash:
+    # mn.bash builds a bash command line for it
+    local inner="${4:-$1}"
     printf '\n%s\n' "$shell_name"
 
     [ -n "$real_tmux" ] && "$bin/tmux" kill-server 2>/dev/null
@@ -141,7 +180,7 @@ run_shell() {
 
     if [ -n "$real_tmux" ]; then
         has "$shell_name: a window is opened onto the tmux session" \
-            "term: -e $shell_name -lc exec tmux attach-session -t =mn-026bcdb5" "$seen"
+            "term: -e $inner -lc exec tmux attach-session -t =mn-026bcdb5" "$seen"
         local sessions; sessions=$("$bin/tmux" list-sessions -F '#{session_name}' 2>/dev/null)
         has "$shell_name: the session is named for the chat" "mn-026bcdb5" "$sessions"
         has "$shell_name: and so is the second one" "mn-11111111" "$sessions"
@@ -244,17 +283,137 @@ run_shell() {
     has "$shell_name: and the shell cd'd there" "$tmp/work-b" "$out"
     has "$shell_name: and says which session" "right here" "$out"
 
+    # zsh's echo reads backslashes, so a title with a Windows path in it
+    # came out broken over two lines. The four backslashes below are one by
+    # the time the plan is written: halved by the quotes, then by printf %b.
+    write_plan "here\t$tmp/work-b\t33333333-4444-5555-6666-777777777777\t\tplan\tfix C:\\\\new folder\n"
+    out=$("$runner" -c "$source_line; mn" 2>&1)
+    has "$shell_name: a backslash in a title is printed as one" 'fix C:\new folder' "$out"
+
+    # --- claude's arguments arrive as you typed them
+    # They were pasted into a command line unquoted, so in a window or under
+    # tmux `--add-dir "/my projects"` arrived as two arguments -- and a `;`
+    # or `$(...)` inside one was run as a command. The folder is awkward on
+    # purpose: a quote, a space and a dollar sign.
+    local odd="$tmp/it's a \$dir"
+    mkdir -p "$odd"
+    # The substitution leads: after a `;`, the exec before it would have
+    # replaced the shell first and hidden the problem.
+    local fwd_args="--add-dir '/my projects' --append-system-prompt '\$(touch $tmp/ran-it);x'"
+    local want_args='[--add-dir] [/my projects] [--append-system-prompt] [$(touch '"$tmp"'/ran-it);x]'
+    rm -f "$tmp/ran-it"
+
+    if [ -n "$real_tmux" ]; then
+        "$bin/tmux" kill-server 2>/dev/null
+        write_plan "wintmux\t$odd\t44444444-5555-6666-7777-888888888888\t\tdefault\todd one\n"
+        : > "$log"
+        "$runner" -c "$source_line; mn $fwd_args" >/dev/null 2>&1
+        wait_for "claude-pwd:" "$log"
+        seen=$(cat "$log")
+        has "$shell_name: under tmux, an argument with a space stays one" "$want_args" "$seen"
+        has "$shell_name: under tmux, the odd folder is where it starts" "claude-pwd: $odd" "$seen"
+        "$bin/tmux" kill-server 2>/dev/null
+    else
+        skip "$shell_name: arguments under tmux" "tmux is not installed"
+    fi
+
+    write_plan "window\t$odd\t55555555-6666-7777-8888-999999999999\t\tdefault\todd one\n"
+    : > "$log"
+    MN_TERM_RUN=1 "$runner" -c "$source_line; mn $fwd_args" >/dev/null 2>&1
+    wait_for "claude-pwd:" "$log"
+    seen=$(cat "$log")
+    has "$shell_name: in a window, an argument with a space stays one" "$want_args" "$seen"
+    has "$shell_name: in a window, the odd folder is where it starts" "claude-pwd: $odd" "$seen"
+    if [ -e "$tmp/ran-it" ]; then
+        bad "$shell_name: nothing in an argument is run" "the \$(touch) inside an argument ran"
+    else
+        ok "$shell_name: nothing in an argument is run"
+    fi
+
     # --- our flags are ours, claude's are claude's
+    write_plan "$HERE_PLAN"
     : > "$log"
     out=$("$runner" -c "$source_line; mn --no-splash --verbose" 2>&1)
     seen=$(cat "$log")
     has "$shell_name: unknown flags go through to claude" "--verbose" "$seen"
     hasnt "$shell_name: our own flags do not" "--no-splash" "$seen"
+
+    # one the wrapper's own list once left out
+    : > "$log"; : > "$log.mn"
+    out=$("$runner" -c "$source_line; mn --no-mouse --verbose" 2>&1)
+    seen=$(cat "$log")
+    has "$shell_name: --no-mouse reaches mnemosyne" "[--no-mouse]" "$(cat "$log.mn")"
+    hasnt "$shell_name: and is not handed to claude" "--no-mouse" "$seen"
+
+    # --- flags that answer and exit
+    # Their reply is for you to read. It used to go through the plan loop,
+    # which took "up to date on 0.4.14" for a session in a folder called ""
+    # and said so: "folder gone, skipping:".
+    write_plan "up to date on 0.4.14 (latest is v0.4.14)\n"
+    : > "$log"; : > "$log.mn"
+    out=$("$runner" -c "$source_line; mn --check-update" 2>&1)
+    has "$shell_name: an answer is shown to you" "up to date on 0.4.14 (latest is v0.4.14)" "$out"
+    hasnt "$shell_name: and not read as a plan" "folder gone" "$out"
+
+    write_plan "sessions  4\n"
+    : > "$log"; : > "$log.mn"
+    out=$("$runner" -c "$source_line; mn --stats" 2>&1)
+    seen=$(cat "$log")
+    has "$shell_name: --stats reaches mnemosyne" "[--stats]" "$(cat "$log.mn")"
+    has "$shell_name: and its answer is shown" "sessions  4" "$out"
+    hasnt "$shell_name: and claude is not started" "claude" "$seen"
+
+    : > "$log"; : > "$log.mn"
+    out=$("$runner" -c "$source_line; mn --search 'connection reset' --search-mode tool" 2>&1)
+    has "$shell_name: a search keeps its words together" \
+        "[--search] [connection reset] [--search-mode] [tool]" "$(cat "$log.mn")"
+    hasnt "$shell_name: and starts nothing" "claude" "$(cat "$log")"
+
+    # a claude flag next to a report flag goes to mnemosyne, which refuses
+    # it, rather than being dropped as though it had worked
+    : > "$log.mn"
+    "$runner" -c "$source_line; mn --list --verbose" >/dev/null 2>&1
+    has "$shell_name: nothing is quietly dropped from a report" "[--list] [--verbose]" "$(cat "$log.mn")"
+
+    # older fish reads `case --help` as asking for help on `case`
+    : > "$log.mn"
+    "$runner" -c "$source_line; mn --help" >/dev/null 2>&1
+    has "$shell_name: --help is mnemosyne's" "[--help]" "$(cat "$log.mn")"
+
+    out=$(MN_STUB_EXIT=2 "$runner" -c "$source_line; mn --stats || echo failure-came-through" 2>&1)
+    has "$shell_name: a report that fails, fails" "failure-came-through" "$out"
+
+    # the same through the plan loop, which used to end in success whatever
+    # mnemosyne said: `mn --restore abc && ...` carried on regardless
+    write_plan ""
+    out=$(MN_STUB_EXIT=2 "$runner" -c "$source_line; mn --restore abc || echo failure-came-through" 2>&1)
+    has "$shell_name: a refused plan fails too" "failure-came-through" "$out"
+    out=$("$runner" -c "$source_line; mn && echo success-came-through" 2>&1)
+    has "$shell_name: and quitting the browser is still success" "success-came-through" "$out"
+
+    # --- a line that is not a plan is shown, not acted on
+    # A newer mnemosyne could say something this wrapper does not know
+    # about; treating it as a window to open is the one thing not to do.
+    write_plan "something the wrapper has never seen\n"
+    : > "$log"
+    out=$("$runner" -c "$source_line; mn" 2>&1)
+    has "$shell_name: an unknown line is printed" "something the wrapper has never seen" "$out"
+    hasnt "$shell_name: and not taken for a session" "folder gone" "$out"
+    hasnt "$shell_name: nor opened" "term:" "$(cat "$log")"
 }
 
 printf 'shell wrapper self-test\n'
 
 run_shell bash "source $root/shell/mn.bash" bash
+
+# The installer wires mn.bash into ~/.zshrc as well, and zsh is what a Mac
+# opens by default, so it has to run there too.
+if command -v zsh >/dev/null 2>&1; then
+    run_shell zsh "source $root/shell/mn.bash" zsh bash
+else
+    printf '\nzsh\n'
+    skip "zsh with mn.bash" "zsh is not installed"
+fi
 
 if command -v fish >/dev/null 2>&1; then
     run_shell fish "source $root/shell/mn.fish" fish

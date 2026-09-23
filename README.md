@@ -410,8 +410,10 @@ mn --dangerously-skip-permissions   # force bypass
 ```
 
 Anything `mn` does not recognise is forwarded to `claude` untouched, so
-`mn --verbose` works. `mn`'s own flags (`--no-splash`, `--subagents`,
-`--no-model`, `--ask`) are filtered out before the rest is handed over.
+`mn --verbose` works. Every flag mnemosyne has stays with mnemosyne, along with
+`--ask`, which is the wrapper's own. The ones that answer and exit
+(`--stats`, `--search`, `--check-update` and the rest) behave exactly as they
+do when you run `mnemosyne` directly, exit status included.
 
 ## Non-interactive use
 
@@ -697,9 +699,9 @@ worth keeping as a fallback if the binary is ever missing:
 ## Development
 
 ```sh
-cargo test          # 245 tests, no network and no fixtures on disk
+cargo test          # 248 tests, no network and no fixtures on disk
 cargo clippy --all-targets -- -D warnings
-tools/shell-selftest.sh           # the fish and bash wrappers, 50 checks
+tools/shell-selftest.sh           # the wrappers under bash, zsh and fish, 153 checks
 python3 tools/gen-wordmark.py     # regenerate the logo (needs Pillow)
 python3 tools/demo-corpus.py /tmp/demo-home        # invented sessions
 HOME=/tmp/demo-home python3 tools/screenshot.py docs/list.png 150 24

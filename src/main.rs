@@ -114,8 +114,18 @@ fn plan_line(
     Ok(true)
 }
 
-/// Flags that stand alone, and flags that take the argument after them.
-const FLAGS: &[&str] = &[
+/// Every flag, sorted by what the shell wrappers have to do with it.
+///
+/// `mn` sits between you and this binary and decides, flag by flag, whether
+/// an option is ours or `claude`'s, and whether to read a plan back at all.
+/// It used to keep its own list, which fell behind: `mn --stats` opened the
+/// browser and later handed `--stats` to claude, and `mn --check-update`
+/// printed "folder gone" because its answer was read as a plan line. The
+/// wrappers now tag their lists, and a test holds them to these.
+///
+/// Answer and exit. No browser, and nothing on stdout for a shell to act on,
+/// so the wrapper hands these to the binary and gets out of the way.
+const REPORT_FLAGS: &[&str] = &[
     "-h",
     "--help",
     "-V",
@@ -124,17 +134,32 @@ const FLAGS: &[&str] = &[
     "--json",
     "--refresh",
     "--stats",
+    "--update",
+    "--check-update",
+    "--write-config",
+];
+/// ...and the one of those that takes a value.
+const REPORT_VALUE_FLAGS: &[&str] = &["--search"];
+/// Shape the browser, or skip it, but still end in a plan.
+const PLAN_FLAGS: &[&str] = &[
     "--reopen",
     "--subagents",
     "--no-splash",
     "--no-mouse",
     "--no-model",
     "--no-update",
-    "--update",
-    "--check-update",
-    "--write-config",
 ];
-const VALUE_FLAGS: &[&str] = &["--search", "--search-mode", "--restore"];
+/// ...and the ones of those that take a value. `--search-mode` is here
+/// rather than with `--search` because on its own it answers nothing.
+const PLAN_VALUE_FLAGS: &[&str] = &["--search-mode", "--restore"];
+
+fn takes_value(a: &str) -> bool {
+    REPORT_VALUE_FLAGS.contains(&a) || PLAN_VALUE_FLAGS.contains(&a)
+}
+
+fn is_flag(a: &str) -> bool {
+    REPORT_FLAGS.contains(&a) || PLAN_FLAGS.contains(&a) || takes_value(a)
+}
 
 /// Refuse what we do not understand.
 ///
@@ -145,11 +170,11 @@ fn check_args(args: &[String]) -> std::result::Result<(), String> {
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
-        if VALUE_FLAGS.contains(&a) {
+        if takes_value(a) {
             i += 2;
             continue;
         }
-        if !FLAGS.contains(&a) {
+        if !is_flag(a) {
             return Err(format!(
                 "unknown option {a:?}\ntry --help for the ones that exist"
             ));
@@ -157,6 +182,11 @@ fn check_args(args: &[String]) -> std::result::Result<(), String> {
         i += 1;
     }
 
+    if args.iter().any(|a| a == "--search-mode") && !args.iter().any(|a| a == "--search") {
+        return Err(
+            "--search-mode picks how --search looks; it needs a --search to go with".into(),
+        );
+    }
     if let Some(v) = value_of(args, "--search-mode") {
         if !matches!(v, "content" | "file" | "tool" | "everything" | "all") {
             return Err(format!(
@@ -258,8 +288,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let interactive =
-        !(has("--list") || has("--json") || has("--stats") || args.iter().any(|a| a == "--search"));
+    // The rest of the report flags have answered and returned by now.
+    let interactive = !args
+        .iter()
+        .any(|a| REPORT_FLAGS.contains(&a.as_str()) || REPORT_VALUE_FLAGS.contains(&a.as_str()));
     let use_splash =
         interactive && !has("--no-splash") && std::env::var_os("MNEMOSYNE_NO_SPLASH").is_none();
 
@@ -956,10 +988,85 @@ mod arg_tests {
     }
 
     #[test]
+    fn a_search_mode_with_nothing_to_search_is_refused() {
+        // It opened the browser as though it had not been typed, which is
+        // what an ignored flag looks like -- `--search-mode file` on its own
+        // reads like it should be a file search.
+        let e = check_args(&args("--search-mode file")).unwrap_err();
+        assert!(e.contains("--search"), "should say what it goes with: {e}");
+        assert!(check_args(&args("--search-mode file --search x")).is_ok());
+    }
+
+    #[test]
     fn a_query_that_looks_like_a_flag_is_still_a_query() {
         // The value after --search is whatever you typed, even if it starts
         // with a dash; it must not be checked as an option.
         assert!(check_args(&args("--search --weird-thing")).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod wrapper_tests {
+    use super::{PLAN_FLAGS, PLAN_VALUE_FLAGS, REPORT_FLAGS, REPORT_VALUE_FLAGS};
+    use std::collections::BTreeSet;
+
+    const WRAPPERS: [(&str, &str); 2] = [
+        ("shell/mn.fish", include_str!("../shell/mn.fish")),
+        ("shell/mn.bash", include_str!("../shell/mn.bash")),
+    ];
+
+    /// The flags on the wrapper lines tagged `# flags: <kind>`.
+    fn tagged(src: &str, kind: &str) -> BTreeSet<String> {
+        src.lines()
+            .filter_map(|l| {
+                let (code, tag) = l.split_once("# flags:")?;
+                (tag.trim() == kind).then_some(code)
+            })
+            .flat_map(|code| code.split(|c: char| c.is_whitespace() || c == '|' || c == ')'))
+            .filter(|t| t.starts_with('-'))
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn set(flags: &[&str]) -> BTreeSet<String> {
+        flags.iter().map(|f| f.to_string()).collect()
+    }
+
+    #[test]
+    fn the_wrappers_route_every_flag_the_way_the_binary_means_it() {
+        // Each wrapper decides for itself which options are mnemosyne's and
+        // which are claude's, and whether to read a plan back. Its list fell
+        // behind this one: `mn --stats` opened the browser and passed
+        // --stats on to claude, and `mn --check-update` answered "folder
+        // gone" because its reply was taken for a plan line.
+        for (file, src) in WRAPPERS {
+            for (kind, want) in [
+                ("report", REPORT_FLAGS),
+                ("report value", REPORT_VALUE_FLAGS),
+                ("plan", PLAN_FLAGS),
+                ("plan value", PLAN_VALUE_FLAGS),
+            ] {
+                let have = tagged(src, kind);
+                let want = set(want);
+                let missing: Vec<_> = want.difference(&have).collect();
+                let extra: Vec<_> = have.difference(&want).collect();
+                assert!(
+                    missing.is_empty() && extra.is_empty(),
+                    "{file}, `# flags: {kind}`: missing {missing:?}, not the binary's {extra:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_tag_reader_sees_both_shells_syntax() {
+        // A test that reads nothing passes; make sure this one reads.
+        let fish = "            case --a --b-c  # flags: plan";
+        let bash = "            --a|--b-c) mine+=(\"$a\") ;;  # flags: plan";
+        for src in [fish, bash] {
+            assert_eq!(tagged(src, "plan"), set(&["--a", "--b-c"]), "{src}");
+            assert!(tagged(src, "report").is_empty());
+        }
     }
 }
 

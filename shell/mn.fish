@@ -9,17 +9,28 @@ function mn --description 'Browse, search, tag and resume Claude Code sessions (
     set -l fwd
     set -l no_bypass 0
     set -l take_value 0
+    set -l report 0
     for a in $argv
         if test $take_value -eq 1
             set -a mine $a
             set take_value 0
             continue
         end
+        # Every flag mnemosyne has, sorted by what it does. The tags are read
+        # by a test that holds these lists to the binary's own (src/main.rs);
+        # a list kept by hand here fell behind, and `mn --stats` opened the
+        # browser and passed --stats on to claude.
         switch $a
-            case --no-splash --subagents --no-model --no-update --update --check-update --write-config --reopen
+            case -h --help -V --version --list --json --refresh --stats --update --check-update --write-config  # flags: report
                 set -a mine $a
-            case --restore
-                # takes a count, which belongs to mnemosyne and not to claude
+                set report 1
+            case --search  # flags: report value
+                set -a mine $a
+                set report 1
+                set take_value 1
+            case --reopen --subagents --no-splash --no-mouse --no-model --no-update  # flags: plan
+                set -a mine $a
+            case --search-mode --restore  # flags: plan value
                 set -a mine $a
                 set take_value 1
             case --ask --no-bypass
@@ -27,6 +38,16 @@ function mn --description 'Browse, search, tag and resume Claude Code sessions (
             case '*'
                 set -a fwd $a
         end
+    end
+
+    # An answer rather than a choice: there is no plan to read back, so let
+    # mnemosyne have the terminal and keep its exit status. Read as a plan,
+    # "up to date on 0.4.14" came out as "folder gone, skipping:". Anything
+    # that looked like claude's goes along too, so that a typo is refused
+    # instead of quietly dropped.
+    if test $report -eq 1
+        command mnemosyne $mine $fwd
+        return
     end
 
     # Read the plan as it is produced, not after the browser exits.
@@ -59,11 +80,18 @@ function mn --description 'Browse, search, tag and resume Claude Code sessions (
                     test -z "$tmux_first"; and set tmux_first $nm
                 case wintmux
                     set -a notes (__mn_wintmux "$p[2]" "$p[3]" "$p[4]" "$p[6]" "$p[7]" -- $extra $fwd 2>&1)
-                case '*'
+                case window
                     set -a notes (__mn_window "$p[2]" "$p[3]" "$p[4]" "$p[6]" -- $extra $fwd 2>&1)
+                case '*'
+                    # Not a plan this wrapper knows how to carry out -- from
+                    # a newer mnemosyne, say. Show it; do not guess.
+                    set -a notes $line
             end
         end </dev/null
     end
+    # mnemosyne's own status, not the loop's: a refused flag has to fail
+    # here too, or `mn --restore abc && ...` carries on regardless.
+    set -l st $pipestatus[1]
 
     for n in $notes
         echo $n
@@ -72,7 +100,7 @@ function mn --description 'Browse, search, tag and resume Claude Code sessions (
         __mn_tmux_attach $tmux_first
         return 0
     end
-    test -z "$finally"; and return 0
+    test -z "$finally"; and return $st
 
     # Landing in this terminal: the cd has to happen here, which is the whole
     # reason this is a function.
@@ -148,7 +176,10 @@ function __mn_tmux_ensure --description 'Make sure a tmux session exists for thi
     set -l wname (string sub -l 18 -- (string replace -ra '[^a-zA-Z0-9._-]' '-' -- $ttl))
     test -z "$wname"; and set wname $name
 
-    if tmux new-session -d -s $name -n "$wname" -c "$cwd" "exec claude --resume $sid $margs $extra" 2>/dev/null
+    # Separate words, which tmux runs as they are. Given one string it hands
+    # that to your default shell to parse -- whichever shell that is -- and
+    # an argument with a space in it came out as two.
+    if tmux new-session -d -s $name -n "$wname" -c "$cwd" (__mn_claude) --resume $sid $margs $extra 2>/dev/null
         echo "  ▶ $ttl  (tmux $name)" >&2
         echo $name
         return 0
@@ -236,7 +267,9 @@ function __mn_window --description 'Open one resumed session in its own terminal
     end
     set -l margs
     test -n "$mdl"; and set margs --model $mdl
-    set -l inner "cd "(string escape -- $cwd)"; exec claude --resume $sid $margs $extra"
+    # Each word escaped on its own: pasted in bare, `--add-dir "/my projects"`
+    # arrived as two arguments, and a `$(...)` inside one was run.
+    set -l inner "cd "(string escape -- $cwd)"; exec "(string join ' ' -- (string escape -- (__mn_claude) --resume $sid $margs $extra))
 
     set -l term (__mn_term_open "$cwd" "$inner")
     or begin
@@ -244,6 +277,13 @@ function __mn_window --description 'Open one resumed session in its own terminal
         return 1
     end
     echo "  ▶ $ttl  ($term)"
+end
+
+function __mn_claude --description 'The claude this shell would run, as a path'
+    # A new window's login shell and a tmux server started from somewhere
+    # else need not have the same PATH as you, and "claude: command not
+    # found" in a window that then closes is a poor way to find that out.
+    command -s claude; or echo claude
 end
 
 function __mn_term_open --description 'Run a command in a new terminal window; echo the terminal used'
