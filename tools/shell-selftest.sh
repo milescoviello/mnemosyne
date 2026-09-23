@@ -151,6 +151,9 @@ WINDOW_PLAN="window\t$tmp/work-a\t026bcdb5-8d88-4ad7-9f23-58649bf4f353\t\tdefaul
 # landing in this terminal: the one case that needs the shell to cd
 HERE_PLAN="here\t$tmp/work-b\t33333333-4444-5555-6666-777777777777\tclaude-opus-5\tplan\tright here\n"
 
+# a session that was started with prompts off
+BYPASS_PLAN="here\t$tmp/work-b\t12121212-3434-5656-7878-909090909090\t\tbypassPermissions\tno prompts\n"
+
 # ctrl+t: into tmux, in this terminal. The attach at the end cannot work
 # here, with no terminal to attach, but everything before it can be checked.
 TMUX_PLAN="tmux\t$tmp/work-b\t66666666-7777-8888-9999-000000000000\t\tdefault\tstraight into tmux\t\n"
@@ -383,6 +386,25 @@ run_shell() {
     else
         ok "$shell_name: nothing in an argument is run"
     fi
+
+    # --- a permission mode you ask for replaces the recorded one
+    # Only `--permission-mode plan` was recognised. Written with an `=`, the
+    # recorded bypass was added as well, so asking for plan mode could leave
+    # prompts off.
+    write_plan "$BYPASS_PLAN"
+    : > "$log"
+    "$runner" -c "$source_line; mn --permission-mode=plan" >/dev/null 2>&1
+    seen=$(grep '^claude-args:' "$log")
+    has "$shell_name: --permission-mode=plan is passed on" "[--permission-mode=plan]" "$seen"
+    hasnt "$shell_name: and the recorded bypass is not added to it" "[--dangerously-skip-permissions]" "$seen"
+    : > "$log"
+    "$runner" -c "$source_line; mn --permission-mode plan" >/dev/null 2>&1
+    seen=$(grep '^claude-args:' "$log")
+    hasnt "$shell_name: nor to the two-word form" "[--dangerously-skip-permissions]" "$seen"
+    : > "$log"
+    "$runner" -c "$source_line; mn" >/dev/null 2>&1
+    has "$shell_name: with nothing asked, the recorded bypass comes back" \
+        "[--dangerously-skip-permissions]" "$(grep '^claude-args:' "$log")"
 
     # --- our flags are ours, claude's are claude's
     write_plan "$HERE_PLAN"

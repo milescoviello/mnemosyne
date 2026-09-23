@@ -701,7 +701,7 @@ worth keeping as a fallback if the binary is ever missing:
 ```sh
 cargo test          # 250 tests, no network and no fixtures on disk
 cargo clippy --all-targets -- -D warnings
-tools/shell-selftest.sh           # the wrappers under bash, zsh and fish, 168 checks
+tools/shell-selftest.sh           # the wrappers under bash, zsh and fish, 180 checks
 python3 tools/gen-wordmark.py     # regenerate the logo (needs Pillow)
 python3 tools/demo-corpus.py /tmp/demo-home        # invented sessions
 HOME=/tmp/demo-home python3 tools/screenshot.py docs/list.png 150 24

@@ -251,7 +251,10 @@ function __mn_perms --description 'Map a session\'s recorded permission mode to 
     if test "$no_bypass" = 1
         return 0
     end
+    # Either spelling: with an `=` it went unseen, and the recorded bypass
+    # was added next to the plan mode you asked for.
     if contains -- --dangerously-skip-permissions $fwd; or contains -- --permission-mode $fwd
+        or string match -q -- '--permission-mode=*' $fwd
         return 0
     end
 

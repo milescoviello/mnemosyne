@@ -15,7 +15,9 @@ __mn_perms() {
     [ "$no_bypass" = "1" ] && return 0
     for a in "$@"; do
         case "$a" in
-            --dangerously-skip-permissions|--permission-mode) return 0 ;;
+            # either spelling: with an `=` it went unseen, and the recorded
+            # bypass was added next to the plan mode you asked for
+            --dangerously-skip-permissions|--permission-mode|--permission-mode=*) return 0 ;;
         esac
     done
     case "$mode" in
