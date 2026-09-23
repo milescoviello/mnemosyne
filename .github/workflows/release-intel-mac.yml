@@ -43,11 +43,24 @@ jobs:
           cp shell/mn.fish shell/mn.bash README.md LICENSE dist/
           tar -C dist -czf mnemosyne-x86_64-macos.tar.gz .
           shasum -a 256 mnemosyne-x86_64-macos.tar.gz > mnemosyne-x86_64-macos.tar.gz.sha256
+      # Attach to the release the main workflow makes; never make one. Built
+      # on a plentiful runner this finishes first, and a release it created
+      # would be "latest" with only this file on it -- for a few minutes
+      # every other platform's installer and updater found nothing to
+      # download, and the release notes were never generated.
+      #
       # Only a tag has a release to attach to. Run by hand on a branch, this
       # is a build check and nothing more.
-      - uses: softprops/action-gh-release@v2
+      - name: attach to the release
         if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: |
-            mnemosyne-x86_64-macos.tar.gz
-            mnemosyne-x86_64-macos.tar.gz.sha256
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          for _ in $(seq 1 60); do
+            gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1 && break
+            sleep 20
+          done
+          gh release upload "$TAG" --repo "$REPO" --clobber \
+            mnemosyne-x86_64-macos.tar.gz mnemosyne-x86_64-macos.tar.gz.sha256
