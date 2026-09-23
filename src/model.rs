@@ -420,7 +420,7 @@ mod tests {
             let k = 1024u64.pow(p);
             for n in (k * 9 - 3_000..k * 11)
                 .step_by((k / 512) as usize)
-                .chain(k - 3_000..k + 3_000)
+                .chain(k.saturating_sub(3_000)..k + 3_000)
             {
                 let s = human_size(n);
                 let (v, _) = split(&s);
