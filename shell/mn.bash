@@ -100,8 +100,10 @@ __mn_spawn() {
     fi
 }
 
-# Make sure a tmux session exists for this chat; print its name. Progress goes
-# to stderr so the caller can capture just the name.
+# Make sure a tmux session exists for this chat. Prints its name, then `new`
+# or `running`, and nothing else: saying what happened is the caller's job,
+# once, in the notes it prints after the browser has closed. Printing here as
+# well said everything twice. Errors go to stderr.
 __mn_tmux_ensure() {
     local cwd="$1" sid="$2" mdl="$3" ttl="$4" want="$5"; shift 5
     [ "$1" = "--" ] && shift
@@ -118,8 +120,7 @@ __mn_tmux_ensure() {
     have="$(tmux list-panes -a -F '#{session_name}	#{pane_start_command}' 2>/dev/null \
             | grep -F -- "--resume $sid" | head -1 | cut -f1)"
     if [ -n "$have" ]; then
-        printf '  ▶ %s already running — resuming where it left off\n' "$have" >&2
-        printf '%s\n' "$have"
+        printf '%s\nrunning\n' "$have"
         return 0
     fi
     # The name is taken, and not by this chat -- the check above would have
@@ -142,12 +143,21 @@ __mn_tmux_ensure() {
     # an argument with a space in it came out as two.
     if tmux new-session -d -s "$name" -n "$wname" -c "$cwd" \
            "$(__mn_claude)" --resume "$sid" "${margs[@]}" "$@" 2>/dev/null; then
-        printf '  ▶ %s  (tmux %s)\n' "$ttl" "$name" >&2
-        printf '%s\n' "$name"
+        printf '%s\nnew\n' "$name"
         return 0
     fi
     printf '  ✗ could not create tmux session %s\n' "$name" >&2
     return 1
+}
+
+# One line saying where a chat went: $1 title, $2 where, $3 `running` if it
+# was open already.
+__mn_opened() {
+    if [ "$3" = running ]; then
+        printf '  ▶ %s  (%s, already running)\n' "$1" "$2"
+    else
+        printf '  ▶ %s  (%s)\n' "$1" "$2"
+    fi
 }
 
 # attach-session fails when already inside tmux; switch-client is the in-tmux
@@ -208,10 +218,9 @@ mn() {
     # Progress is collected, not printed: the browser is still on screen
     # while these run, and writing over it is what made it look like mn had
     # half-exited. It all comes out once the screen is ours again.
-    local finally="" tmux_first="" notes="" line mode cwd sid mdl prm ttl tmx nm term inner name flag
-    # __mn_tmux_ensure prints the session name on stdout and its progress on
-    # stderr, so the two have to stay apart: the name is a value, the
-    # progress is for you to read afterwards.
+    local finally="" tmux_first="" notes="" line mode cwd sid mdl prm ttl tmx term inner name state res flag
+    # Errors from __mn_tmux_ensure, kept apart from the name it prints and
+    # shown with everything else once the browser has closed.
     local errf; errf="$(mktemp)" || return 1
     # mnemosyne's own status, which a process substitution does not hand
     # back on its own. A refused flag has to fail here too, or
@@ -234,17 +243,20 @@ mn() {
                 finally="$line"
                 ;;
             tmux)
-                nm="$(__mn_tmux_ensure "$cwd" "$sid" "$mdl" "$ttl" "$tmx" -- "${extra[@]}" "${fwd[@]}" 2>>"$errf")" \
-                    && [ -z "$tmux_first" ] && tmux_first="$nm"
+                res="$(__mn_tmux_ensure "$cwd" "$sid" "$mdl" "$ttl" "$tmx" -- "${extra[@]}" "${fwd[@]}" 2>>"$errf")" || continue
+                { IFS= read -r name; IFS= read -r state; } <<< "$res"
+                [ -z "$tmux_first" ] && tmux_first="$name"
+                notes+="$(__mn_opened "$ttl" "tmux $name" "$state")"$'\n'
                 ;;
             wintmux)
                 [ -d "$cwd" ] || { notes+="  ✗ folder gone, skipping: $cwd"$'\n'; continue; }
                 if command -v tmux >/dev/null 2>&1; then
-                    name="$(__mn_tmux_ensure "$cwd" "$sid" "$mdl" "$ttl" "$tmx" -- "${extra[@]}" "${fwd[@]}" 2>>"$errf")" || continue
+                    res="$(__mn_tmux_ensure "$cwd" "$sid" "$mdl" "$ttl" "$tmx" -- "${extra[@]}" "${fwd[@]}" 2>>"$errf")" || continue
+                    { IFS= read -r name; IFS= read -r state; } <<< "$res"
                     if term="$(__mn_term_open "$cwd" "exec tmux attach-session -t =$name")"; then
-                        notes+="  ▶ $ttl  ($term → tmux $name)"$'\n'
+                        notes+="$(__mn_opened "$ttl" "$term → tmux $name" "$state")"$'\n'
                     else
-                        notes+="  ▶ $ttl  (tmux $name — no terminal to show it in; ctrl+t attaches)"$'\n'
+                        notes+="$(__mn_opened "$ttl" "tmux $name" "$state") — no terminal to show it in; ctrl+t attaches"$'\n'
                     fi
                 else
                     inner="cd $(printf %q "$cwd"); exec $(__mn_quote "$(__mn_claude)" --resume "$sid" "${margs[@]}" "${extra[@]}" "${fwd[@]}")"

@@ -60,6 +60,13 @@ cat > "$bin/mnemosyne" <<EOF
 # what it was asked, one bracket per argument so a split value shows
 { printf 'mnemosyne:'; printf ' [%s]' "\$@"; echo; } >> "\$MN_TEST_LOG.mn"
 cat "$plan_file"
+# Stay "open" a moment after handing the plan over, the way the browser
+# does, then say when it closed: whatever the wrapper prints before this
+# line would have been drawn on top of the browser.
+if [ -n "\${MN_STUB_LINGER:-}" ]; then
+    sleep 1
+    echo "-- browser closed --" >&2
+fi
 exit \${MN_STUB_EXIT:-0}
 EOF
 
@@ -144,6 +151,10 @@ WINDOW_PLAN="window\t$tmp/work-a\t026bcdb5-8d88-4ad7-9f23-58649bf4f353\t\tdefaul
 # landing in this terminal: the one case that needs the shell to cd
 HERE_PLAN="here\t$tmp/work-b\t33333333-4444-5555-6666-777777777777\tclaude-opus-5\tplan\tright here\n"
 
+# ctrl+t: into tmux, in this terminal. The attach at the end cannot work
+# here, with no terminal to attach, but everything before it can be checked.
+TMUX_PLAN="tmux\t$tmp/work-b\t66666666-7777-8888-9999-000000000000\t\tdefault\tstraight into tmux\t\n"
+
 # a seventh field: the tmux session name chosen at the prompt
 NAMED_PLAN="wintmux\t$tmp/work-a\t026bcdb5-8d88-4ad7-9f23-58649bf4f353\t\tdefault\tnamed one\tmy-own-name\n"
 
@@ -197,6 +208,49 @@ run_shell() {
         skip "$shell_name: tmux checks" "tmux is not installed"
     fi
 
+    # --- nothing is drawn over the browser, and each window is said once
+    # Window lines arrive while the browser is still on screen. Anything
+    # printed then lands on top of it and vanishes with it -- which fish did
+    # with every tmux session it created, and with "folder gone".
+    if [ -n "$real_tmux" ]; then
+        "$bin/tmux" kill-server 2>/dev/null
+        write_plan "$WINTMUX_PLAN"
+        out=$(MN_STUB_LINGER=1 "$runner" -c "$source_line; mn" 2>&1)
+        local early="${out%%"-- browser closed --"*}"
+        if [ "$early" = "$out" ]; then
+            bad "$shell_name: nothing is printed over the browser" "the stub never said it closed"
+        elif [ -n "$early" ]; then
+            bad "$shell_name: nothing is printed over the browser" "printed while it was open: $early"
+        else
+            ok "$shell_name: nothing is printed over the browser"
+        fi
+        local times; times=$(grep -c "parser byte offsets" <<< "$out")
+        if [ "$times" = 1 ]; then
+            ok "$shell_name: each window is reported once"
+        else
+            bad "$shell_name: each window is reported once" "reported $times times"
+        fi
+        "$bin/tmux" kill-server 2>/dev/null
+    else
+        skip "$shell_name: nothing printed over the browser" "tmux is not installed"
+    fi
+
+    # --- ctrl+t, into tmux in this terminal
+    if [ -n "$real_tmux" ]; then
+        "$bin/tmux" kill-server 2>/dev/null
+        write_plan "$TMUX_PLAN"
+        : > "$log"
+        out=$("$runner" -c "$source_line; mn" 2>&1)
+        local tsess; tsess=$("$bin/tmux" list-sessions -F '#{session_name}' 2>/dev/null)
+        has "$shell_name: ctrl+t makes the session" "mn-66666666" "$tsess"
+        has "$shell_name: and says so" "straight into tmux  (tmux mn-66666666)" "$out"
+        local tn; tn=$(grep -c "straight into tmux" <<< "$out")
+        if [ "$tn" = 1 ]; then ok "$shell_name: once"; else bad "$shell_name: once" "said $tn times"; fi
+        "$bin/tmux" kill-server 2>/dev/null
+    else
+        skip "$shell_name: ctrl+t" "tmux is not installed"
+    fi
+
     # --- a tmux session named at the prompt
     if [ -n "$real_tmux" ]; then
         "$bin/tmux" kill-server 2>/dev/null
@@ -213,7 +267,7 @@ run_shell() {
         out=$("$runner" -c "$source_line; mn" 2>&1)
         seen=$(cat "$log")
         hasnt "$shell_name: a named session is still found again" "claude:" "$seen"
-        has "$shell_name: and attached to by its real name" "my-own-name already running" "$out"
+        has "$shell_name: and attached to by its real name" "tmux my-own-name, already running" "$out"
         "$bin/tmux" kill-server 2>/dev/null
     else
         skip "$shell_name: named tmux session" "tmux is not installed"

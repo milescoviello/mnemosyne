@@ -76,8 +76,13 @@ function mn --description 'Browse, search, tag and resume Claude Code sessions (
                     set finally $line
                 case tmux
                     # Create each detached as it arrives; attach once, after.
-                    set -l nm (__mn_tmux_ensure "$p[2]" "$p[3]" "$p[4]" "$p[6]" "$p[7]" -- $extra $fwd)
-                    test -z "$tmux_first"; and set tmux_first $nm
+                    set -l res (__mn_tmux_ensure "$p[2]" "$p[3]" "$p[4]" "$p[6]" "$p[7]" -- $extra $fwd 2>&1)
+                    if test $status -eq 0
+                        test -z "$tmux_first"; and set tmux_first $res[-2]
+                        set -a notes (__mn_opened "$p[6]" "tmux $res[-2]" $res[-1])
+                    else
+                        set -a notes $res
+                    end
                 case wintmux
                     set -a notes (__mn_wintmux "$p[2]" "$p[3]" "$p[4]" "$p[6]" "$p[7]" -- $extra $fwd 2>&1)
                 case window
@@ -122,7 +127,11 @@ function mn --description 'Browse, search, tag and resume Claude Code sessions (
 end
 
 function __mn_tmux_ensure --description 'Make sure a tmux session exists for this chat; echo its name'
-    # Progress messages go to stderr so the caller can capture just the name.
+    # Prints the name, then `new` or `running`, and nothing else: saying what
+    # happened is the caller's job, once, in the notes it prints after the
+    # browser has closed. Printing here as well said everything twice -- and
+    # its stderr went straight onto the browser, which was still open.
+    # Errors go to stderr, for the caller to collect.
     set -l cwd $argv[1]
     set -l sid $argv[2]
     set -l mdl $argv[3]
@@ -149,9 +158,8 @@ function __mn_tmux_ensure --description 'Make sure a tmux session exists for thi
     set -l running (tmux list-panes -a -F '#{session_name}	#{pane_start_command}' 2>/dev/null \
         | string match -r '^[^\t]+\t.*--resume[ =]'$sid'.*$' | head -1)
     if test -n "$running"
-        set -l have (string split \t -- $running)[1]
-        echo "  ▶ $have already running — resuming where it left off" >&2
-        echo $have
+        string split \t -- $running | head -1
+        echo running
         return 0
     end
     # The name is taken, and not by this chat -- the check above would have
@@ -180,8 +188,8 @@ function __mn_tmux_ensure --description 'Make sure a tmux session exists for thi
     # that to your default shell to parse -- whichever shell that is -- and
     # an argument with a space in it came out as two.
     if tmux new-session -d -s $name -n "$wname" -c "$cwd" (__mn_claude) --resume $sid $margs $extra 2>/dev/null
-        echo "  ▶ $ttl  (tmux $name)" >&2
         echo $name
+        echo new
         return 0
     end
     echo "  ✗ could not create tmux session $name" >&2
@@ -196,15 +204,31 @@ function __mn_wintmux --description 'Open a resumed session in its own window, r
         __mn_window $argv[1..4] $argv[6..-1]
         return $status
     end
-    set -l name (__mn_tmux_ensure $argv)
-    or return 1
+    # Its errors are captured here, not left on stderr: this runs while the
+    # browser is still on screen, and stderr is where the browser is drawn.
+    set -l res (__mn_tmux_ensure $argv 2>&1)
+    or begin
+        printf '%s\n' $res
+        return 1
+    end
+    set -l name $res[-2]
+    set -l state $res[-1]
     set -l ttl $argv[4]
     set -l term (__mn_term_open "$argv[1]" "exec tmux attach-session -t ="$name)
     or begin
-        echo "  ▶ $ttl  (tmux $name — no terminal to show it in; ctrl+t attaches)"
+        echo (__mn_opened "$ttl" "tmux $name" $state)" — no terminal to show it in; ctrl+t attaches"
         return 0
     end
-    echo "  ▶ $ttl  ($term → tmux $name)"
+    __mn_opened "$ttl" "$term → tmux $name" $state
+end
+
+function __mn_opened --description 'One line saying where a chat went'
+    # title, where, and `running` if it was open already
+    if test "$argv[3]" = running
+        echo "  ▶ $argv[1]  ($argv[2], already running)"
+    else
+        echo "  ▶ $argv[1]  ($argv[2])"
+    end
 end
 
 function __mn_tmux_attach --description 'Attach to a tmux session, from inside or outside tmux'
