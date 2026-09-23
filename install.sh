@@ -93,6 +93,16 @@ if [ "$force_build" = 1 ] || ! fetch_prebuilt; then
 fi
 say "installed $bindir/mnemosyne"
 
+# A shell nobody has configured yet has nothing to add to. A fresh Mac runs
+# zsh and has no ~/.zshrc; fish that has never been started has no
+# ~/.config/fish. Only touching what already existed left those machines
+# with nothing wired up at all, so make it for the shell you actually use.
+case "${SHELL##*/}" in
+    zsh) [ -f "$HOME/.zshrc" ] || : > "$HOME/.zshrc" ;;
+    bash) [ -f "$HOME/.bashrc" ] || : > "$HOME/.bashrc" ;;
+    fish) mkdir -p "$HOME/.config/fish" ;;
+esac
+
 # fish autoloads functions from this directory
 if [ -d "$HOME/.config/fish" ]; then
     mkdir -p "$HOME/.config/fish/functions"
@@ -121,6 +131,7 @@ done
 
 # An installed binary that is not on PATH is not installed. Warning about it
 # and carrying on leaves `mn` calling a command the shell cannot find.
+path_added=""
 case ":$PATH:" in
     *":$bindir:"*) ;;
     *)
@@ -145,6 +156,7 @@ case ":$PATH:" in
             fi
         fi
         [ -z "$added" ] && say "note: $bindir is not on your PATH and no shell config was found"
+        path_added="$added"
         ;;
 esac
 
@@ -154,18 +166,25 @@ say "building the index…"
 [ -n "$KEEP" ] && rm -rf "$KEEP"
 
 say ""
-# Be honest about whether `mn` works in the shell you are standing in.
+# Be honest about whether `mn` works in the shell you are standing in. It
+# read its config before any of this happened, so a PATH added above is not
+# in it yet: "run this once" has to include that, or following it exactly
+# ends in "command not found".
 case "${SHELL##*/}" in
     fish)
-        if [ -f "$HOME/.config/fish/functions/mn.fish" ]; then
-            say "done — run: mn"
+        if [ ! -f "$HOME/.config/fish/functions/mn.fish" ]; then
+            say "done, but the fish function could not be installed"
+        elif [ -n "$path_added" ]; then
+            say "done — open a new shell, or run this once to use it now:"
+            say "    fish_add_path $bindir"
         else
-            say "done, but no fish config was found; see shell/mn.fish"
+            say "done — run: mn"
         fi
         ;;
     bash | zsh)
         if [ -n "$wired" ]; then
             say "done — open a new shell, or run this once to use it now:"
+            [ -n "$path_added" ] && say "    export PATH=\"$bindir:\$PATH\""
             say "    $line"
         else
             say "done, but nothing was wired up: no .bashrc or .zshrc found."

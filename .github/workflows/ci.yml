@@ -33,6 +33,10 @@ jobs:
         run: |
           sudo apt-get install -y --no-install-recommends fish tmux zsh
           tools/shell-selftest.sh
+      # The installer, into empty home directories, for each shell it claims
+      # to set up -- checked by running `mn` in a new shell afterwards.
+      - name: installer
+        run: tools/install-selftest.sh
       # Drives the real binary on a real pty. Guards the one contract no Rust
       # test can see: the interface draws on stderr and prints the chosen
       # session on stdout, so anything that writes to stdout by accident
