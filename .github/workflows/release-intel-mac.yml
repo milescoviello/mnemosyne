@@ -1,10 +1,13 @@
 name: release (intel mac)
 
-# Split out of release.yml on purpose. GitHub is retiring the macos-13
-# runners and a job can sit queued for an hour or more; leaving it in the
-# main matrix meant every other platform's release waited behind the one
-# nobody could schedule. This attaches its asset to the release whenever it
-# eventually runs, and if it never does, the other three shipped regardless.
+# Built on an Apple Silicon runner, cross-compiled for Intel. It used to ask
+# for macos-13, an Intel runner GitHub has retired: the job queued and never
+# ran, so no release ever carried an Intel Mac binary, and the installer on
+# one fell back to building from source -- or, with no Rust, told you to ask
+# for a platform that was supposedly already built.
+#
+# It stays a workflow of its own so that if the cross-build ever breaks, the
+# other three platforms still ship.
 
 on:
   push:
@@ -16,7 +19,7 @@ permissions:
 
 jobs:
   intel-mac:
-    runs-on: macos-13
+    runs-on: macos-14
     continue-on-error: true
     timeout-minutes: 30
     steps:
@@ -25,6 +28,14 @@ jobs:
         with:
           targets: x86_64-apple-darwin
       - run: cargo build --release --target x86_64-apple-darwin
+      # It was built on an arm64 machine; make sure what came out is not.
+      - name: check the architecture
+        run: |
+          archs=$(lipo -archs target/x86_64-apple-darwin/release/mnemosyne)
+          echo "built for: $archs"
+          [ "$archs" = x86_64 ]
+          # Rosetta, if the runner has it, can run it too
+          arch -x86_64 target/x86_64-apple-darwin/release/mnemosyne -V || echo "no Rosetta here to run it"
       - name: package
         run: |
           mkdir -p dist
@@ -32,7 +43,10 @@ jobs:
           cp shell/mn.fish shell/mn.bash README.md LICENSE dist/
           tar -C dist -czf mnemosyne-x86_64-macos.tar.gz .
           shasum -a 256 mnemosyne-x86_64-macos.tar.gz > mnemosyne-x86_64-macos.tar.gz.sha256
+      # Only a tag has a release to attach to. Run by hand on a branch, this
+      # is a build check and nothing more.
       - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
             mnemosyne-x86_64-macos.tar.gz

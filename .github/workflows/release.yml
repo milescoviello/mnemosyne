@@ -25,9 +25,8 @@ jobs:
           # macOS builds are native per architecture; there is no static libc
           # to link against, so these are ordinary dynamic binaries.
           #
-          # Intel macOS is built by release-intel-mac.yml instead. GitHub is
-          # winding those runners down and a job can sit queued for an hour,
-          # which would hold up every other platform's release behind it.
+          # Intel macOS is cross-built by release-intel-mac.yml, on its own
+          # so that a problem there cannot hold up the rest.
           - os: macos-14
             target: aarch64-apple-darwin
             asset: mnemosyne-aarch64-macos
