@@ -917,6 +917,8 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                 } else {
                     let folder = if s.cwd.is_empty() {
                         "—".to_string()
+                    } else if let Some(w) = &s.wsx {
+                        w.fit(c.folder)
                     } else {
                         short_cwd(&s.cwd)
                     };
@@ -1077,10 +1079,14 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
     let mut lines: Vec<Line> = vec![ripple_line(width, MARGIN, 1.7)];
 
     let mut facts: Vec<String> = vec![if s.cwd_missing {
-        format!("{} (gone)", short_cwd(&s.cwd))
+        format!("{} (gone)", s.folder())
     } else {
-        short_cwd(&s.cwd)
+        s.folder()
     }];
+    if s.wsx.is_some() {
+        // Otherwise `OS-DEV/shy-daffodil` could be any folder of that name.
+        facts.push("wsx".into());
+    }
     if !s.git_branch.is_empty() {
         facts.push(s.git_branch.clone());
     }
@@ -2076,6 +2082,40 @@ mod render_tests {
             let rows = render(&mut a, w, h);
             assert_eq!(rows.len(), h as usize);
         }
+    }
+
+    #[test]
+    fn a_wsx_workspace_is_named_rather_than_spelled_out() {
+        // The folder column is at most twenty cells, and every worktree
+        // starts with the same thirty-odd characters of state directory.
+        let mut a = app();
+        for (w, want) in [
+            (178u16, "OS-DEV/shy-daffodil"),
+            (150, "OS-DEV/shy-daffodil"),
+            (120, "OS…/shy-daffodil"),
+            (90, "shy-daffodil"),
+        ] {
+            let rows = render(&mut a, w, 30);
+            let row = rows
+                .iter()
+                .find(|r| r.contains("paging on x86"))
+                .unwrap_or_else(|| panic!("{w}: no wsx row"));
+            assert!(row.contains(want), "{w}: wanted {want:?} in {row:?}");
+            assert!(!row.contains(".local"), "{w}: {row:?}");
+        }
+    }
+
+    #[test]
+    fn the_rail_names_the_workspace_too() {
+        let mut a = app();
+        a.show_preview = true;
+        a.focus_id("gggggggg-7");
+        let rows = render(&mut a, 178, 30);
+        assert!(
+            rows.iter()
+                .any(|r| r.contains("OS-DEV/shy-daffodil") && r.contains("· wsx")),
+            "{rows:#?}"
+        );
     }
 
     #[test]

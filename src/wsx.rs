@@ -67,13 +67,9 @@ fn root_for(home: &str, xdg_state: Option<&str>, macos: bool) -> Option<String> 
     Some(format!("{state}/wsx/worktrees"))
 }
 
-/// Read a folder as a wsx workspace, if it is one.
-pub fn parse_path(cwd: &str) -> Option<Ref> {
-    parse_path_in(cwd, worktrees_root().as_deref())
-}
-
-/// The same, with the local worktree root handed in, so the tests never
-/// have to set an environment variable to get a known one.
+/// Read a folder as a wsx workspace, if it is one, given this machine's
+/// worktree root. Handed in rather than looked up, so the tests never have to
+/// set an environment variable to get a known one.
 pub fn parse_path_in(cwd: &str, root: Option<&str>) -> Option<Ref> {
     if let Some(root) = root
         .map(|r| r.trim_end_matches('/'))
@@ -153,6 +149,75 @@ pub fn parse_repo_list(out: &str, repo: &str) -> Option<String> {
         let path = after.trim_start_matches(' ');
         path.starts_with('/').then(|| path.to_string())
     })
+}
+
+/// What the list shows for a session that ran in a wsx workspace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Place {
+    pub repo: String,
+    pub slug: String,
+    /// Where under the worktree it ran; empty at its top.
+    pub rest: String,
+}
+
+impl Place {
+    /// `OS-DEV/shy-daffodil`, and the folder under it if it was not the top.
+    pub fn label(&self) -> String {
+        format!("{}/{}", self.repo, self.tail())
+    }
+
+    fn tail(&self) -> String {
+        if self.rest.is_empty() {
+            self.slug.clone()
+        } else {
+            format!("{}/{}", self.slug, self.rest)
+        }
+    }
+
+    /// The label in `w` columns. When it has to give, the repo gives first:
+    /// every row from one project shares it, and the workspace is what tells
+    /// them apart -- which is exactly the part that plain clipping cut.
+    pub fn fit(&self, w: usize) -> String {
+        use crate::model::{fit, width};
+        let full = self.label();
+        if width(&full) <= w {
+            return full;
+        }
+        let tail = self.tail();
+        let room = w.saturating_sub(width(&tail) + 1);
+        // two columns is the least that still says there was a repo: "O…"
+        if room >= 2 {
+            format!("{}/{tail}", fit(&self.repo, room))
+        } else {
+            fit(&tail, w)
+        }
+    }
+}
+
+/// What this machine's wsx has to say about a folder.
+#[derive(Clone, Debug, Default)]
+pub struct State {
+    /// Where its worktrees are, if there is a home to find them under.
+    pub root: Option<String>,
+}
+
+impl State {
+    /// Only what the environment says. Nothing is run.
+    pub fn here() -> State {
+        State {
+            root: worktrees_root(),
+        }
+    }
+
+    /// The workspace a session's folder belongs to, if it is in one.
+    pub fn place(&self, cwd: &str) -> Option<Place> {
+        let r = parse_path_in(cwd, self.root.as_deref())?;
+        Some(Place {
+            repo: r.repo,
+            slug: r.dir,
+            rest: r.rest,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -311,6 +376,59 @@ mod tests {
             Some("/Users/u/.local/state/wsx/worktrees")
         );
         assert_eq!(root_for("", Some("/x/state"), true), None);
+    }
+
+    fn place(repo: &str, slug: &str, rest: &str) -> Place {
+        Place {
+            repo: repo.into(),
+            slug: slug.into(),
+            rest: rest.into(),
+        }
+    }
+
+    #[test]
+    fn a_label_is_the_repo_and_the_workspace() {
+        assert_eq!(
+            place("OS-DEV", "shy-daffodil", "").label(),
+            "OS-DEV/shy-daffodil"
+        );
+        assert_eq!(
+            place("OS-DEV", "shy-daffodil", "kernel/mm").label(),
+            "OS-DEV/shy-daffodil/kernel/mm",
+            "a session further down says where"
+        );
+    }
+
+    #[test]
+    fn a_label_that_must_be_cut_loses_the_repo_before_the_workspace() {
+        // The folder column is 12, 16 or 20 cells. Clipping from the end
+        // kept "OS-DEV/shy-daf…", which is the part every row shares.
+        let p = place("OS-DEV", "shy-daffodil", "");
+        assert_eq!(p.fit(20), "OS-DEV/shy-daffodil");
+        assert_eq!(p.fit(16), "OS…/shy-daffodil");
+        assert_eq!(p.fit(15), "O…/shy-daffodil");
+        assert_eq!(p.fit(14), "shy-daffodil", "one column of repo says nothing");
+        assert_eq!(p.fit(12), "shy-daffodil", "no room for any of the repo");
+        assert_eq!(p.fit(8), "shy-daf…");
+        for w in 0..30 {
+            assert!(
+                crate::model::width(&p.fit(w)) <= w,
+                "fit({w}) = {:?} is too wide",
+                p.fit(w)
+            );
+        }
+    }
+
+    #[test]
+    fn a_state_with_no_home_still_knows_the_usual_place() {
+        // No local root: nothing is this machine's, but the shape is still
+        // recognised, so the label does not depend on the environment.
+        let s = State::default();
+        assert_eq!(
+            s.place("/home/u/.local/state/wsx/worktrees/OS-DEV/shy-daffodil"),
+            Some(place("OS-DEV", "shy-daffodil", ""))
+        );
+        assert_eq!(s.place("/home/u/OS-DEV"), None);
     }
 
     #[test]

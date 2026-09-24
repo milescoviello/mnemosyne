@@ -290,6 +290,9 @@ pub struct App {
     /// now. Empty in the normal case; when it is not, the offer to reopen
     /// them sits above the list until it is taken or waved away.
     pub reopen: Vec<crate::workspace::Entry>,
+    /// What wsx has to say about the folders sessions ran in. Empty until
+    /// main fills it in, so nothing built for a test ever asks the real one.
+    pub wsx: crate::wsx::State,
 
     preview_cache: HashMap<String, Vec<Turn>>,
     matcher: Matcher,
@@ -355,6 +358,7 @@ impl App {
             pending_tmux: None,
             tmux_name: String::new(),
             reopen: Vec::new(),
+            wsx: crate::wsx::State::default(),
             preview_cache: HashMap::new(),
             matcher: Matcher::new(Config::DEFAULT),
             deep_tx,
@@ -447,6 +451,29 @@ impl App {
                 }
             }
         }
+        self.apply_wsx();
+    }
+
+    /// Name the wsx workspace each session ran in, once per folder.
+    fn apply_wsx(&mut self) {
+        let wsx = &self.wsx;
+        let mut seen: HashMap<String, Option<crate::wsx::Place>> = HashMap::new();
+        for s in &mut self.all {
+            s.wsx = if s.cwd.is_empty() {
+                None
+            } else {
+                seen.entry(s.cwd.clone())
+                    .or_insert_with(|| wsx.place(&s.cwd))
+                    .clone()
+            };
+        }
+    }
+
+    /// Take in what wsx says, and redraw the list in its light.
+    pub fn set_wsx(&mut self, state: crate::wsx::State) {
+        self.wsx = state;
+        self.apply_wsx();
+        self.rebuild();
     }
 
     fn passes(&mut self, i: usize) -> bool {
@@ -580,7 +607,7 @@ impl App {
             let mut order: Vec<String> = Vec::new();
             let mut buckets: HashMap<String, Vec<usize>> = HashMap::new();
             for &i in &idx {
-                let d = crate::model::short_cwd(&self.all[i].cwd);
+                let d = self.all[i].folder();
                 if !buckets.contains_key(&d) {
                     order.push(d.clone());
                 }
@@ -1978,6 +2005,9 @@ pub mod fixtures {
         s
     }
 
+    /// Where the fixtures' wsx keeps its worktrees.
+    pub const WSX_ROOT: &str = "/home/u/.local/state/wsx/worktrees";
+
     /// A corpus with a bit of everything the interface has to cope with.
     pub fn corpus() -> Vec<Session> {
         let mut v = vec![
@@ -1987,6 +2017,22 @@ pub mod fixtures {
             session("dddddddd-4", "last month", "/home/u/other", 20),
             session("eeeeeeee-5", "ancient", "/home/u", 300),
             session("ffffffff-6", "", "", 2), // no title, no cwd
+            // Two wsx workspaces. Their names steer clear of what the
+            // fuzzy-filter tests hunt for: a worktree path is long enough to
+            // spell "ancient" by accident, and every `e` in it counts
+            // towards matching "eeeeeeee".
+            session(
+                "gggggggg-7",
+                "paging on x86",
+                &format!("{WSX_ROOT}/OS-DEV/shy-daffodil"),
+                3,
+            ),
+            session(
+                "hhhhhhhh-8",
+                "a GPT disk tool",
+                &format!("{WSX_ROOT}/OS-DEV/gdisk-app"),
+                8,
+            ),
         ];
         v[2].tags = vec!["eft".into()];
         v[3].cwd_missing = true;
@@ -2015,6 +2061,11 @@ pub mod fixtures {
         };
         let mut a = App::new(corpus(), meta, live, restore_model);
         a.persist = false;
+        // Handed in, not read from $HOME, so a label does not depend on
+        // whose machine the suite runs on.
+        a.set_wsx(crate::wsx::State {
+            root: Some(WSX_ROOT.into()),
+        });
         a
     }
 }
@@ -2355,7 +2406,7 @@ mod logic_tests {
     #[test]
     fn subagents_are_children_not_entries() {
         let a = app();
-        assert_eq!(a.item_count(), 6, "the two subagents are not top-level");
+        assert_eq!(a.item_count(), 8, "the two subagents are not top-level");
         assert_cursor_valid(&a);
     }
 
@@ -2453,6 +2504,43 @@ mod logic_tests {
         heads.dedup();
         assert_eq!(before, heads.len(), "a folder appeared twice: {heads:?}");
         assert_cursor_valid(&a);
+    }
+
+    #[test]
+    fn a_wsx_workspace_is_grouped_under_its_name() {
+        // Every workspace is its own folder under one long shared prefix, so
+        // grouping by the path made headings that differed only past the
+        // point where anyone reads.
+        let mut a = app();
+        a.do_action(Action::GroupByDir);
+        let heads: Vec<String> = a
+            .view
+            .iter()
+            .filter_map(|r| match r {
+                Row::Header(d, _) => Some(d.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            heads.iter().any(|h| h == "OS-DEV/shy-daffodil"),
+            "{heads:?}"
+        );
+        assert!(heads.iter().any(|h| h == "OS-DEV/gdisk-app"), "{heads:?}");
+        assert!(
+            !heads.iter().any(|h| h.contains(".local/state")),
+            "a heading still spells out the worktree: {heads:?}"
+        );
+    }
+
+    #[test]
+    fn a_session_that_did_not_run_in_wsx_has_no_workspace() {
+        let a = app();
+        for s in &a.all {
+            let under = s.cwd.starts_with(&format!("{WSX_ROOT}/"));
+            assert_eq!(s.wsx.is_some(), under, "{:?}", s.cwd);
+        }
+        let s = a.all.iter().find(|s| s.id == "gggggggg-7").unwrap();
+        assert_eq!(s.folder(), "OS-DEV/shy-daffodil");
     }
 
     #[test]

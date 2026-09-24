@@ -67,6 +67,10 @@ pub struct Session {
     /// The directory this session ran in is gone. Resuming still works, but
     /// lands wherever you happen to be standing, so it is worth seeing first.
     pub cwd_missing: bool,
+    /// The wsx workspace it ran in, read off the folder. Worked out on every
+    /// load rather than stored in the index: it depends on what wsx says now,
+    /// not on anything in the transcript.
+    pub wsx: Option<crate::wsx::Place>,
 }
 
 impl Session {
@@ -94,6 +98,15 @@ impl Session {
             self.last_ts - self.first_ts
         } else {
             0
+        }
+    }
+
+    /// Where it ran, as the list names it: `OS-DEV/shy-daffodil` for a wsx
+    /// workspace, the folder otherwise.
+    pub fn folder(&self) -> String {
+        match &self.wsx {
+            Some(w) => w.label(),
+            None => short_cwd(&self.cwd),
         }
     }
 

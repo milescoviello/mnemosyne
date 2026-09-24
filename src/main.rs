@@ -638,6 +638,7 @@ fn main() -> Result<()> {
         live::live_map(),
         restore_model,
     );
+    app.set_wsx(wsx::State::here());
     app.show_subagents = has("--subagents");
     app.rebuild();
 
