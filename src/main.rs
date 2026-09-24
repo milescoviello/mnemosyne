@@ -19,8 +19,6 @@ mod splash;
 mod ui;
 mod update;
 mod workspace;
-// Parsing only, so far; nothing reads a workspace out of it yet.
-#[allow(dead_code)]
 mod wsx;
 
 use anyhow::Result;
@@ -638,7 +636,10 @@ fn main() -> Result<()> {
         live::live_map(),
         restore_model,
     );
-    app.set_wsx(wsx::State::here());
+    // Asked once now, and again on every rescan. About twenty milliseconds,
+    // and never more than half a second, whatever state wsx is in.
+    app.ask_wsx = true;
+    app.set_wsx(wsx::load());
     app.show_subagents = has("--subagents");
     app.rebuild();
 

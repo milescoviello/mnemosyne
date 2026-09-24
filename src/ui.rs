@@ -28,6 +28,7 @@ use ratatui::Frame;
 /// Resolved once from the config, so the palette can follow a desktop theme
 /// without a rebuild. Missing keys keep the values the tool shipped with.
 struct Theme {
+    accent: Color,
     chrome: Color,
     fav: Color,
     live: Color,
@@ -55,6 +56,7 @@ impl Theme {
                 .unwrap_or(fallback)
         };
         Theme {
+            accent: pick(&c.accent, Color::Cyan),
             chrome: pick(&c.chrome, Color::DarkGray),
             fav: pick(&c.favorite, Color::Yellow),
             live: pick(&c.live, Color::Green),
@@ -923,8 +925,11 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                         short_cwd(&s.cwd)
                     };
                     // A directory that no longer exists is worth seeing here
-                    // rather than discovering at resume time.
-                    let fstyle = if s.cwd_missing {
+                    // rather than discovering at resume time. A live wsx
+                    // workspace is lit instead: it is somewhere to go.
+                    let fstyle = if s.wsx.as_ref().is_some_and(|w| w.is_live()) {
+                        Style::default().fg(th().accent)
+                    } else if s.cwd_missing {
                         Style::default().fg(th().gone)
                     } else {
                         Style::default().fg(rgb(art::ramp(0.45 + d * 0.2)))
@@ -1078,7 +1083,10 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
 
     let mut lines: Vec<Line> = vec![ripple_line(width, MARGIN, 1.7)];
 
-    let mut facts: Vec<String> = vec![if s.cwd_missing {
+    let live_wsx = s.wsx.as_ref().is_some_and(|w| w.is_live());
+    // wsx listing a workspace is the word on whether it is there, and
+    // enter goes through wsx rather than into the folder.
+    let mut facts: Vec<String> = vec![if s.cwd_missing && !live_wsx {
         format!("{} (gone)", s.folder())
     } else {
         s.folder()
@@ -1086,6 +1094,9 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
     if s.wsx.is_some() {
         // Otherwise `OS-DEV/shy-daffodil` could be any folder of that name.
         facts.push("wsx".into());
+        if live_wsx {
+            facts.push("live".into());
+        }
     }
     if !s.git_branch.is_empty() {
         facts.push(s.git_branch.clone());
@@ -2105,17 +2116,31 @@ mod render_tests {
         }
     }
 
-    #[test]
-    fn the_rail_names_the_workspace_too() {
-        let mut a = app();
+    /// The rail's first line, with the cursor on session `id`.
+    fn rail_for(a: &mut App, id: &str) -> String {
         a.show_preview = true;
-        a.focus_id("gggggggg-7");
-        let rows = render(&mut a, 178, 30);
+        a.focus_id(id);
+        let rows = render(a, 178, 30);
+        let title = a.current().unwrap().title().to_string();
+        rows.iter()
+            .rev()
+            .find(|r| r.contains(&title) && r.contains(" · "))
+            .unwrap_or_else(|| panic!("no rail for {id}: {rows:#?}"))
+            .clone()
+    }
+
+    #[test]
+    fn the_rail_names_the_workspace_and_says_whether_it_is_live() {
+        let mut a = app();
+        let live = rail_for(&mut a, "gggggggg-7");
         assert!(
-            rows.iter()
-                .any(|r| r.contains("OS-DEV/shy-daffodil") && r.contains("· wsx")),
-            "{rows:#?}"
+            live.contains("OS-DEV/shy-daffodil · wsx · live"),
+            "{live:?}"
         );
+        // gdisk-app is not in what wsx listed
+        let other = rail_for(&mut a, "hhhhhhhh-8");
+        assert!(other.contains("OS-DEV/gdisk-app"), "{other:?}");
+        assert!(!other.contains("live"), "{other:?}");
     }
 
     #[test]

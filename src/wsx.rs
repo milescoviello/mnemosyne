@@ -13,6 +13,13 @@
 //! comes from its command line rather than its database -- the output is its
 //! interface, the schema is not.
 
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+/// How long wsx gets to answer. It takes about twenty milliseconds; this is
+/// for a loaded machine, and a wedged wsx must never be why the list is late.
+const DEADLINE: Duration = Duration::from_millis(500);
+
 /// Where every machine's wsx keeps worktrees unless told otherwise. Matched
 /// anywhere in a path, so a transcript synced from another machine -- another
 /// home, another user name -- is still recognised for what it is.
@@ -139,6 +146,8 @@ pub fn parse_workspace_list(out: &str) -> Vec<Workspace> {
 /// known -- from a workspace's path -- and accept the line only if what
 /// follows it is padding and then an absolute path. `OS` is then not found in
 /// the line for `OS-DEV`, and `meals` not in the one for `meals backend`.
+// Nothing resumes in a checkout yet.
+#[allow(dead_code)]
 pub fn parse_repo_list(out: &str, repo: &str) -> Option<String> {
     if repo.is_empty() {
         return None;
@@ -163,6 +172,17 @@ pub struct Place {
     pub slug: String,
     /// Where under the worktree it ran; empty at its top.
     pub rest: String,
+    pub status: Status,
+}
+
+/// What wsx says about the workspace now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Status {
+    /// Only the path says it is one: wsx is not here to ask, or the folder
+    /// is another machine's.
+    Unknown,
+    /// Still in `wsx workspace list`, with its worktree there.
+    Live { worktree: String },
 }
 
 impl Place {
@@ -176,6 +196,11 @@ impl Place {
     /// where each workspace is a folder of its own.
     pub fn tag(&self) -> String {
         format!("{TAG_PREFIX}{}", crate::meta::normalize_tag(&self.repo))
+    }
+
+    /// Still in `wsx workspace list`.
+    pub fn is_live(&self) -> bool {
+        matches!(self.status, Status::Live { .. })
     }
 
     fn tail(&self) -> String {
@@ -211,6 +236,14 @@ impl Place {
 pub struct State {
     /// Where its worktrees are, if there is a home to find them under.
     pub root: Option<String>,
+    /// wsx answered. When it did not -- not installed, failed, too slow --
+    /// everything that would have asked it behaves as though it were not
+    /// there, which is how it all behaved before this knew about wsx.
+    pub available: bool,
+    pub workspaces: Vec<Workspace>,
+    /// `wsx repo list` as it was printed. It cannot be split up front; see
+    /// `parse_repo_list`.
+    pub repos: String,
 }
 
 impl State {
@@ -218,17 +251,131 @@ impl State {
     pub fn here() -> State {
         State {
             root: worktrees_root(),
+            ..State::default()
         }
     }
 
+    /// The live workspace a folder is in: the one whose worktree holds it.
+    pub fn live(&self, cwd: &str) -> Option<&Workspace> {
+        let cwd = cwd.trim_end_matches('/');
+        self.workspaces
+            .iter()
+            .filter(|w| {
+                cwd == w.path
+                    || cwd
+                        .strip_prefix(w.path.as_str())
+                        .is_some_and(|r| r.starts_with('/'))
+            })
+            // a slug with a slash in it puts one worktree inside another's
+            // folder, and the deeper one is the one it ran in
+            .max_by_key(|w| w.path.len())
+    }
+
     /// The workspace a session's folder belongs to, if it is in one.
+    ///
+    /// A live one is named by what wsx lists, not by its folder: renaming a
+    /// workspace never moves the folder, so after a rename only the list
+    /// knows what it is called.
     pub fn place(&self, cwd: &str) -> Option<Place> {
+        if self.available {
+            if let Some(w) = self.live(cwd) {
+                let rest = cwd.trim_end_matches('/')[w.path.len()..].trim_start_matches('/');
+                return Some(Place {
+                    repo: w.repo.clone(),
+                    slug: w.slug.clone(),
+                    rest: rest.to_string(),
+                    status: Status::Live {
+                        worktree: w.path.clone(),
+                    },
+                });
+            }
+        }
         let r = parse_path_in(cwd, self.root.as_deref())?;
         Some(Place {
             repo: r.repo,
             slug: r.dir,
             rest: r.rest,
+            status: Status::Unknown,
         })
+    }
+}
+
+/// Ask this machine's wsx what is live, and where each repo lives.
+pub fn load() -> State {
+    load_with(&["wsx"])
+}
+
+/// `load`, with the command that stands for wsx handed in.
+fn load_with(wsx: &[&str]) -> State {
+    let mut state = State::here();
+    let deadline = Instant::now() + DEADLINE;
+    let (Ok(workspaces), Ok(repos)) = (
+        run(wsx, &["workspace", "list"], deadline),
+        run(wsx, &["repo", "list"], deadline),
+    ) else {
+        return state;
+    };
+    state.available = true;
+    state.workspaces = parse_workspace_list(&workspaces);
+    state.repos = repos;
+    state
+}
+
+/// Run `cmd args`, and give up at `deadline`, returning what it printed.
+///
+/// Its stdout is read here and never inherited. mnemosyne's own stdout is
+/// the plan the shell wrapper carries out line by line, so anything a child
+/// printed there would be run as though it had been chosen. Its stderr is
+/// dropped: the browser is drawn on that, and a stray line would tear it.
+fn run(cmd: &[&str], args: &[&str], deadline: Instant) -> Result<String, String> {
+    use std::io::Read;
+    let (bin, first) = cmd.split_first().ok_or("nothing to run")?;
+    let mut child = Command::new(bin)
+        .args(first)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let mut pipe = child.stdout.take().ok_or("no pipe")?;
+    // Read as it runs, not after. A child that fills the pipe waits for a
+    // reader, and a reader that waits for the child to exit is not one.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = pipe.read_to_end(&mut buf);
+        let _ = tx.send(buf);
+    });
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(2)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("it did not answer in time".into());
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e.to_string());
+            }
+        }
+    };
+    // Bounded as well: anything it started in the background could still
+    // be holding the pipe open after it has gone.
+    let left = deadline
+        .saturating_duration_since(Instant::now())
+        .max(Duration::from_millis(50));
+    let out = rx
+        .recv_timeout(left)
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    if status.success() {
+        Ok(out)
+    } else {
+        Err(format!("it failed ({status})"))
     }
 }
 
@@ -395,7 +542,169 @@ mod tests {
             repo: repo.into(),
             slug: slug.into(),
             rest: rest.into(),
+            status: Status::Unknown,
         }
+    }
+
+    fn listed(repo: &str, slug: &str, path: &str) -> Workspace {
+        Workspace {
+            repo: repo.into(),
+            slug: slug.into(),
+            branch: slug.into(),
+            path: path.into(),
+        }
+    }
+
+    fn known(workspaces: Vec<Workspace>) -> State {
+        State {
+            root: Some(ROOT.into()),
+            available: true,
+            workspaces,
+            repos: [repo_line("OS-DEV", "/home/u/OS-DEV")].concat(),
+        }
+    }
+
+    #[test]
+    fn a_live_workspace_is_named_by_the_list_not_its_folder() {
+        // Renamed from shy-daffodil to page-tables: the folder stayed where
+        // it was, and only wsx knows what it is called now.
+        let s = known(vec![listed(
+            "OS-DEV",
+            "page-tables",
+            &format!("{ROOT}/OS-DEV/shy-daffodil"),
+        )]);
+        let p = s.place(&format!("{ROOT}/OS-DEV/shy-daffodil")).unwrap();
+        assert_eq!(p.label(), "OS-DEV/page-tables");
+        assert_eq!(
+            p.status,
+            Status::Live {
+                worktree: format!("{ROOT}/OS-DEV/shy-daffodil")
+            }
+        );
+        let deeper = s
+            .place(&format!("{ROOT}/OS-DEV/shy-daffodil/kernel/"))
+            .unwrap();
+        assert_eq!(deeper.label(), "OS-DEV/page-tables/kernel");
+    }
+
+    #[test]
+    fn a_folder_is_in_the_worktree_that_holds_it_and_no_other() {
+        let s = known(vec![
+            listed("r", "a", "/w/r/a"),
+            listed("r", "a/b", "/w/r/a/b"),
+            listed("r", "ab", "/w/r/ab"),
+        ]);
+        let slug = |cwd: &str| s.live(cwd).map(|w| w.slug.clone());
+        assert_eq!(slug("/w/r/a").as_deref(), Some("a"));
+        assert_eq!(slug("/w/r/a/src").as_deref(), Some("a"));
+        assert_eq!(
+            slug("/w/r/a/b/src").as_deref(),
+            Some("a/b"),
+            "the deeper one"
+        );
+        assert_eq!(slug("/w/r/ab").as_deref(), Some("ab"), "not a's");
+        assert_eq!(slug("/w/r/abc"), None);
+        assert_eq!(slug("/w/r"), None);
+    }
+
+    #[test]
+    fn a_list_nobody_could_get_is_never_consulted() {
+        // wsx not there: a folder that would be live is only a label, and
+        // nothing is claimed about whether it still is.
+        let mut s = known(vec![listed("OS-DEV", "x", &format!("{ROOT}/OS-DEV/x"))]);
+        s.available = false;
+        let p = s.place(&format!("{ROOT}/OS-DEV/x")).unwrap();
+        assert_eq!(p.status, Status::Unknown);
+    }
+
+    #[test]
+    fn a_missing_wsx_leaves_everything_as_it_was() {
+        let s = load_with(&["/nonexistent/definitely-not-wsx"]);
+        assert!(!s.available);
+        assert!(s.workspaces.is_empty() && s.repos.is_empty());
+    }
+
+    /// A stand-in for wsx: a script that answers the questions asked of
+    /// it. The real one is never run from a test. It is handed to `sh` rather
+    /// than made executable and run: executing a file just written races any
+    /// other test forking at that moment, and fails as "text file busy".
+    fn fake_wsx(dir: &std::path::Path, body: &str) -> String {
+        let p = dir.join("wsx");
+        std::fs::write(&p, format!("{body}\n")).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn what_wsx_answers_is_what_is_kept() {
+        let d = tempfile::tempdir().unwrap();
+        let bin = fake_wsx(
+            d.path(),
+            r#"case "$1 $2" in
+  "workspace list") printf 'OS-DEV\tshy-daffodil\tb\t/w/OS-DEV/shy-daffodil\n' ;;
+  "repo list") printf '%-20s %s\n' OS-DEV /home/u/OS-DEV ;;
+  *) exit 2 ;;
+esac"#,
+        );
+        let s = load_with(&["sh", &bin]);
+        assert!(s.available);
+        assert_eq!(s.workspaces.len(), 1);
+        assert_eq!(s.workspaces[0].slug, "shy-daffodil");
+        assert_eq!(
+            parse_repo_list(&s.repos, "OS-DEV").as_deref(),
+            Some("/home/u/OS-DEV")
+        );
+    }
+
+    #[test]
+    fn a_wsx_that_fails_is_a_wsx_that_is_not_there() {
+        let d = tempfile::tempdir().unwrap();
+        let half = fake_wsx(
+            d.path(),
+            r#"[ "$1" = workspace ] && { printf 'r\ts\tb\t/w/r/s\n'; exit 0; }
+echo 'no such command' >&2; exit 1"#,
+        );
+        let s = load_with(&["sh", &half]);
+        assert!(!s.available, "half an answer is treated as none");
+        assert!(s.workspaces.is_empty());
+    }
+
+    #[test]
+    fn a_wsx_that_hangs_is_given_up_on() {
+        let t = Instant::now();
+        let r = run(
+            &["sh"],
+            &["-c", "exec sleep 5"],
+            Instant::now() + Duration::from_millis(100),
+        );
+        assert!(r.is_err(), "{r:?}");
+        assert!(
+            t.elapsed() < Duration::from_secs(2),
+            "waited {:?} for something that was given 100ms",
+            t.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_long_answer_does_not_wedge_the_reader() {
+        // More than a pipe holds. Waiting for the exit before reading would
+        // leave the child blocked on a full pipe until the deadline.
+        let r = run(
+            &["sh"],
+            &["-c", "head -c 300000 /dev/zero | tr '\\0' x"],
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(r.len(), 300_000);
+    }
+
+    #[test]
+    fn a_non_zero_exit_is_a_failure_whatever_it_printed() {
+        let r = run(
+            &["sh"],
+            &["-c", "echo looks fine; exit 3"],
+            Instant::now() + Duration::from_secs(5),
+        );
+        assert!(r.is_err(), "{r:?}");
     }
 
     #[test]

@@ -303,9 +303,13 @@ pub struct App {
     /// now. Empty in the normal case; when it is not, the offer to reopen
     /// them sits above the list until it is taken or waved away.
     pub reopen: Vec<crate::workspace::Entry>,
-    /// What wsx has to say about the folders sessions ran in. Empty until
-    /// main fills it in, so nothing built for a test ever asks the real one.
+    /// What wsx has to say about the folders sessions ran in.
     pub wsx: crate::wsx::State,
+    /// Whether the real wsx is asked again when the list is reloaded. Off
+    /// unless main turns it on, so nothing built for a test ever reaches it:
+    /// the same binary can switch a running wsx to another workspace, or open
+    /// a terminal on the desktop of whoever runs the suite.
+    pub ask_wsx: bool,
 
     preview_cache: HashMap<String, Vec<Turn>>,
     matcher: Matcher,
@@ -372,6 +376,7 @@ impl App {
             tmux_name: String::new(),
             reopen: Vec::new(),
             wsx: crate::wsx::State::default(),
+            ask_wsx: false,
             preview_cache: HashMap::new(),
             matcher: Matcher::new(Config::DEFAULT),
             deep_tx,
@@ -1055,6 +1060,11 @@ impl App {
         self.cursor = 0;
         self.all = fresh;
         self.live = crate::live::live_map();
+        // A rescan is when new workspaces' sessions turn up, and archived
+        // ones' worktrees go, so it is when wsx is asked again.
+        if self.ask_wsx {
+            self.wsx = crate::wsx::load();
+        }
         self.recompute_totals();
         self.apply_overlay();
         self.rebuild();
@@ -2126,10 +2136,21 @@ pub mod fixtures {
         };
         let mut a = App::new(corpus(), meta, live, restore_model);
         a.persist = false;
-        // Handed in, not read from $HOME, so a label does not depend on
-        // whose machine the suite runs on.
+        // Handed in, not asked for: the root is not read from $HOME, so a
+        // label does not depend on whose machine the suite runs on, and the
+        // list is written here rather than got from a wsx that could do
+        // things on this desktop. shy-daffodil is live; gdisk-app is not in
+        // the list, so it has been archived.
         a.set_wsx(crate::wsx::State {
             root: Some(WSX_ROOT.into()),
+            available: true,
+            workspaces: vec![crate::wsx::Workspace {
+                repo: "OS-DEV".into(),
+                slug: "shy-daffodil".into(),
+                branch: "u/shy-daffodil".into(),
+                path: format!("{WSX_ROOT}/OS-DEV/shy-daffodil"),
+            }],
+            repos: format!("{:<20} {}\n", "OS-DEV", "/home/u/OS-DEV"),
         });
         a
     }
@@ -3320,6 +3341,21 @@ mod logic_tests {
             "asked about an existing one"
         );
         assert_eq!(a.tmux_name, "some-name-i-chose");
+    }
+
+    #[test]
+    fn nothing_built_for_a_test_asks_the_real_wsx() {
+        // `wsx waybar jump` switches whatever wsx is running on this desktop,
+        // or opens a terminal on it. A rescan asks wsx again, so the flag
+        // that allows that has to be off in everything the suite builds.
+        let mut a = app();
+        assert!(!a.ask_wsx);
+        let before = a.wsx.workspaces.clone();
+        a.absorb_rescan(corpus());
+        assert_eq!(
+            a.wsx.workspaces, before,
+            "a rescan replaced what was handed in"
+        );
     }
 
     #[test]
