@@ -927,8 +927,15 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                     // A directory that no longer exists is worth seeing here
                     // rather than discovering at resume time. A live wsx
                     // workspace is lit instead: it is somewhere to go.
-                    let fstyle = if s.wsx.as_ref().is_some_and(|w| w.is_live()) {
+                    //
+                    // An archived one is dimmed rather than drawn as gone:
+                    // its worktree went on purpose, and there is somewhere
+                    // for it to resume that is not wherever you are.
+                    let status = s.wsx.as_ref().map(|w| &w.status);
+                    let fstyle = if matches!(status, Some(crate::wsx::Status::Live { .. })) {
                         Style::default().fg(th().accent)
+                    } else if matches!(status, Some(crate::wsx::Status::Archived { .. })) {
+                        Style::default().fg(th().chrome)
                     } else if s.cwd_missing {
                         Style::default().fg(th().gone)
                     } else {
@@ -1083,19 +1090,33 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
 
     let mut lines: Vec<Line> = vec![ripple_line(width, MARGIN, 1.7)];
 
-    let live_wsx = s.wsx.as_ref().is_some_and(|w| w.is_live());
-    // wsx listing a workspace is the word on whether it is there, and
-    // enter goes through wsx rather than into the folder.
-    let mut facts: Vec<String> = vec![if s.cwd_missing && !live_wsx {
+    // What wsx says about a workspace is the word on it. A live one's
+    // enter goes through wsx rather than into the folder, and an archived
+    // one's says where it goes instead.
+    let known = s
+        .wsx
+        .as_ref()
+        .is_some_and(|w| !matches!(w.status, crate::wsx::Status::Unknown));
+    let mut facts: Vec<String> = vec![if s.cwd_missing && !known {
         format!("{} (gone)", s.folder())
     } else {
         s.folder()
     }];
-    if s.wsx.is_some() {
+    if let Some(w) = &s.wsx {
         // Otherwise `OS-DEV/shy-daffodil` could be any folder of that name.
         facts.push("wsx".into());
-        if live_wsx {
-            facts.push("live".into());
+        match &w.status {
+            crate::wsx::Status::Live { .. } => facts.push("live".into()),
+            crate::wsx::Status::Archived { checkout } => {
+                facts.push("archived".into());
+                if s.cwd_missing {
+                    facts.push(match checkout {
+                        Some(c) => format!("resumes in {}", short_cwd(c)),
+                        None => "resumes where you are".into(),
+                    });
+                }
+            }
+            crate::wsx::Status::Unknown => {}
         }
     }
     if !s.git_branch.is_empty() {
@@ -2130,7 +2151,7 @@ mod render_tests {
     }
 
     #[test]
-    fn the_rail_names_the_workspace_and_says_whether_it_is_live() {
+    fn the_rail_names_the_workspace_and_says_what_became_of_it() {
         let mut a = app();
         let live = rail_for(&mut a, "gggggggg-7");
         assert!(
@@ -2138,9 +2159,52 @@ mod render_tests {
             "{live:?}"
         );
         // gdisk-app is not in what wsx listed
-        let other = rail_for(&mut a, "hhhhhhhh-8");
-        assert!(other.contains("OS-DEV/gdisk-app"), "{other:?}");
-        assert!(!other.contains("live"), "{other:?}");
+        let archived = rail_for(&mut a, "hhhhhhhh-8");
+        assert!(
+            archived.contains("OS-DEV/gdisk-app · wsx · archived · resumes in /home/u/OS-DEV"),
+            "{archived:?}"
+        );
+        assert!(!archived.contains("gone"), "{archived:?}");
+
+        let mut forgot = a.wsx.clone();
+        forgot.repos.clear();
+        a.set_wsx(forgot);
+        let nowhere = rail_for(&mut a, "hhhhhhhh-8");
+        assert!(
+            nowhere.contains("wsx · archived · resumes where you are"),
+            "{nowhere:?}"
+        );
+    }
+
+    /// The colour a piece of text on screen was drawn in.
+    fn colour_of(a: &mut App, w: u16, h: u16, needle: &str) -> Color {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, a)).unwrap();
+        let rows = render(a, w, h);
+        let buf = term.backend().buffer().clone();
+        for (y, row) in rows.iter().enumerate() {
+            if let Some(b) = row.find(needle) {
+                let x = crate::model::width(&row[..b]) as u16;
+                return buf[(x, y as u16)].fg;
+            }
+        }
+        panic!("{needle:?} is not on screen: {rows:#?}");
+    }
+
+    #[test]
+    fn an_archived_workspace_is_dimmed_not_drawn_as_gone() {
+        // Its worktree was deleted on purpose, and it has somewhere better
+        // to resume than wherever you are: not the red of a folder lost.
+        let mut a = app();
+        let archived = colour_of(&mut a, 178, 30, "OS-DEV/gdisk-app");
+        assert_eq!(archived, th().chrome);
+        assert_ne!(archived, th().gone);
+        assert_eq!(
+            colour_of(&mut a, 178, 30, "OS-DEV/shy-daffodil"),
+            th().accent
+        );
+        // and a plain folder that has gone is still red
+        assert_eq!(colour_of(&mut a, 178, 30, "/home/u/other"), th().gone);
     }
 
     #[test]

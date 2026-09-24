@@ -162,6 +162,9 @@ pub struct ResumeTarget {
     pub model: String,
     pub perms: String,
     pub title: String,
+    /// Why it lands somewhere other than where it ran; empty when it does
+    /// not.
+    pub note: String,
 }
 
 /// Where a resumed session should land.
@@ -1053,9 +1056,12 @@ impl App {
             if s.cwd.is_empty() {
                 continue;
             }
+            // Where it would be reopened, which for an archived workspace is
+            // not the worktree it started in: that has gone, and a reboot
+            // offer skips any folder that has.
             out.push(crate::workspace::Entry {
                 id: s.id.clone(),
-                cwd: s.cwd.clone(),
+                cwd: s.resumes_elsewhere().unwrap_or(&s.cwd).to_string(),
                 model: s.model.clone(),
                 perms: s.permission_mode.clone(),
                 title: s.title().to_string(),
@@ -1132,6 +1138,7 @@ impl App {
                 },
                 perms: e.perms.clone(),
                 title: e.title.clone(),
+                note: String::new(),
             })
             .collect();
         // Same as any other window: hand them over and stay open, so the
@@ -1147,20 +1154,34 @@ impl App {
     }
 
     pub fn targets(&self) -> Vec<ResumeTarget> {
-        let mk = |s: &Session| ResumeTarget {
-            id: if s.is_subagent {
-                s.parent.clone().unwrap_or_else(|| s.id.clone())
-            } else {
-                s.id.clone()
-            },
-            cwd: s.cwd.clone(),
-            model: if self.restore_model {
-                s.model.clone()
-            } else {
-                String::new()
-            },
-            perms: s.permission_mode.clone(),
-            title: s.title().to_string(),
+        let mk = |s: &Session| {
+            // Every route the shell takes starts with a cd, and all but
+            // resuming here skip a folder that is gone -- so landing an
+            // archived workspace in its repo is all a matter of this.
+            let elsewhere = s.resumes_elsewhere();
+            ResumeTarget {
+                id: if s.is_subagent {
+                    s.parent.clone().unwrap_or_else(|| s.id.clone())
+                } else {
+                    s.id.clone()
+                },
+                cwd: elsewhere.unwrap_or(&s.cwd).to_string(),
+                model: if self.restore_model {
+                    s.model.clone()
+                } else {
+                    String::new()
+                },
+                perms: s.permission_mode.clone(),
+                title: s.title().to_string(),
+                note: match (elsewhere, &s.wsx) {
+                    (Some(c), Some(w)) => format!(
+                        "{} was archived — resuming in {}",
+                        w.label(),
+                        crate::model::short_cwd(c)
+                    ),
+                    _ => String::new(),
+                },
+            }
         };
         if !self.selected.is_empty() {
             let mut out = Vec::new();
@@ -1311,13 +1332,30 @@ impl App {
                         Err(e) => format!("wsx could not switch to {}: {e}", now.label()),
                     }
                 }
-                None => format!(
-                    "{} is no longer live in wsx — enter again resumes it here",
-                    j.label()
-                ),
+                None => {
+                    let label = j.label();
+                    if std::path::Path::new(&j.worktree).is_dir() {
+                        format!(
+                            "{label} was archived just now, its worktree kept — enter again resumes it there"
+                        )
+                    } else {
+                        let then = match fresh.place(&j.worktree).map(|p| p.status) {
+                            Some(crate::wsx::Status::Archived { checkout: Some(c) }) => {
+                                format!("in {}", crate::model::short_cwd(&c))
+                            }
+                            _ => "wherever you are".into(),
+                        };
+                        format!("{label} was archived just now — enter again resumes it {then}")
+                    }
+                }
             };
         }
-        self.set_wsx(fresh);
+        // The whole overlay, not just the names: archiving deletes the
+        // worktree, and whether a folder is gone is part of what decides
+        // where a session resumes.
+        self.wsx = fresh;
+        self.apply_overlay();
+        self.rebuild();
     }
 
     fn resume(&mut self, target: Target) {
@@ -1423,13 +1461,29 @@ impl App {
             } else {
                 format!("{n} sessions")
             };
+            let moved = targets.iter().filter(|t| !t.note.is_empty()).count();
+            self.status = if n == 1 && moved == 1 {
+                format!("{}, in a new window", targets[0].note)
+            } else if moved > 0 {
+                format!(
+                    "opening {what} in new windows — {moved} from archived wsx workspaces, in their repos' checkouts"
+                )
+            } else {
+                format!("opening {what} in a new window")
+            };
             self.launched.extend(targets.iter().cloned());
             self.to_open.push((target, targets));
             self.selected.clear();
-            self.status = format!("opening {what} in a new window");
             self.rebuild();
             return;
         }
+        // This closes the browser, and the status line with it.
+        self.notes.extend(
+            targets
+                .iter()
+                .filter(|t| !t.note.is_empty())
+                .map(|t| t.note.clone()),
+        );
         self.outcome = Some(Outcome::Resume { targets, target });
         self.quit = true;
     }
@@ -3723,11 +3777,17 @@ mod logic_tests {
         let mut fresh = a.wsx.clone();
         fresh.workspaces.clear();
         a.finish_jumps(fresh, |_| panic!("jumped to a workspace that is gone"));
-        assert!(a.status.contains("no longer live"), "{:?}", a.status);
-        // it is an ordinary gone folder now
+        assert_eq!(
+            a.status,
+            "OS-DEV/shy-daffodil was archived just now — enter again resumes it in /home/u/OS-DEV"
+        );
+        // and enter again does what it said
         on(&mut a, "gggggggg-7");
         a.do_action(Action::Resume);
-        assert!(a.outcome.is_some());
+        let Some(Outcome::Resume { targets, .. }) = &a.outcome else {
+            panic!("did not resume");
+        };
+        assert_eq!(targets[0].cwd, "/home/u/OS-DEV");
     }
 
     #[test]
@@ -3754,6 +3814,140 @@ mod logic_tests {
             "{:?}",
             a.status
         );
+    }
+
+    #[test]
+    fn an_archived_workspace_resumes_in_its_repos_checkout() {
+        // Archiving deleted the worktree. Resuming used to start wherever
+        // you were standing, when the repo it came from was right there.
+        let mut a = app();
+        on(&mut a, "hhhhhhhh-8");
+        a.do_action(Action::Resume);
+        let Some(Outcome::Resume { targets, .. }) = &a.outcome else {
+            panic!("did not resume");
+        };
+        assert_eq!(targets[0].cwd, "/home/u/OS-DEV");
+        // the browser closes, so the shell is told on the way out
+        assert_eq!(
+            a.notes,
+            vec!["OS-DEV/gdisk-app was archived — resuming in /home/u/OS-DEV"]
+        );
+    }
+
+    #[test]
+    fn every_way_of_opening_an_archived_workspace_lands_in_the_checkout() {
+        // A window, and tmux behind one, skip a folder that is gone. The
+        // shell does the cd for all of them, so the plan's folder is
+        // what decides it.
+        for action in [Action::NewWindow, Action::WindowTmux, Action::Tmux] {
+            let mut a = app();
+            on(&mut a, "hhhhhhhh-8");
+            a.do_action(action);
+            if a.input_mode == InputMode::TmuxName {
+                a.commit_tmux_name();
+            }
+            let cwd = match (&a.outcome, a.to_open.first()) {
+                (Some(Outcome::Resume { targets, .. }), _) => targets[0].cwd.clone(),
+                (None, Some((_, targets))) => targets[0].cwd.clone(),
+                _ => panic!("{action:?} opened nothing"),
+            };
+            assert_eq!(cwd, "/home/u/OS-DEV", "{action:?}");
+        }
+        // one that stays in the browser says so there
+        let mut a = app();
+        on(&mut a, "hhhhhhhh-8");
+        a.do_action(Action::NewWindow);
+        assert_eq!(
+            a.status,
+            "OS-DEV/gdisk-app was archived — resuming in /home/u/OS-DEV, in a new window"
+        );
+        assert!(
+            a.notes.is_empty(),
+            "nothing closed, so nothing to say after"
+        );
+    }
+
+    #[test]
+    fn an_archived_workspace_whose_repo_wsx_no_longer_knows_resumes_as_before() {
+        let mut a = app();
+        let mut forgot = a.wsx.clone();
+        forgot.repos.clear();
+        a.set_wsx(forgot);
+        on(&mut a, "hhhhhhhh-8");
+        a.do_action(Action::Resume);
+        let Some(Outcome::Resume { targets, .. }) = &a.outcome else {
+            panic!("did not resume");
+        };
+        assert_eq!(
+            targets[0].cwd,
+            format!("{WSX_ROOT}/OS-DEV/gdisk-app"),
+            "the shell says the folder is gone and resumes where you are, as it did"
+        );
+        assert!(a.notes.is_empty(), "{:?}", a.notes);
+    }
+
+    #[test]
+    fn a_worktree_archived_and_kept_is_where_it_resumes() {
+        // `wsx workspace archive --keep-worktree`: archived, and the folder
+        // still there with the branch in it.
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().to_string_lossy().into_owned();
+        let kept = format!("{root}/OS-DEV/kept");
+        std::fs::create_dir_all(&kept).unwrap();
+        let mut a = app();
+        let mut st = a.wsx.clone();
+        st.root = Some(root);
+        a.set_wsx(st);
+        add_session(&mut a, "iiiiiiii-9", &kept, 0);
+        let s = a.all.iter().find(|s| s.id == "iiiiiiii-9").unwrap();
+        assert!(matches!(
+            s.wsx.as_ref().unwrap().status,
+            crate::wsx::Status::Archived { .. }
+        ));
+        on(&mut a, "iiiiiiii-9");
+        a.do_action(Action::Resume);
+        let Some(Outcome::Resume { targets, .. }) = &a.outcome else {
+            panic!("did not resume");
+        };
+        assert_eq!(targets[0].cwd, kept);
+        assert!(a.notes.is_empty());
+    }
+
+    #[test]
+    fn another_machines_workspace_is_left_alone() {
+        // Synced from elsewhere: this wsx never had it, so its absence from
+        // the list says nothing, and there is no checkout to go to.
+        let mut a = app();
+        add_session(
+            &mut a,
+            "iiiiiiii-9",
+            "/Users/u/.local/state/wsx/worktrees/OS-DEV/gdisk-app",
+            0,
+        );
+        on(&mut a, "iiiiiiii-9");
+        a.do_action(Action::Resume);
+        let Some(Outcome::Resume { targets, .. }) = &a.outcome else {
+            panic!("did not resume");
+        };
+        assert_eq!(
+            targets[0].cwd,
+            "/Users/u/.local/state/wsx/worktrees/OS-DEV/gdisk-app"
+        );
+    }
+
+    #[test]
+    fn an_archived_workspace_is_recorded_where_it_would_reopen() {
+        // A reboot offer skips any folder that is gone, so a session
+        // recorded under its deleted worktree would never be offered back.
+        let mut a = app();
+        let i = a.all.iter().position(|s| s.id == "hhhhhhhh-8").unwrap();
+        a.all[i].live_pid = Some(1);
+        let e = a
+            .open_sessions()
+            .into_iter()
+            .find(|e| e.id == "hhhhhhhh-8")
+            .unwrap();
+        assert_eq!(e.cwd, "/home/u/OS-DEV");
     }
 
     #[test]

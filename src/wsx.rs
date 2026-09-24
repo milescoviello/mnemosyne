@@ -150,8 +150,6 @@ pub fn parse_workspace_list(out: &str) -> Vec<Workspace> {
 /// known -- from a workspace's path -- and accept the line only if what
 /// follows it is padding and then an absolute path. `OS` is then not found in
 /// the line for `OS-DEV`, and `meals` not in the one for `meals backend`.
-// Nothing resumes in a checkout yet.
-#[allow(dead_code)]
 pub fn parse_repo_list(out: &str, repo: &str) -> Option<String> {
     if repo.is_empty() {
         return None;
@@ -187,6 +185,11 @@ pub enum Status {
     Unknown,
     /// Still in `wsx workspace list`, with its worktree there.
     Live { worktree: String },
+    /// This machine's, and no longer listed: archived. wsx deletes the
+    /// worktree with it unless told to keep it, and forgets the workspace
+    /// entirely, but the repo is still there -- `checkout` is where its own
+    /// copy lives, if wsx still knows the repo by that name.
+    Archived { checkout: Option<String> },
 }
 
 impl Place {
@@ -200,11 +203,6 @@ impl Place {
     /// where each workspace is a folder of its own.
     pub fn tag(&self) -> String {
         format!("{TAG_PREFIX}{}", crate::meta::normalize_tag(&self.repo))
-    }
-
-    /// Still in `wsx workspace list`.
-    pub fn is_live(&self) -> bool {
-        matches!(self.status, Status::Live { .. })
     }
 
     fn tail(&self) -> String {
@@ -295,11 +293,20 @@ impl State {
             }
         }
         let r = parse_path_in(cwd, self.root.as_deref())?;
+        // Only this machine's can be said to be archived. Another machine's
+        // workspaces were never in this list to begin with.
+        let status = if self.available && r.local {
+            Status::Archived {
+                checkout: parse_repo_list(&self.repos, &r.repo),
+            }
+        } else {
+            Status::Unknown
+        };
         Some(Place {
             repo: r.repo,
             slug: r.dir,
             rest: r.rest,
-            status: Status::Unknown,
+            status,
         })
     }
 }
@@ -669,6 +676,32 @@ mod tests {
         assert_eq!(slug("/w/r/ab").as_deref(), Some("ab"), "not a's");
         assert_eq!(slug("/w/r/abc"), None);
         assert_eq!(slug("/w/r"), None);
+    }
+
+    #[test]
+    fn a_workspace_no_longer_listed_has_been_archived() {
+        let s = known(vec![]);
+        assert_eq!(
+            s.place(&format!("{ROOT}/OS-DEV/gdisk-app")).unwrap().status,
+            Status::Archived {
+                checkout: Some("/home/u/OS-DEV".into())
+            }
+        );
+        // a repo wsx no longer knows by that name leaves nowhere better
+        assert_eq!(
+            s.place(&format!("{ROOT}/renamed-repo/x")).unwrap().status,
+            Status::Archived { checkout: None }
+        );
+    }
+
+    #[test]
+    fn another_machines_workspace_is_never_called_archived() {
+        // It is missing from this list because this wsx never had it.
+        let s = known(vec![]);
+        let p = s
+            .place("/Users/miles/.local/state/wsx/worktrees/OS-DEV/gdisk-app")
+            .unwrap();
+        assert_eq!(p.status, Status::Unknown);
     }
 
     #[test]

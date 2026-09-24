@@ -110,6 +110,22 @@ impl Session {
         }
     }
 
+    /// The folder resuming it lands in, when that is not the one it ran in.
+    ///
+    /// Archiving a wsx workspace deletes its worktree, but the repo it was a
+    /// worktree of is still checked out -- a better place to carry on than
+    /// wherever you happen to be standing. A worktree archived and kept is
+    /// still there, and that is where it resumes.
+    pub fn resumes_elsewhere(&self) -> Option<&str> {
+        if !self.cwd_missing {
+            return None;
+        }
+        match &self.wsx.as_ref()?.status {
+            crate::wsx::Status::Archived { checkout: Some(c) } => Some(c),
+            _ => None,
+        }
+    }
+
     pub fn is_live(&self) -> bool {
         self.live_pid.is_some()
     }
