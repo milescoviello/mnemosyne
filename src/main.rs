@@ -800,6 +800,11 @@ fn main() -> Result<()> {
         workspace::record(open, live::detection_supported());
     }
 
+    // What the status line would have said, had the screen not just gone.
+    for n in &app.notes {
+        eprintln!("{n}");
+    }
+
     if let Some(Outcome::Resume { targets, target }) = &app.outcome {
         // Several selections cannot share this terminal, so they become
         // windows unless tmux was asked for explicitly.
@@ -876,6 +881,12 @@ fn run<B: ratatui::backend::Backend>(
                 }
             }
             let _ = out.flush();
+        }
+
+        // A live wsx workspace goes back to wsx. The picker stays up, as it
+        // does for a window: nothing about it needs this terminal.
+        if !app.to_jump.is_empty() {
+            app.finish_jumps(wsx::load(), wsx::jump);
         }
 
         // The rescan started behind the list; fold it in the moment it

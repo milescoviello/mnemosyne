@@ -20,6 +20,10 @@ use std::time::{Duration, Instant};
 /// for a loaded machine, and a wedged wsx must never be why the list is late.
 const DEADLINE: Duration = Duration::from_millis(500);
 
+/// A jump either hands a line to a running wsx or starts a terminal and
+/// leaves it; both are quick. The browser waits on it, so it is bounded too.
+const JUMP_DEADLINE: Duration = Duration::from_secs(3);
+
 /// Where every machine's wsx keeps worktrees unless told otherwise. Matched
 /// anywhere in a path, so a transcript synced from another machine -- another
 /// home, another user name -- is still recognised for what it is.
@@ -300,6 +304,42 @@ impl State {
     }
 }
 
+/// A live workspace to hand back to wsx instead of resuming here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Jump {
+    pub repo: String,
+    pub slug: String,
+    /// Which workspace it is, whatever it is called by the time the jump
+    /// happens: a rename changes the slug, and never this.
+    pub worktree: String,
+}
+
+impl Jump {
+    pub fn label(&self) -> String {
+        format!("{}/{}", self.repo, self.slug)
+    }
+}
+
+/// Bring a live workspace forward: wsx selects it in the wsx already
+/// running, or opens one on it. Whether that window is also raised is up to
+/// wsx, and today only happens under Hyprland.
+pub fn jump(j: &Jump) -> Result<(), String> {
+    jump_with(&["wsx"], j, cfg!(target_os = "macos"))
+}
+
+/// The same command filed under each desktop's integration: `waybar` on
+/// Linux, `menubar` on macOS.
+fn jump_with(wsx: &[&str], j: &Jump, macos: bool) -> Result<(), String> {
+    let group = if macos { "menubar" } else { "waybar" };
+    run(
+        wsx,
+        &[group, "jump", &j.repo, &j.slug],
+        Instant::now() + JUMP_DEADLINE,
+        Keep::Stderr,
+    )
+    .map(|_| ())
+}
+
 /// Ask this machine's wsx what is live, and where each repo lives.
 pub fn load() -> State {
     load_with(&["wsx"])
@@ -310,8 +350,8 @@ fn load_with(wsx: &[&str]) -> State {
     let mut state = State::here();
     let deadline = Instant::now() + DEADLINE;
     let (Ok(workspaces), Ok(repos)) = (
-        run(wsx, &["workspace", "list"], deadline),
-        run(wsx, &["repo", "list"], deadline),
+        run(wsx, &["workspace", "list"], deadline, Keep::Stdout),
+        run(wsx, &["repo", "list"], deadline, Keep::Stdout),
     ) else {
         return state;
     };
@@ -321,24 +361,41 @@ fn load_with(wsx: &[&str]) -> State {
     state
 }
 
-/// Run `cmd args`, and give up at `deadline`, returning what it printed.
+/// Which of a child's streams is worth reading. The other goes nowhere.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    /// An answer.
+    Stdout,
+    /// An explanation, if it fails.
+    Stderr,
+}
+
+/// Run `cmd args`, and give up at `deadline`, returning what it wrote on
+/// the stream kept -- or, when it fails, the first thing it said.
 ///
-/// Its stdout is read here and never inherited. mnemosyne's own stdout is
-/// the plan the shell wrapper carries out line by line, so anything a child
-/// printed there would be run as though it had been chosen. Its stderr is
-/// dropped: the browser is drawn on that, and a stray line would tear it.
-fn run(cmd: &[&str], args: &[&str], deadline: Instant) -> Result<String, String> {
+/// Neither stream is ever inherited. mnemosyne's own stdout is the plan the
+/// shell wrapper carries out line by line, so anything a child printed there
+/// would be run as though it had been chosen. Its stderr is where the browser
+/// is drawn, and a stray line would tear it.
+fn run(cmd: &[&str], args: &[&str], deadline: Instant, keep: Keep) -> Result<String, String> {
     use std::io::Read;
     let (bin, first) = cmd.split_first().ok_or("nothing to run")?;
+    let (out, err) = match keep {
+        Keep::Stdout => (Stdio::piped(), Stdio::null()),
+        Keep::Stderr => (Stdio::null(), Stdio::piped()),
+    };
     let mut child = Command::new(bin)
         .args(first)
         .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stdout(out)
+        .stderr(err)
         .spawn()
         .map_err(|e| e.to_string())?;
-    let mut pipe = child.stdout.take().ok_or("no pipe")?;
+    let mut pipe: Box<dyn Read + Send> = match keep {
+        Keep::Stdout => Box::new(child.stdout.take().ok_or("no pipe")?),
+        Keep::Stderr => Box::new(child.stderr.take().ok_or("no pipe")?),
+    };
     // Read as it runs, not after. A child that fills the pipe waits for a
     // reader, and a reader that waits for the child to exit is not one.
     let (tx, rx) = std::sync::mpsc::channel();
@@ -375,7 +432,14 @@ fn run(cmd: &[&str], args: &[&str], deadline: Instant) -> Result<String, String>
     if status.success() {
         Ok(out)
     } else {
-        Err(format!("it failed ({status})"))
+        // wsx says `error: <what>`; the status line has no room for the
+        // prefix, nor for anything after the first line.
+        Err(out
+            .lines()
+            .map(|l| l.trim())
+            .find(|l| !l.is_empty())
+            .map(|l| l.strip_prefix("error: ").unwrap_or(l).to_string())
+            .unwrap_or_else(|| format!("it failed ({status})")))
     }
 }
 
@@ -675,6 +739,7 @@ echo 'no such command' >&2; exit 1"#,
             &["sh"],
             &["-c", "exec sleep 5"],
             Instant::now() + Duration::from_millis(100),
+            Keep::Stdout,
         );
         assert!(r.is_err(), "{r:?}");
         assert!(
@@ -692,9 +757,46 @@ echo 'no such command' >&2; exit 1"#,
             &["sh"],
             &["-c", "head -c 300000 /dev/zero | tr '\\0' x"],
             Instant::now() + Duration::from_secs(5),
+            Keep::Stdout,
         )
         .unwrap();
         assert_eq!(r.len(), 300_000);
+    }
+
+    fn jump_to(slug: &str) -> Jump {
+        Jump {
+            repo: "OS-DEV".into(),
+            slug: slug.into(),
+            worktree: format!("{ROOT}/OS-DEV/{slug}"),
+        }
+    }
+
+    #[test]
+    fn a_jump_asks_each_desktops_integration() {
+        // The stand-in echoes its arguments back as a failure, which is the
+        // one stream a jump reads.
+        let d = tempfile::tempdir().unwrap();
+        let echo = fake_wsx(d.path(), r#"echo "$@" >&2; exit 1"#);
+        let said = |macos| jump_with(&["sh", &echo], &jump_to("shy daffodil"), macos).unwrap_err();
+        assert_eq!(said(false), "waybar jump OS-DEV shy daffodil");
+        assert_eq!(said(true), "menubar jump OS-DEV shy daffodil");
+    }
+
+    #[test]
+    fn a_jump_that_fails_says_why_in_wsxs_words() {
+        let d = tempfile::tempdir().unwrap();
+        let bin = fake_wsx(
+            d.path(),
+            r#"echo "on stdout, which goes nowhere"
+printf '\nerror: no workspace named x\nmore detail\n' >&2
+exit 1"#,
+        );
+        assert_eq!(
+            jump_with(&["sh", &bin], &jump_to("x"), false).unwrap_err(),
+            "no workspace named x"
+        );
+        let ok = fake_wsx(d.path(), "echo chatter >&2; exit 0");
+        assert!(jump_with(&["sh", &ok], &jump_to("x"), false).is_ok());
     }
 
     #[test]
@@ -703,6 +805,7 @@ echo 'no such command' >&2; exit 1"#,
             &["sh"],
             &["-c", "echo looks fine; exit 3"],
             Instant::now() + Duration::from_secs(5),
+            Keep::Stdout,
         );
         assert!(r.is_err(), "{r:?}");
     }

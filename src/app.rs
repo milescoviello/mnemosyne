@@ -201,6 +201,15 @@ pub enum Outcome {
     },
 }
 
+/// What wsx has to say about resuming a session here.
+enum Claim {
+    /// The conversation a live workspace's agent carries on.
+    Agent(crate::wsx::Jump),
+    /// An older conversation from a live workspace's worktree, named by the
+    /// workspace.
+    Older(String),
+}
+
 pub struct DeepResult {
     pub generation: u64,
     pub hits: HashMap<String, String>,
@@ -288,6 +297,13 @@ pub struct App {
     /// from now and nothing else is watching, so they belong in the record
     /// of what was open -- which is what a reboot is put back from.
     pub launched: Vec<ResumeTarget>,
+    /// Live wsx workspaces to hand back to wsx, which already runs their
+    /// agent. Carried out by main between frames, like `to_open`.
+    pub to_jump: Vec<crate::wsx::Jump>,
+    /// Said on stderr once the browser has closed. A choice that ends it
+    /// takes the status line with it, so anything the shell should see
+    /// before it resumes goes here as well.
+    pub notes: Vec<String>,
     /// Whether changes are written to disk.
     ///
     /// False in tests, and for one reason: without it `cargo test` overwrote
@@ -371,6 +387,8 @@ impl App {
             indexing: false,
             to_open: Vec::new(),
             launched: Vec::new(),
+            to_jump: Vec::new(),
+            notes: Vec::new(),
             persist: true,
             pending_tmux: None,
             tmux_name: String::new(),
@@ -1200,11 +1218,146 @@ impl App {
         self.resume(target);
     }
 
+    /// The session resuming a row resumes: a subagent's is its parent's.
+    fn resumed<'a>(&'a self, s: &'a Session) -> &'a Session {
+        if !s.is_subagent {
+            return s;
+        }
+        s.parent
+            .as_deref()
+            .and_then(|p| self.all.iter().find(|o| !o.is_subagent && o.id == p))
+            .unwrap_or(s)
+    }
+
+    /// Whether a session belongs to wsx rather than to this terminal.
+    ///
+    /// wsx keeps a live workspace's agent running, and when it starts one it
+    /// uses `claude --continue` in the worktree -- which carries on the
+    /// newest conversation there. That conversation is wsx's to bring back.
+    /// An older one from the same worktree is not the one wsx would show, and
+    /// resuming it here would make it the newest, and so the one wsx carries
+    /// on next time. A session started further down the worktree is neither:
+    /// `--continue` never reaches it.
+    fn wsx_claim(&self, s: &Session) -> Option<Claim> {
+        let w = s.wsx.as_ref()?;
+        let crate::wsx::Status::Live { worktree } = &w.status else {
+            return None;
+        };
+        if !w.rest.is_empty() {
+            return None;
+        }
+        let at_top = |o: &&Session| {
+            !o.is_subagent
+                && o.wsx
+                    .as_ref()
+                    .is_some_and(|ow| ow.rest.is_empty() && ow.status == w.status)
+        };
+        // The same tie-break as the running-process guess: first of the
+        // newest.
+        let newest =
+            self.all
+                .iter()
+                .filter(at_top)
+                .fold(None::<&Session>, |best, o| match best {
+                    Some(b) if b.mtime >= o.mtime => Some(b),
+                    _ => Some(o),
+                })?;
+        Some(if newest.id == s.id {
+            Claim::Agent(crate::wsx::Jump {
+                repo: w.repo.clone(),
+                slug: w.slug.clone(),
+                worktree: worktree.clone(),
+            })
+        } else {
+            Claim::Older(w.label())
+        })
+    }
+
+    /// Carry out the jumps enter queued, once the loop has a moment.
+    ///
+    /// `fresh` is wsx asked again. The row was drawn from what it said
+    /// earlier, and a workspace archived since is not there to go to. `run`
+    /// does the jump, handed in so that nothing here starts a process.
+    pub fn finish_jumps(
+        &mut self,
+        fresh: crate::wsx::State,
+        run: impl Fn(&crate::wsx::Jump) -> Result<(), String>,
+    ) {
+        let jumps = std::mem::take(&mut self.to_jump);
+        if jumps.is_empty() {
+            return;
+        }
+        if !fresh.available {
+            // Not an answer, so nothing is concluded from it.
+            self.status = format!(
+                "wsx did not answer, so nothing switched to {} — enter tries again",
+                jumps[0].label()
+            );
+            return;
+        }
+        for j in &jumps {
+            // Found by its worktree and sent under its name now, which a
+            // rename in the meantime has changed.
+            let now = fresh.workspaces.iter().find(|w| w.path == j.worktree);
+            self.status = match now {
+                Some(w) => {
+                    let now = crate::wsx::Jump {
+                        repo: w.repo.clone(),
+                        slug: w.slug.clone(),
+                        worktree: w.path.clone(),
+                    };
+                    match run(&now) {
+                        Ok(()) => format!("switched to {} in wsx", now.label()),
+                        Err(e) => format!("wsx could not switch to {}: {e}", now.label()),
+                    }
+                }
+                None => format!(
+                    "{} is no longer live in wsx — enter again resumes it here",
+                    j.label()
+                ),
+            };
+        }
+        self.set_wsx(fresh);
+    }
+
     fn resume(&mut self, target: Target) {
-        let targets = self.targets();
+        let mut targets = self.targets();
         if targets.is_empty() {
             self.status = "nothing selected".into();
             return;
+        }
+        // Several at once cannot all land here, so they become windows, and
+        // one wsx is already running is left out of them rather than opened
+        // a second time. The explicit routes are taken at their word.
+        if target == Target::Here && !self.selected.is_empty() {
+            let mut held: Vec<String> = Vec::new();
+            targets.retain(|t| {
+                let claim = self
+                    .all
+                    .iter()
+                    .find(|o| !o.is_subagent && o.id == t.id)
+                    .and_then(|s| self.wsx_claim(s));
+                match claim {
+                    Some(Claim::Agent(j)) => held.push(j.label()),
+                    Some(Claim::Older(label)) => held.push(label),
+                    None => return true,
+                }
+                false
+            });
+            held.sort();
+            held.dedup();
+            if !held.is_empty() {
+                let note = format!(
+                    "left out {}: live in wsx — ctrl+n opens {} anyway",
+                    held.join(", "),
+                    if held.len() == 1 { "it" } else { "them" }
+                );
+                self.status = note.clone();
+                if targets.is_empty() {
+                    return;
+                }
+                self.notes.push(note);
+            }
         }
         // Guard against silently starting a second client on a transcript that
         // already has one. Tmux is exempt: attaching to the existing session is
@@ -1234,6 +1387,29 @@ impl App {
                         )
                     };
                     return;
+                }
+            }
+            // Not running as far as the process table can tell, but wsx
+            // runs its agents with `--continue`, which names no session: at
+            // best that is a guess by folder. What wsx lists is not.
+            if self.selected.is_empty() {
+                let claim = self
+                    .current()
+                    .map(|s| self.resumed(s))
+                    .and_then(|s| self.wsx_claim(s));
+                match claim {
+                    Some(Claim::Agent(j)) => {
+                        self.status = format!("switching to {} in wsx…", j.label());
+                        self.to_jump.push(j);
+                        return;
+                    }
+                    Some(Claim::Older(label)) => {
+                        self.status = format!(
+                            "{label} is live in wsx on a newer session — ctrl+n opens this one anyway"
+                        );
+                        return;
+                    }
+                    None => {}
                 }
             }
         }
@@ -3341,6 +3517,243 @@ mod logic_tests {
             "asked about an existing one"
         );
         assert_eq!(a.tmux_name, "some-name-i-chose");
+    }
+
+    fn on(a: &mut App, id: &str) {
+        a.cursor = a
+            .view
+            .iter()
+            .position(|r| matches!(r, Row::Item(i) if a.all[*i].id == id))
+            .unwrap_or_else(|| panic!("{id} is not in view"));
+    }
+
+    fn shy_daffodil() -> crate::wsx::Jump {
+        crate::wsx::Jump {
+            repo: "OS-DEV".into(),
+            slug: "shy-daffodil".into(),
+            worktree: format!("{WSX_ROOT}/OS-DEV/shy-daffodil"),
+        }
+    }
+
+    /// Another session in a fixture workspace's folder, and the list redone.
+    fn add_session(a: &mut App, id: &str, cwd: &str, age_days: i64) {
+        a.all.push(session(id, "another look at it", cwd, age_days));
+        a.apply_overlay();
+        a.rebuild();
+    }
+
+    #[test]
+    fn enter_on_a_live_workspace_goes_to_wsx_instead() {
+        // wsx is already running this workspace's agent. Resuming here
+        // started a second claude beside it, on the same conversation.
+        let mut a = app();
+        on(&mut a, "gggggggg-7");
+        a.do_action(Action::Resume);
+        assert_eq!(a.to_jump, vec![shy_daffodil()]);
+        assert!(a.outcome.is_none(), "resumed here as well");
+        assert!(!a.quit, "the picker stays up, as it does for a window");
+        assert!(
+            a.to_open.is_empty() && a.launched.is_empty(),
+            "wsx runs it, so it is not ours to record"
+        );
+    }
+
+    #[test]
+    fn an_older_conversation_in_a_live_workspace_is_refused_with_a_way_round() {
+        let mut a = app();
+        add_session(
+            &mut a,
+            "iiiiiiii-9",
+            &format!("{WSX_ROOT}/OS-DEV/shy-daffodil"),
+            6,
+        );
+        on(&mut a, "iiiiiiii-9");
+        a.do_action(Action::Resume);
+        assert!(a.to_jump.is_empty(), "wsx would show the newer one");
+        assert!(a.outcome.is_none());
+        assert!(
+            a.status
+                .contains("OS-DEV/shy-daffodil is live in wsx on a newer session")
+                && a.status.contains("ctrl+n"),
+            "{:?}",
+            a.status
+        );
+        // and the way round works
+        a.do_action(Action::NewWindow);
+        assert_eq!(a.to_open.len(), 1);
+        assert_eq!(a.to_open[0].1[0].id, "iiiiiiii-9");
+
+        // the newer one is still the one enter hands to wsx
+        on(&mut a, "gggggggg-7");
+        a.do_action(Action::Resume);
+        assert_eq!(a.to_jump, vec![shy_daffodil()]);
+    }
+
+    #[test]
+    fn the_explicit_ways_of_opening_one_are_taken_at_their_word() {
+        // As for a session already running: ctrl+n, ctrl+t and W say where
+        // it should go, and enter is the only one that guesses.
+        let mut a = app();
+        on(&mut a, "gggggggg-7");
+        a.do_action(Action::NewWindow);
+        assert_eq!(a.to_open.len(), 1, "ctrl+n");
+        assert!(a.to_jump.is_empty());
+
+        let mut a = app();
+        on(&mut a, "gggggggg-7");
+        a.do_action(Action::Tmux);
+        a.commit_tmux_name();
+        assert!(
+            matches!(
+                a.outcome,
+                Some(Outcome::Resume {
+                    target: Target::Tmux,
+                    ..
+                })
+            ),
+            "ctrl+t"
+        );
+        assert!(a.to_jump.is_empty());
+    }
+
+    #[test]
+    fn a_selection_leaves_out_what_wsx_is_running() {
+        let mut a = app();
+        a.selected.insert("/p/gggggggg-7.jsonl".into());
+        a.selected.insert("/p/aaaaaaaa-1.jsonl".into());
+        a.do_action(Action::Resume);
+        let Some(Outcome::Resume { targets, .. }) = &a.outcome else {
+            panic!("the rest of the selection was not resumed");
+        };
+        let ids: Vec<&str> = targets.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["aaaaaaaa-1"]);
+        assert!(a.to_jump.is_empty(), "a selection is not a jump");
+        assert!(
+            a.notes
+                .iter()
+                .any(|n| n.contains("left out OS-DEV/shy-daffodil") && n.contains("ctrl+n")),
+            "the browser closes, so it has to be said after: {:?}",
+            a.notes
+        );
+    }
+
+    #[test]
+    fn a_selection_of_nothing_but_wsxs_resumes_nothing() {
+        let mut a = app();
+        a.selected.insert("/p/gggggggg-7.jsonl".into());
+        a.do_action(Action::Resume);
+        assert!(a.outcome.is_none() && !a.quit);
+        assert!(a.status.contains("OS-DEV/shy-daffodil"), "{:?}", a.status);
+    }
+
+    #[test]
+    fn a_session_further_down_a_live_worktree_resumes_as_usual() {
+        // `claude --continue` in the worktree never reaches it.
+        let mut a = app();
+        add_session(
+            &mut a,
+            "iiiiiiii-9",
+            &format!("{WSX_ROOT}/OS-DEV/shy-daffodil/kernel"),
+            0,
+        );
+        on(&mut a, "iiiiiiii-9");
+        a.do_action(Action::Resume);
+        assert!(a.to_jump.is_empty());
+        assert!(matches!(
+            a.outcome,
+            Some(Outcome::Resume {
+                target: Target::Here,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn without_wsx_a_workspace_resumes_the_way_it_always_did() {
+        let mut a = app();
+        a.set_wsx(crate::wsx::State {
+            root: Some(WSX_ROOT.into()),
+            ..Default::default()
+        });
+        on(&mut a, "gggggggg-7");
+        a.do_action(Action::Resume);
+        assert!(a.to_jump.is_empty());
+        assert!(a.outcome.is_some() && a.quit);
+    }
+
+    #[test]
+    fn something_already_running_is_refused_before_wsx_is_considered() {
+        // `claude --resume <id>` running in the worktree is somebody's -- mn
+        // opened it, most likely -- and a jump would not reach it.
+        let mut a = app();
+        on(&mut a, "gggggggg-7");
+        let i = a.current_idx().unwrap();
+        a.all[i].live_exact = true;
+        a.all[i].live_pid = Some(4242);
+        a.do_action(Action::Resume);
+        assert!(a.to_jump.is_empty());
+        assert!(a.status.contains("4242"), "{:?}", a.status);
+    }
+
+    #[test]
+    fn a_jump_asks_wsx_again_and_goes_by_the_name_it_has_now() {
+        let mut a = app();
+        on(&mut a, "gggggggg-7");
+        a.do_action(Action::Resume);
+        // renamed while the list was up: same worktree, new slug
+        let mut fresh = a.wsx.clone();
+        fresh.workspaces[0].slug = "page-tables".into();
+        let sent = std::cell::RefCell::new(Vec::new());
+        a.finish_jumps(fresh, |j| {
+            sent.borrow_mut().push(j.label());
+            Ok(())
+        });
+        assert_eq!(*sent.borrow(), vec!["OS-DEV/page-tables"]);
+        assert_eq!(a.status, "switched to OS-DEV/page-tables in wsx");
+        assert!(a.to_jump.is_empty(), "a jump is made once");
+        let s = a.all.iter().find(|s| s.id == "gggggggg-7").unwrap();
+        assert_eq!(s.folder(), "OS-DEV/page-tables", "and the list says so too");
+    }
+
+    #[test]
+    fn a_workspace_archived_in_the_meantime_is_not_jumped_to() {
+        let mut a = app();
+        on(&mut a, "gggggggg-7");
+        a.do_action(Action::Resume);
+        let mut fresh = a.wsx.clone();
+        fresh.workspaces.clear();
+        a.finish_jumps(fresh, |_| panic!("jumped to a workspace that is gone"));
+        assert!(a.status.contains("no longer live"), "{:?}", a.status);
+        // it is an ordinary gone folder now
+        on(&mut a, "gggggggg-7");
+        a.do_action(Action::Resume);
+        assert!(a.outcome.is_some());
+    }
+
+    #[test]
+    fn a_wsx_that_does_not_answer_the_second_time_changes_nothing() {
+        let mut a = app();
+        on(&mut a, "gggggggg-7");
+        a.do_action(Action::Resume);
+        a.finish_jumps(crate::wsx::State::default(), |_| {
+            panic!("jumped without knowing it was still there")
+        });
+        assert!(a.status.contains("did not answer"), "{:?}", a.status);
+        assert!(a.wsx.available, "a silence is not news that it is gone");
+    }
+
+    #[test]
+    fn a_jump_wsx_refuses_says_why() {
+        let mut a = app();
+        on(&mut a, "gggggggg-7");
+        a.do_action(Action::Resume);
+        let fresh = a.wsx.clone();
+        a.finish_jumps(fresh, |_| Err("no workspace named shy-daffodil".into()));
+        assert!(
+            a.status.contains("could not switch") && a.status.contains("no workspace named"),
+            "{:?}",
+            a.status
+        );
     }
 
     #[test]
