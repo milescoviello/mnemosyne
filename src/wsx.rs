@@ -18,6 +18,11 @@
 /// home, another user name -- is still recognised for what it is.
 const SEGMENT: &str = "/.local/state/wsx/worktrees/";
 
+/// What every automatic tag starts with. `wsx/os-dev` rather than
+/// `wsx:OS-DEV`: it has to survive the same normalising a typed tag goes
+/// through, which lowercases it and drops the colon.
+pub const TAG_PREFIX: &str = "wsx/";
+
 /// A session's folder, read as a place in a wsx workspace.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ref {
@@ -164,6 +169,13 @@ impl Place {
     /// `OS-DEV/shy-daffodil`, and the folder under it if it was not the top.
     pub fn label(&self) -> String {
         format!("{}/{}", self.repo, self.tail())
+    }
+
+    /// `wsx/os-dev`: the tag every session from this repo carries without
+    /// anyone giving it, so `T` can pull one project's sessions out of a list
+    /// where each workspace is a folder of its own.
+    pub fn tag(&self) -> String {
+        format!("{TAG_PREFIX}{}", crate::meta::normalize_tag(&self.repo))
     }
 
     fn tail(&self) -> String {
@@ -397,6 +409,18 @@ mod tests {
             "OS-DEV/shy-daffodil/kernel/mm",
             "a session further down says where"
         );
+    }
+
+    #[test]
+    fn a_repo_tag_is_what_typing_it_would_give() {
+        // T normalises what you type; a tag it could never match is no tag.
+        for repo in ["OS-DEV", "meals backend", "Mixed.Case_repo"] {
+            let t = place(repo, "x", "").tag();
+            assert!(t.starts_with(TAG_PREFIX), "{t}");
+            assert_eq!(crate::meta::normalize_tag(&t), t, "{repo:?} gave {t:?}");
+        }
+        assert_eq!(place("OS-DEV", "x", "").tag(), "wsx/os-dev");
+        assert_eq!(place("meals backend", "x", "").tag(), "wsx/meals-backend");
     }
 
     #[test]

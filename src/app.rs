@@ -90,6 +90,19 @@ fn date_band(mtime: i64) -> &'static str {
     }
 }
 
+/// A tag the list gives sessions itself, which nobody may give one by hand.
+fn is_automatic(tag: &str) -> bool {
+    tag.starts_with(crate::wsx::TAG_PREFIX)
+}
+
+/// Why an automatic tag was not stored, and what to do instead.
+fn automatic_note(tags: &[String]) -> String {
+    format!(
+        "#{} is automatic — every session in a wsx workspace has its repo's; T shows them",
+        tags.join(" #")
+    )
+}
+
 /// Something a click can trigger. Mouse and keyboard funnel into the same
 /// `do_action`, so the two can never drift apart.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -489,7 +502,14 @@ impl App {
             return false;
         }
         if let Some(t) = &self.tag_filter {
-            if !s.tags.iter().any(|x| x == t) {
+            // wsx/<repo> is stored nowhere. It is read off the folder, so
+            // that is what it is matched against.
+            let has = if t.starts_with(crate::wsx::TAG_PREFIX) {
+                s.wsx.as_ref().is_some_and(|w| w.tag() == *t)
+            } else {
+                s.tags.iter().any(|x| x == t)
+            };
+            if !has {
                 return false;
             }
         }
@@ -518,11 +538,19 @@ impl App {
         }
         if !self.fuzzy.trim().is_empty() {
             // The id is in here so you can paste one from a log or a
-            // `--resume` line and land on that session.
+            // `--resume` line and land on that session. A wsx workspace is
+            // in twice over: by the name the list shows, and by its repo's
+            // tag, so `/wsx/os-dev` finds what `T` would.
+            let wsx = s
+                .wsx
+                .as_ref()
+                .map(|w| format!("{} {}", w.label(), w.tag()))
+                .unwrap_or_default();
             let hay = format!(
-                "{} {} {} {} {} {}",
+                "{} {} {} {} {} {} {}",
                 s.title(),
                 crate::model::short_cwd(&s.cwd),
+                wsx,
                 s.git_branch,
                 s.tags.join(" "),
                 s.last_prompt,
@@ -549,7 +577,7 @@ impl App {
             return 0;
         }
         let s = &self.all[i];
-        let hay = format!("{} {}", s.title(), crate::model::short_cwd(&s.cwd));
+        let hay = format!("{} {}", s.title(), s.folder());
         let pat = Pattern::parse(
             self.fuzzy.trim(),
             CaseMatching::Ignore,
@@ -1327,6 +1355,12 @@ impl App {
 
         // `old>new` renames a tag everywhere rather than tagging anything.
         if let Some((from, to)) = raw.split_once('>') {
+            if is_automatic(&crate::meta::normalize_tag(to)) {
+                self.status = automatic_note(&[crate::meta::normalize_tag(to)]);
+                self.input.clear();
+                self.input_mode = InputMode::Normal;
+                return;
+            }
             let n = self.meta.rename_tag(from, to);
             if self.persist {
                 let _ = self.meta.save();
@@ -1368,12 +1402,22 @@ impl App {
         // took "eft rig" as two tags while removing took it as one called
         // "eft-rig", so `-eft rig` asked for something nothing had -- and
         // said it had removed them.
-        let names: Vec<String> = raw
+        let mut names: Vec<String> = raw
             .trim_start_matches('-')
             .split(|c: char| c == ',' || c.is_whitespace())
             .map(crate::meta::normalize_tag)
             .filter(|t| !t.is_empty())
             .collect();
+        // Removing one is allowed -- a tag of that name stored before they
+        // were automatic has to be possible to clear -- but never adding one.
+        let refused: Vec<String> = if raw.starts_with('-') {
+            Vec::new()
+        } else {
+            let (auto, given): (Vec<String>, Vec<String>) =
+                names.into_iter().partition(|t| is_automatic(t));
+            names = given;
+            auto
+        };
 
         if raw.starts_with('-') {
             let mut gone = 0usize;
@@ -1409,6 +1453,15 @@ impl App {
             } else {
                 format!("tagged {many} sessions #{what}")
             };
+            if !refused.is_empty() {
+                self.status = format!(
+                    "{} — #{} is automatic, so it was left off",
+                    self.status,
+                    refused.join(" #")
+                );
+            }
+        } else if !refused.is_empty() {
+            self.status = automatic_note(&refused);
         } else if !raw.is_empty() {
             self.status = format!("{raw:?} leaves nothing a tag can be made of");
         }
@@ -1457,11 +1510,23 @@ impl App {
     }
 
     /// Tag completions for the current input prefix.
+    ///
+    /// Showing only one tag also offers the automatic ones, counted from the
+    /// sessions that carry them. Tagging does not: it would refuse them.
     pub fn tag_completions(&self) -> Vec<String> {
         let pfx = crate::meta::normalize_tag(&self.input);
-        self.meta
-            .all_tags()
-            .into_iter()
+        let mut tags = self.meta.all_tags();
+        if self.input_mode == InputMode::TagFilter {
+            let mut auto: HashMap<String, usize> = HashMap::new();
+            for s in self.all.iter().filter(|s| !s.is_subagent) {
+                if let Some(w) = &s.wsx {
+                    *auto.entry(w.tag()).or_insert(0) += 1;
+                }
+            }
+            tags.extend(auto);
+            tags.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        }
+        tags.into_iter()
             .filter(|(t, _)| pfx.is_empty() || t.starts_with(&pfx))
             .take(8)
             .map(|(t, n)| format!("{t} ({n})"))
@@ -2529,6 +2594,125 @@ mod logic_tests {
         assert!(
             !heads.iter().any(|h| h.contains(".local/state")),
             "a heading still spells out the worktree: {heads:?}"
+        );
+    }
+
+    fn shown_ids(a: &App) -> Vec<String> {
+        let mut v: Vec<String> = a
+            .view
+            .iter()
+            .filter_map(|r| match r {
+                Row::Item(i) => Some(a.all[*i].id.clone()),
+                _ => None,
+            })
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn one_repos_workspaces_are_one_tag_away() {
+        // Every workspace is a folder of its own, so no folder filter could
+        // pull one project's sessions together. The repo's tag does, without
+        // anyone having tagged anything.
+        let mut a = app();
+        a.do_action(Action::TagFilter);
+        a.input = "wsx/OS-DEV".into(); // typed as the repo is written
+        a.commit_tag_filter();
+        assert_eq!(a.tag_filter.as_deref(), Some("wsx/os-dev"));
+        assert_eq!(shown_ids(&a), vec!["gggggggg-7", "hhhhhhhh-8"]);
+
+        a.input = "wsx/nothing-by-that-name".into();
+        a.commit_tag_filter();
+        assert_eq!(a.item_count(), 0);
+
+        // an ordinary tag still means what it did
+        a.input = "eft".into();
+        a.commit_tag_filter();
+        assert_eq!(shown_ids(&a), vec!["cccccccc-3"]);
+    }
+
+    #[test]
+    fn the_filter_finds_a_workspace_by_the_name_the_list_shows() {
+        let mut a = app();
+        for needle in ["OS-DEV/shy", "shy-daffodil", "wsx/os-dev"] {
+            a.fuzzy = needle.into();
+            a.rebuild();
+            let ids = shown_ids(&a);
+            assert!(
+                ids.contains(&"gggggggg-7".to_string()),
+                "{needle:?} found {ids:?}"
+            );
+        }
+        a.fuzzy = "wsx/os-dev".into();
+        a.rebuild();
+        assert!(
+            shown_ids(&a)
+                .iter()
+                .all(|id| id == "gggggggg-7" || id == "hhhhhhhh-8"),
+            "{:?}",
+            shown_ids(&a)
+        );
+    }
+
+    #[test]
+    fn showing_one_tag_offers_the_automatic_ones_and_tagging_does_not() {
+        let mut a = app();
+        a.input_mode = InputMode::TagFilter;
+        a.input = "ws".into();
+        assert_eq!(a.tag_completions(), vec!["wsx/os-dev (2)"]);
+        a.input.clear();
+        assert!(
+            a.tag_completions().contains(&"wsx/os-dev (2)".to_string()),
+            "{:?}",
+            a.tag_completions()
+        );
+
+        // tagging would refuse it, so it is not offered there
+        a.input_mode = InputMode::TagAdd;
+        a.input = "ws".into();
+        assert!(a.tag_completions().is_empty(), "{:?}", a.tag_completions());
+    }
+
+    #[test]
+    fn an_automatic_tag_cannot_be_given_by_hand() {
+        // Stored, it would go on disagreeing with the folder it came from:
+        // a session tagged wsx/os-dev by hand is in no workspace at all.
+        let mut a = app();
+        let id = a.all[0].id.clone();
+        a.cursor = a
+            .view
+            .iter()
+            .position(|r| matches!(r, Row::Item(i) if a.all[*i].id == id))
+            .unwrap();
+
+        type_tag(&mut a, "wsx/os-dev");
+        assert!(tags_of(&a, &id).is_empty(), "{:?}", tags_of(&a, &id));
+        assert!(a.status.contains("automatic"), "{:?}", a.status);
+
+        type_tag(&mut a, "rig WSX/Other");
+        assert_eq!(tags_of(&a, &id), vec!["rig"], "the ordinary one is kept");
+        assert!(
+            a.status.contains("tagged #rig") && a.status.contains("wsx/other"),
+            "it should say what it did and what it left off: {:?}",
+            a.status
+        );
+
+        type_tag(&mut a, "rig>wsx/os-dev");
+        assert_eq!(
+            tags_of(&a, &id),
+            vec!["rig"],
+            "renamed into an automatic tag"
+        );
+        assert!(a.status.contains("automatic"), "{:?}", a.status);
+
+        assert!(
+            a.meta
+                .all_tags()
+                .iter()
+                .all(|(t, _)| !t.starts_with(crate::wsx::TAG_PREFIX)),
+            "one reached meta.json: {:?}",
+            a.meta.all_tags()
         );
     }
 
