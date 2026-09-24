@@ -57,6 +57,8 @@ pub struct Session {
     /// true when we matched the pid by `--resume <id>`, false when we only
     /// matched its working directory (so it is a guess).
     pub live_exact: bool,
+    /// The process running it was started by wsx: it is a workspace's agent.
+    pub live_in_wsx: bool,
     pub subagent_count: u32,
     /// A tmux session is already running this one, so we can attach.
     pub has_tmux: bool,

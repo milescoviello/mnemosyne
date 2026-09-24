@@ -10,7 +10,8 @@
 //!             `--resume` can't do better than this.
 //!
 //! Also recovers the `--model` a live process was started with, so resuming a
-//! session doesn't silently drop it back to the default model.
+//! session doesn't silently drop it back to the default model, and notes which
+//! processes wsx started, since those are wsx's to bring back rather than ours.
 
 use std::collections::HashMap;
 
@@ -20,6 +21,8 @@ pub struct Proc {
     pub cwd: String,
     pub resume_id: Option<String>,
     pub model: Option<String>,
+    /// wsx started it: an agent in one of its workspaces.
+    pub under_wsx: bool,
 }
 
 fn looks_like_uuid(s: &str) -> bool {
@@ -77,6 +80,29 @@ pub fn parse_claude_args(args: &[String]) -> (Option<String>, Option<String>) {
     (resume_id, model)
 }
 
+/// The parent pid out of `/proc/<pid>/stat`.
+///
+/// The command name comes second, in parentheses, and may itself contain
+/// spaces and parentheses; only the last `)` reliably ends it.
+fn ppid_from_stat(stat: &str) -> Option<i32> {
+    let after = stat.rsplit_once(')')?.1;
+    after.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Was this process started by wsx itself?
+///
+/// Its parent, not an ancestor, and not the `WSX_*` variables wsx sets:
+/// both of those reach anything started from inside an agent's shell as
+/// well, and a `claude` run by hand from there is not an agent wsx will put
+/// back. wsx runs each agent directly under its own process.
+fn started_by_wsx(pid: i32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|s| ppid_from_stat(&s))
+        .and_then(|ppid| std::fs::read_to_string(format!("/proc/{ppid}/comm")).ok())
+        .is_some_and(|comm| comm.trim() == "wsx")
+}
+
 pub fn scan_procs() -> Vec<Proc> {
     let mut out = Vec::new();
     if !detection_supported() {
@@ -125,6 +151,7 @@ pub fn scan_procs() -> Vec<Proc> {
             cwd,
             resume_id,
             model,
+            under_wsx: started_by_wsx(pid),
         });
     }
     out
@@ -301,7 +328,30 @@ mod tests {
             cwd: format!("/home/u/{id}"),
             resume_id: Some(id.to_string()),
             model: None,
+            under_wsx: false,
         }
+    }
+
+    #[test]
+    fn the_parent_is_read_past_a_command_name_with_parentheses_in_it() {
+        assert_eq!(
+            ppid_from_stat("123 (claude) S 11830 123 123 0"),
+            Some(11830)
+        );
+        assert_eq!(
+            ppid_from_stat("123 (odd) name (x)) S 77 123 123 0"),
+            Some(77),
+            "only the last parenthesis closes the name"
+        );
+        assert_eq!(ppid_from_stat("garbage"), None);
+        assert_eq!(ppid_from_stat(""), None);
+    }
+
+    #[test]
+    fn this_test_was_not_started_by_wsx() {
+        // Its parent is cargo, whatever terminal it runs in -- including a
+        // wsx agent's, which is exactly the case the parent check is for.
+        assert!(!started_by_wsx(std::process::id() as i32));
     }
 
     #[test]

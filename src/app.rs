@@ -206,11 +206,11 @@ pub enum Outcome {
 
 /// What wsx has to say about resuming a session here.
 enum Claim {
-    /// The conversation a live workspace's agent carries on.
+    /// The conversation a live workspace's agent is on, or will carry on.
     Agent(crate::wsx::Jump),
-    /// An older conversation from a live workspace's worktree, named by the
-    /// workspace.
-    Older(String),
+    /// Another conversation from a live workspace's worktree, which a jump
+    /// would not show. Named by the workspace, with why not.
+    Not { label: String, why: &'static str },
 }
 
 pub struct DeepResult {
@@ -459,9 +459,11 @@ impl App {
             s.cwd_missing = !s.cwd.is_empty() && !dir_exists.get(&s.cwd).copied().unwrap_or(true);
             s.live_pid = None;
             s.live_exact = false;
+            s.live_in_wsx = false;
             if let Some(p) = self.live.by_id.get(&s.id) {
                 s.live_pid = Some(p.pid);
                 s.live_exact = true;
+                s.live_in_wsx = p.under_wsx;
                 if s.model.is_empty() {
                     if let Some(m) = &p.model {
                         s.model = m.clone();
@@ -487,6 +489,7 @@ impl App {
                 if self.all[i].live_pid.is_none() {
                     self.all[i].live_pid = Some(p.pid);
                     self.all[i].live_exact = false;
+                    self.all[i].live_in_wsx = p.under_wsx;
                 }
             }
         }
@@ -1056,6 +1059,11 @@ impl App {
             if s.cwd.is_empty() {
                 continue;
             }
+            // wsx puts its own agents back when it starts. Reopening one
+            // here as well would be the second client it is careful to avoid.
+            if s.live_in_wsx && !s.has_tmux {
+                continue;
+            }
             // Where it would be reopened, which for an archived workspace is
             // not the worktree it started in: that has gone, and a reboot
             // offer skips any folder that has.
@@ -1252,18 +1260,36 @@ impl App {
 
     /// Whether a session belongs to wsx rather than to this terminal.
     ///
-    /// wsx keeps a live workspace's agent running, and when it starts one it
-    /// uses `claude --continue` in the worktree -- which carries on the
-    /// newest conversation there. That conversation is wsx's to bring back.
-    /// An older one from the same worktree is not the one wsx would show, and
-    /// resuming it here would make it the newest, and so the one wsx carries
-    /// on next time. A session started further down the worktree is neither:
-    /// `--continue` never reaches it.
+    /// wsx keeps a live workspace's agents running, each on a conversation of
+    /// its own, and puts them back on those same conversations when it starts
+    /// again -- by id where it has recorded one, otherwise with
+    /// `claude --continue`, which carries on the newest conversation in the
+    /// worktree. So:
+    ///
+    /// - a conversation wsx is running now is wsx's to bring back;
+    /// - with an agent running in the worktree, any other conversation there
+    ///   is not the one a jump would show;
+    /// - with none running, the newest is the best guess at what wsx will
+    ///   carry on, and an older one is not it -- resuming it here would also
+    ///   make it the newest, and so the next `--continue`.
+    ///
+    /// A session started further down the worktree is none of these: no
+    /// agent runs there, and `--continue` never reaches it.
     fn wsx_claim(&self, s: &Session) -> Option<Claim> {
         let w = s.wsx.as_ref()?;
         let crate::wsx::Status::Live { worktree } = &w.status else {
             return None;
         };
+        let jump = || {
+            Claim::Agent(crate::wsx::Jump {
+                repo: w.repo.clone(),
+                slug: w.slug.clone(),
+                worktree: worktree.clone(),
+            })
+        };
+        if s.live_in_wsx {
+            return Some(jump());
+        }
         if !w.rest.is_empty() {
             return None;
         }
@@ -1273,6 +1299,12 @@ impl App {
                     .as_ref()
                     .is_some_and(|ow| ow.rest.is_empty() && ow.status == w.status)
         };
+        if self.all.iter().filter(at_top).any(|o| o.live_in_wsx) {
+            return Some(Claim::Not {
+                label: w.label(),
+                why: "another",
+            });
+        }
         // The same tie-break as the running-process guess: first of the
         // newest.
         let newest =
@@ -1284,13 +1316,12 @@ impl App {
                     _ => Some(o),
                 })?;
         Some(if newest.id == s.id {
-            Claim::Agent(crate::wsx::Jump {
-                repo: w.repo.clone(),
-                slug: w.slug.clone(),
-                worktree: worktree.clone(),
-            })
+            jump()
         } else {
-            Claim::Older(w.label())
+            Claim::Not {
+                label: w.label(),
+                why: "a newer",
+            }
         })
     }
 
@@ -1377,7 +1408,7 @@ impl App {
                     .and_then(|s| self.wsx_claim(s));
                 match claim {
                     Some(Claim::Agent(j)) => held.push(j.label()),
-                    Some(Claim::Older(label)) => held.push(label),
+                    Some(Claim::Not { label, .. }) => held.push(label),
                     None => return true,
                 }
                 false
@@ -1396,6 +1427,25 @@ impl App {
                 }
                 self.notes.push(note);
             }
+        }
+        let claim = if target == Target::Here && self.selected.is_empty() {
+            self.current()
+                .map(|s| self.resumed(s))
+                .and_then(|s| self.wsx_claim(s))
+        } else {
+            None
+        };
+        // wsx running it outright comes before the guard below, which would
+        // otherwise read an agent wsx resumed by id as somebody's process and
+        // refuse it.
+        let wsx_runs_it = self
+            .current()
+            .map(|s| self.resumed(s))
+            .is_some_and(|s| s.live_in_wsx);
+        if let (Some(Claim::Agent(j)), true) = (&claim, wsx_runs_it) {
+            self.status = format!("switching to {} in wsx…", j.label());
+            self.to_jump.push(j.clone());
+            return;
         }
         // Guard against silently starting a second client on a transcript that
         // already has one. Tmux is exempt: attaching to the existing session is
@@ -1427,28 +1477,21 @@ impl App {
                     return;
                 }
             }
-            // Not running as far as the process table can tell, but wsx
-            // runs its agents with `--continue`, which names no session: at
-            // best that is a guess by folder. What wsx lists is not.
-            if self.selected.is_empty() {
-                let claim = self
-                    .current()
-                    .map(|s| self.resumed(s))
-                    .and_then(|s| self.wsx_claim(s));
-                match claim {
-                    Some(Claim::Agent(j)) => {
-                        self.status = format!("switching to {} in wsx…", j.label());
-                        self.to_jump.push(j);
-                        return;
-                    }
-                    Some(Claim::Older(label)) => {
-                        self.status = format!(
-                            "{label} is live in wsx on a newer session — ctrl+n opens this one anyway"
-                        );
-                        return;
-                    }
-                    None => {}
+            // Nothing running it, but the workspace is live, and wsx will
+            // put its agent back on a conversation of its choosing.
+            match claim {
+                Some(Claim::Agent(j)) => {
+                    self.status = format!("switching to {} in wsx…", j.label());
+                    self.to_jump.push(j);
+                    return;
                 }
+                Some(Claim::Not { label, why }) => {
+                    self.status = format!(
+                        "{label} is live in wsx on {why} session — ctrl+n opens this one anyway"
+                    );
+                    return;
+                }
+                None => {}
             }
         }
         // A window of its own does not need this one: hand it to the shell
@@ -3747,6 +3790,122 @@ mod logic_tests {
         a.do_action(Action::Resume);
         assert!(a.to_jump.is_empty());
         assert!(a.status.contains("4242"), "{:?}", a.status);
+    }
+
+    /// Claude processes running, as the process scan would report them.
+    fn running(a: &mut App, procs: Vec<crate::live::Proc>) {
+        let (mut by_id, mut by_cwd) = (HashMap::new(), HashMap::new());
+        for p in procs {
+            match p.resume_id.clone() {
+                Some(id) => by_id.insert(id, p),
+                None => by_cwd.insert(p.cwd.clone(), p),
+            };
+        }
+        a.live = LiveMap {
+            count: by_id.len() + by_cwd.len(),
+            by_id,
+            by_cwd,
+            supported: true,
+        };
+        a.apply_overlay();
+        a.rebuild();
+    }
+
+    fn claude(pid: i32, resume: Option<&str>, cwd: &str, by_wsx: bool) -> crate::live::Proc {
+        crate::live::Proc {
+            pid,
+            cwd: cwd.into(),
+            resume_id: resume.map(str::to_string),
+            model: None,
+            under_wsx: by_wsx,
+        }
+    }
+
+    #[test]
+    fn an_agent_wsx_resumed_by_id_is_switched_to_rather_than_refused() {
+        // wsx puts an agent back on its own conversation with `--resume
+        // <id>`, which the process scan matches exactly -- and the guard
+        // against a second client read that as somebody's running session
+        // and refused, so enter never reached wsx at all.
+        let mut a = app();
+        let tree = format!("{WSX_ROOT}/OS-DEV/shy-daffodil");
+        running(&mut a, vec![claude(14939, Some("gggggggg-7"), &tree, true)]);
+        on(&mut a, "gggggggg-7");
+        a.do_action(Action::Resume);
+        assert_eq!(a.to_jump, vec![shy_daffodil()], "{:?}", a.status);
+        assert!(!a.status.contains("already running"), "{:?}", a.status);
+    }
+
+    #[test]
+    fn a_plain_claude_wsx_started_is_its_agent_too() {
+        // A fresh agent, or one carried on with `--continue`: no id on the
+        // command line, so only its folder says which session it is.
+        let mut a = app();
+        let tree = format!("{WSX_ROOT}/OS-DEV/shy-daffodil");
+        running(&mut a, vec![claude(2794, None, &tree, true)]);
+        let s = a.all.iter().find(|s| s.id == "gggggggg-7").unwrap();
+        assert!(s.live_in_wsx && !s.live_exact);
+        on(&mut a, "gggggggg-7");
+        a.do_action(Action::Resume);
+        assert_eq!(a.to_jump, vec![shy_daffodil()]);
+    }
+
+    #[test]
+    fn each_of_several_agents_is_switched_to_on_its_own_conversation() {
+        // A workspace can run more than one agent. The second is on an older
+        // conversation, and it is still wsx's -- while the newest, which no
+        // agent is running, is not what a jump would show.
+        let mut a = app();
+        let tree = format!("{WSX_ROOT}/OS-DEV/shy-daffodil");
+        add_session(&mut a, "iiiiiiii-9", &tree, 6);
+        running(&mut a, vec![claude(1168, Some("iiiiiiii-9"), &tree, true)]);
+        on(&mut a, "iiiiiiii-9");
+        a.do_action(Action::Resume);
+        assert_eq!(a.to_jump, vec![shy_daffodil()], "{:?}", a.status);
+
+        a.to_jump.clear();
+        on(&mut a, "gggggggg-7");
+        a.do_action(Action::Resume);
+        assert!(a.to_jump.is_empty());
+        assert!(
+            a.status.contains("live in wsx on another session") && a.status.contains("ctrl+n"),
+            "{:?}",
+            a.status
+        );
+    }
+
+    #[test]
+    fn a_claude_started_some_other_way_is_still_refused_as_running() {
+        // `claude --resume` in the worktree that wsx did not start -- a
+        // window mn opened, say. A jump would not reach it.
+        let mut a = app();
+        let tree = format!("{WSX_ROOT}/OS-DEV/shy-daffodil");
+        running(&mut a, vec![claude(4242, Some("gggggggg-7"), &tree, false)]);
+        on(&mut a, "gggggggg-7");
+        a.do_action(Action::Resume);
+        assert!(a.to_jump.is_empty());
+        assert!(
+            a.status.contains("already running as pid 4242"),
+            "{:?}",
+            a.status
+        );
+    }
+
+    #[test]
+    fn wsxs_agents_are_left_out_of_the_reboot_record() {
+        // wsx puts them back itself when it starts. Offering them again
+        // after a reboot would open each a second time.
+        let mut a = app();
+        let tree = format!("{WSX_ROOT}/OS-DEV/shy-daffodil");
+        running(
+            &mut a,
+            vec![
+                claude(14939, Some("gggggggg-7"), &tree, true),
+                claude(4242, Some("aaaaaaaa-1"), "/home/u", false),
+            ],
+        );
+        let ids: Vec<String> = a.open_sessions().into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec!["aaaaaaaa-1"]);
     }
 
     #[test]

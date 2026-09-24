@@ -1141,12 +1141,13 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
     }
     if let Some(pid) = s.live_pid {
         facts.push(format!(
-            "{} {pid}",
+            "{}{} {pid}",
             if s.live_exact {
                 "running"
             } else {
                 "likely running"
-            }
+            },
+            if s.live_in_wsx { " in wsx" } else { "" }
         ));
     }
     if s.has_tmux {
@@ -2179,6 +2180,32 @@ mod render_tests {
             nowhere.contains("wsx · archived · resumes where you are"),
             "{nowhere:?}"
         );
+    }
+
+    #[test]
+    fn the_rail_says_when_wsx_is_the_one_running_it() {
+        let mut a = app();
+        let tree = format!("{}/OS-DEV/shy-daffodil", crate::app::fixtures::WSX_ROOT);
+        let mut by_id = std::collections::HashMap::new();
+        by_id.insert(
+            "gggggggg-7".to_string(),
+            crate::live::Proc {
+                pid: 14939,
+                cwd: tree,
+                resume_id: Some("gggggggg-7".into()),
+                model: None,
+                under_wsx: true,
+            },
+        );
+        a.live = crate::live::LiveMap {
+            by_id,
+            by_cwd: Default::default(),
+            count: 1,
+            supported: true,
+        };
+        a.apply_overlay();
+        let rail = rail_for(&mut a, "gggggggg-7");
+        assert!(rail.contains("running in wsx 14939"), "{rail:?}");
     }
 
     /// The colour a piece of text on screen was drawn in.

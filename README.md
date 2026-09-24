@@ -344,7 +344,8 @@ Claude process each before you have said you want any of them.
 
 Sessions whose folder no longer exists are skipped, and so is anything
 already running — reopening one of those would put a second client on a
-transcript that already has one.
+transcript that already has one. Sessions a [wsx](#wsx) agent was running
+are never recorded at all: wsx puts its own agents back when it starts.
 
 **There is no daemon.** Nothing runs at shutdown to take a final snapshot, so
 the record is as fresh as your last `mn` — in practice, most of the way
@@ -412,21 +413,24 @@ is read off the folder — and `t` refuses to add one by hand. It is
 `wsx/os-dev` rather than `wsx:OS-DEV` because a tag you type is lowercased
 and loses its colons, and this has to be one you can type.
 
-**Live ones go back to wsx.** wsx keeps a live workspace's agent running, and
-`enter` used to start a second `claude` beside it on the same conversation.
-The running-session guard never caught it, because wsx starts its agents with
-`claude --continue`, which names no session. Now `enter` runs
+**Live ones go back to wsx.** wsx keeps a live workspace's agents running,
+and `enter` on one never took you there: it either started a second `claude`
+beside the agent on the same conversation, or — when wsx had resumed the
+agent by id — refused it as already running. Now `enter` runs
 `wsx waybar jump` — `wsx menubar jump` on macOS — which selects the workspace
 in the wsx you have open, or opens one on it. The browser stays up, as it
 does for a window, and says where it went. Whether the wsx window is also
 raised is up to wsx; today that only happens under Hyprland.
 
-It is the newest conversation at the top of the worktree that goes to wsx,
-since that is the one `--continue` carries on. `enter` on an older one says
-so and does nothing: resuming it here would also make it the newest, and so
-the one wsx picks up next time. `ctrl+n`, `ctrl+t` and `W` open it anyway, as
-they do a session already running. A selection resumed with `enter` leaves
-out whatever wsx is running, and says which.
+What goes to wsx is a conversation one of its agents is running — a
+`claude` whose parent process is wsx itself — or, when no agent is running
+in the workspace, the newest conversation at the top of the worktree, which
+is what wsx carries on when it has no session recorded for an agent. `enter`
+on any other conversation from there says so and does nothing, because a
+jump would show a different one; resuming an older one here would also make
+it the newest, and so possibly what wsx picks up next. `ctrl+n`, `ctrl+t`
+and `W` open it anyway, as they do a session already running. A selection
+resumed with `enter` leaves out whatever wsx is running, and says which.
 
 **Archived ones resume in the repo.** Archiving a workspace deletes its
 worktree, but the repo it was a worktree of is still checked out. A worktree
