@@ -542,6 +542,7 @@ mod tests {
             "config.rs",
             "splash.rs",
             "art.rs",
+            "wsx.rs",
         ] {
             let src = std::fs::read_to_string(format!("{}/src/{f}", env!("CARGO_MANIFEST_DIR")))
                 .unwrap_or_default();

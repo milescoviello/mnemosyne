@@ -19,6 +19,9 @@ mod splash;
 mod ui;
 mod update;
 mod workspace;
+// Parsing only, so far; nothing reads a workspace out of it yet.
+#[allow(dead_code)]
+mod wsx;
 
 use anyhow::Result;
 use app::{App, Outcome};
