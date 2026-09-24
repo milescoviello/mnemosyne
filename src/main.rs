@@ -583,6 +583,9 @@ fn main() -> Result<()> {
             // to mean showing them. Without this the flag changed nothing.
             app.expand_all();
         }
+        if has("--json") {
+            app.set_wsx(wsx::load());
+        }
         app.rebuild();
         if has("--json") {
             let mut out = Vec::new();
@@ -606,6 +609,20 @@ fn main() -> Result<()> {
                         "live_pid": s.live_pid,
                         "subagents": s.subagent_count,
                         "is_subagent": s.is_subagent,
+                        "wsx": s.wsx.as_ref().map(|w| serde_json::json!({
+                            "repo": w.repo,
+                            "slug": w.slug,
+                            "tag": w.tag(),
+                            "state": w.status.word(),
+                            "worktree": match &w.status {
+                                wsx::Status::Live { worktree } => Some(worktree),
+                                _ => None,
+                            },
+                            "checkout": match &w.status {
+                                wsx::Status::Archived { checkout } => checkout.as_ref(),
+                                _ => None,
+                            },
+                        })),
                     }));
                 }
             }

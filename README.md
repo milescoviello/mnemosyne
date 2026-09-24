@@ -116,6 +116,11 @@ single cue for "where was I".
 on one tells you its pid instead of silently attaching a second client to the
 same transcript.
 
+**Knows wsx.** Sessions from [wsx](#wsx) workspaces are listed by repo and
+workspace rather than by worktree path. `enter` on a live one switches to it
+in wsx, which is already running it, and an archived one resumes in its
+repo's checkout.
+
 **Opens where you want it.** `enter` resumes in this terminal, `ctrl+n` in a
 new terminal window, `ctrl+t` in tmux, and `W` (or `ctrl+shift+t`) in a new
 terminal window *with tmux inside it* — the durable one, because closing the
@@ -385,6 +390,65 @@ speaks the kitty keyboard protocol, and inside tmux that additionally needs
 `set -s extended-keys on` in your tmux.conf. Without both, it arrives as
 plain `ctrl+t` and resumes in tmux the ordinary way. `W` has no such
 requirement.
+
+## wsx
+
+[wsx](https://github.com/bakedbean/workspacex) runs each Claude session in a
+git worktree of its own, under `~/.local/state/wsx/worktrees/<repo>/<slug>`
+(`$XDG_STATE_HOME` instead of `~/.local/state` on Linux, when it is set). As
+folders those are long paths that differ only at the end, which is exactly
+where the folder column cuts them off. So they are read for what they are.
+
+**Named by workspace.** The folder column shows `OS-DEV/shy-daffodil`, and
+when that does not fit the repo gives way first — `OS…/shy-daffodil`, then
+the bare slug — because every row from one project shares it. Grouping by
+folder and the preview rail use the same name.
+
+**One repo at a time.** No two workspaces share a folder, so nothing used to
+bring one project's sessions together. Each now carries an automatic tag for
+its repo: `T wsx/os-dev` shows that repo's workspaces, `/wsx/os-dev` finds
+them, and `T` offers the tag among its completions. It is never stored — it
+is read off the folder — and `t` refuses to add one by hand. It is
+`wsx/os-dev` rather than `wsx:OS-DEV` because a tag you type is lowercased
+and loses its colons, and this has to be one you can type.
+
+**Live ones go back to wsx.** wsx keeps a live workspace's agent running, and
+`enter` used to start a second `claude` beside it on the same conversation.
+The running-session guard never caught it, because wsx starts its agents with
+`claude --continue`, which names no session. Now `enter` runs
+`wsx waybar jump` — `wsx menubar jump` on macOS — which selects the workspace
+in the wsx you have open, or opens one on it. The browser stays up, as it
+does for a window, and says where it went. Whether the wsx window is also
+raised is up to wsx; today that only happens under Hyprland.
+
+It is the newest conversation at the top of the worktree that goes to wsx,
+since that is the one `--continue` carries on. `enter` on an older one says
+so and does nothing: resuming it here would also make it the newest, and so
+the one wsx picks up next time. `ctrl+n`, `ctrl+t` and `W` open it anyway, as
+they do a session already running. A selection resumed with `enter` leaves
+out whatever wsx is running, and says which.
+
+**Archived ones resume in the repo.** Archiving a workspace deletes its
+worktree, but the repo it was a worktree of is still checked out. A worktree
+wsx no longer lists is dimmed rather than drawn in the red of a lost folder,
+the rail says `wsx · archived · resumes in ~/OS-DEV`, and every way of
+opening it lands in that checkout. If wsx no longer knows the repo by that
+name, it resumes wherever you are, as any gone folder does. A worktree
+archived with `--keep-worktree` is still there, and resumes in place.
+
+Only the last two need wsx on your `PATH`. Names and tags come from the path
+alone, so they cover archived workspaces too, and transcripts synced from
+another machine — those are never called archived, since the wsx here never
+had them. What is live, and where each repo's checkout is, comes from
+`wsx workspace list` and `wsx repo list`: asked when the list loads and on
+every rescan, asked again just before a jump, and given half a second to
+answer. mnemosyne uses wsx's command line and never its database, and if wsx
+is missing, fails or is slow, every session behaves as it did before.
+
+A renamed workspace keeps its folder — `wsx workspace rename` never moves it
+— so a live one is named by what wsx lists and an archived one by the folder
+it was created in. `mnemosyne --json` includes the same facts as a `wsx`
+object on each session that has one.
 
 ## Permissions
 

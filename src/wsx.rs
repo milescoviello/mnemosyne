@@ -233,6 +233,17 @@ impl Place {
     }
 }
 
+impl Status {
+    /// One word for it, as `--json` puts it.
+    pub fn word(&self) -> &'static str {
+        match self {
+            Status::Unknown => "unknown",
+            Status::Live { .. } => "live",
+            Status::Archived { .. } => "archived",
+        }
+    }
+}
+
 /// What this machine's wsx has to say about a folder.
 #[derive(Clone, Debug, Default)]
 pub struct State {
