@@ -36,7 +36,9 @@ pub fn db_path() -> PathBuf {
 ///   3  conversation prose is harvested into the full-text index
 ///   4  thinking blocks and shell commands are harvested too
 ///   5  token usage is summed per session
-pub const SCANNER_VERSION: u32 = 6;
+///   6  prose stored as a plain `"content"` string is harvested too
+///   7  rebuild text that an incremental rescan had doubled or deleted
+pub const SCANNER_VERSION: u32 = 7;
 
 /// Every column the loader expects. Compared against what the database
 /// actually has, so drift is detected rather than assumed away.
@@ -545,6 +547,37 @@ pub struct Progress {
     pub finished: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
+/// What a transcript's indexed text should be once it has been scanned, or
+/// `None` to leave what is stored alone.
+///
+/// A transcript read from scratch replaces its row outright. One read on from
+/// `prev` contributes only its new tail, which is joined to what is there --
+/// and when that tail is empty, as it is for a file that was only touched or
+/// is halfway through writing a line, what is there stays.
+///
+/// This used to decide by comparing against the cached row rather than the
+/// `prev` the scan was actually given. After a scanner change there is no
+/// `prev` and every file is read from the start, so each one that had grown
+/// was stored as its old text followed by all of it again.
+fn text_after_scan(
+    idx: &Index,
+    prev: Option<&Session>,
+    s: &Session,
+    fresh: &str,
+) -> Option<String> {
+    if !prev.is_some_and(|p| scan::resumes(p, s.size)) {
+        return Some(fresh.to_string());
+    }
+    if fresh.is_empty() {
+        return None;
+    }
+    let key = s.path.to_string_lossy().to_string();
+    Some(match idx.existing_text(&key) {
+        Ok(Some(old)) => format!("{old} {fresh}"),
+        _ => fresh.to_string(),
+    })
+}
+
 /// Full refresh: discover transcripts, scan in parallel reusing cached rows,
 /// persist, and return everything sorted newest-first.
 pub fn refresh(include_subagents: bool) -> Result<Vec<Session>> {
@@ -608,22 +641,14 @@ pub fn refresh_with_progress(
         })
         .collect();
 
-    // A transcript that only grew contributes its new tail; one read from
-    // scratch replaces its row outright.
     let mut text_rows: Vec<(String, String)> = Vec::new();
     for (s, t) in &scanned {
         if let Some(t) = t {
             let key = s.path.to_string_lossy().to_string();
-            let merged = match cached.get(&key) {
-                Some(p) if p.scanned_len > 0 && p.scanned_len < s.scanned_len => {
-                    match idx.existing_text(&key) {
-                        Ok(Some(old)) => format!("{old} {t}"),
-                        _ => t.clone(),
-                    }
-                }
-                _ => t.clone(),
-            };
-            text_rows.push((key, merged));
+            let prev = if stale { None } else { cached.get(&key) };
+            if let Some(text) = text_after_scan(&idx, prev, s, t) {
+                text_rows.push((key, text));
+            }
         }
     }
     let sessions: Vec<Session> = scanned.into_iter().map(|(s, _)| s).collect();
@@ -1086,5 +1111,103 @@ mod pipeline_tests {
                 "{word} went missing after the append"
             );
         }
+    }
+
+    /// Scan `path` and store what a refresh would, in the order it does.
+    fn rescan(idx: &mut Index, path: &std::path::Path, prev: Option<&Session>) -> Session {
+        let mut text = String::new();
+        let s = crate::scan::scan_with_text(path, false, None, prev, &mut text).unwrap();
+        let key = s.path.to_string_lossy().to_string();
+        if let Some(t) = text_after_scan(idx, prev, &s, &text) {
+            idx.store_text(&[(key, t)]).unwrap();
+        }
+        idx.store(std::slice::from_ref(&s)).unwrap();
+        s
+    }
+
+    fn first_scan(lines: &[String]) -> (tempfile::TempDir, Index, std::path::PathBuf, Session) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.jsonl");
+        let mut f = std::fs::File::create(&path).unwrap();
+        for l in lines {
+            writeln!(f, "{l}").unwrap();
+        }
+        drop(f);
+        let mut idx = Index::open_at(&dir.path().join("i.db")).unwrap();
+        let s = rescan(&mut idx, &path, None);
+        (dir, idx, path, s)
+    }
+
+    fn finds(idx: &Index, word: &str) -> bool {
+        !idx.search_text(&crate::search::fts_expr(word))
+            .unwrap()
+            .is_empty()
+    }
+
+    #[test]
+    fn a_transcript_touched_but_not_grown_keeps_its_text() {
+        // Its mtime moved, so it is read again from where it stopped, and
+        // there is nothing after that. Nothing new is not "nothing at all":
+        // storing the empty tail as the whole text unindexed the session.
+        let (_d, mut idx, path, s1) = first_scan(&[said("user", "zebra came first")]);
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(120);
+        std::fs::File::options()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        rescan(&mut idx, &path, Some(&s1));
+        assert!(finds(&idx, "zebra"), "touching the file unindexed it");
+    }
+
+    #[test]
+    fn a_half_written_line_keeps_what_was_indexed() {
+        // Claude is mid-write: the file grew, but only by a line that is not
+        // finished yet, so the scan consumes nothing new.
+        let (_d, mut idx, path, s1) = first_scan(&[said("user", "zebra came first")]);
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        write!(f, "{{\"parentUuid\":\"p\",\"mess").unwrap();
+        drop(f);
+        let s2 = rescan(&mut idx, &path, Some(&s1));
+        assert!(finds(&idx, "zebra"), "a partial line unindexed the session");
+
+        // ...and once the line is finished, both halves are there.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(
+            f,
+            "age\":{{\"role\":\"user\",\"content\":\"quokka later\"}},\"type\":\"user\"}}"
+        )
+        .unwrap();
+        drop(f);
+        rescan(&mut idx, &path, Some(&s2));
+        assert!(finds(&idx, "zebra") && finds(&idx, "quokka"));
+    }
+
+    #[test]
+    fn a_full_rescan_replaces_the_text_rather_than_adding_to_it() {
+        // A new scanner reads every transcript from the start. One that had
+        // also grown since was stored as its old text followed by all of
+        // its text again, so everything in it was indexed twice -- and the
+        // old half was what the new scanner existed to replace.
+        let (_d, mut idx, path, _s1) = first_scan(&[said("user", "zebra came first")]);
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(f, "{}", said("user", "quokka came later")).unwrap();
+        drop(f);
+        // stale: nothing cached is trusted, so there is no `prev`
+        let s2 = rescan(&mut idx, &path, None);
+        let key = s2.path.to_string_lossy().to_string();
+        let text = idx.existing_text(&key).unwrap().unwrap();
+        assert_eq!(text.matches("zebra").count(), 1, "{text:?}");
+        assert!(text.contains("quokka"), "{text:?}");
     }
 }

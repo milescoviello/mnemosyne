@@ -469,6 +469,13 @@ pub fn scan_with_text(
     scan_inner(path, is_subagent, parent, prev, Some(text))
 }
 
+/// Whether a file now `size` bytes long is read on from where `prev` stopped,
+/// rather than from the start. Only the text after that point is harvested,
+/// so whoever stores it has to know which of the two happened.
+pub fn resumes(prev: &Session, size: u64) -> bool {
+    prev.scanned_len > 0 && prev.scanned_len <= size && prev.size <= size
+}
+
 fn scan_inner(
     path: &Path,
     is_subagent: bool,
@@ -493,7 +500,7 @@ fn scan_inner(
 
     // append-only fast path: resume from where we stopped
     let resume_from = match prev {
-        Some(p) if p.scanned_len > 0 && p.scanned_len <= size && p.size <= size => p.scanned_len,
+        Some(p) if resumes(p, size) => p.scanned_len,
         _ => 0,
     };
 
