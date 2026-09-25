@@ -375,6 +375,20 @@ run_shell() {
     out=$("$runner" -c "$source_line; mn" 2>&1)
     has "$shell_name: a backslash in a title is printed as one" 'fix C:\new folder' "$out"
 
+    # --- a title that is exactly `--`
+    # fish found its separator as the first `--` in the arguments, so a
+    # title of `--` moved it: claude was handed its own flags as a prompt.
+    write_plan "window\t$tmp/work-a\t55555555-6666-7777-8888-999999999999\t\tbypassPermissions\t--\n"
+    : > "$log"
+    MN_TERM_RUN=1 "$runner" -c "$source_line; mn" >/dev/null 2>&1
+    local waited=0
+    while ! grep -q '^claude-args:' "$log" && [ "$waited" -lt 30 ]; do
+        sleep 0.1; waited=$((waited + 1))
+    done
+    has "$shell_name: a title of -- leaves claude's flags as flags" \
+        "claude-args: [--resume] [55555555-6666-7777-8888-999999999999] [--dangerously-skip-permissions]" \
+        "$(cat "$log")"
+
     # --- a mode the wrapper does not know is not a bypass
     # Only a session with nothing recorded resumes with prompts off. One in a
     # mode the wrapper has not heard of fell in with those, and came back with

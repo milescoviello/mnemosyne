@@ -138,11 +138,12 @@ function __mn_tmux_ensure --description 'Make sure a tmux session exists for thi
     set -l ttl $argv[4]
     # A name you chose, or empty for the generated one.
     set -l want $argv[5]
-    set -l sep (contains -i -- -- $argv)
+    # Everything after the separator goes to claude, and the separator is
+    # always the sixth argument. Looking for the first `--` found a title,
+    # model or name that was `--` instead, and claude's flags went in as a
+    # prompt -- a bypass resumed with every prompt on.
     set -l extra
-    if test -n "$sep"; and test (count $argv) -gt $sep
-        set extra $argv[(math $sep + 1)..-1]
-    end
+    test "$argv[6]" = --; and set extra $argv[7..-1]
 
     if not command -q tmux
         echo "  ✗ tmux is not installed" >&2
@@ -289,12 +290,10 @@ function __mn_window --description 'Open one resumed session in its own terminal
     set -l sid $argv[2]
     set -l mdl $argv[3]
     set -l ttl $argv[4]
-    # everything after the -- separator is passed through to claude
-    set -l sep (contains -i -- -- $argv)
+    # Everything after the separator is passed through to claude. It is
+    # always the fifth argument: the first `--` could be the title.
     set -l extra
-    if test -n "$sep"; and test (count $argv) -gt $sep
-        set extra $argv[(math $sep + 1)..-1]
-    end
+    test "$argv[5]" = --; and set extra $argv[6..-1]
 
     if not test -d "$cwd"
         echo "  ✗ folder gone, skipping: $cwd"
