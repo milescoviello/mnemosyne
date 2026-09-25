@@ -62,7 +62,7 @@ It is a pointer-driven list as much as a keyboard one.
 | | |
 |---|---|
 | click a row | select it |
-| click it again | resume it |
+| double-click it | resume it |
 | right-click | favourite it |
 | wheel | scroll |
 | click a column heading | sort by that column |

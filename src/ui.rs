@@ -1467,7 +1467,7 @@ fn keys() -> Vec<H> {
     use H::*;
     vec![
         Head("mouse"),
-        Key("click", "", "select · click again to resume"),
+        Key("click", "", "select · double-click to resume"),
         Key("right-click", "", "favourite it"),
         Key("wheel", "", "scroll"),
         Key("click a heading", "", "sort by that column"),
