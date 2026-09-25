@@ -439,8 +439,12 @@ impl Index {
     /// Replace the indexed text for a transcript.
     #[cfg(test)]
     pub fn store_text(&mut self, rows: &[(String, String)]) -> Result<()> {
+        let rows: Vec<(String, TextUpdate)> = rows
+            .iter()
+            .map(|(p, t)| (p.clone(), TextUpdate::Replace(t.clone())))
+            .collect();
         let tx = self.begin()?;
-        write_text(&tx, rows)?;
+        write_text(&tx, &rows)?;
         tx.commit()?;
         Ok(())
     }
@@ -451,10 +455,18 @@ impl Index {
     /// Apart, a write of the text that failed was ignored while the
     /// sessions after it were stored. Their `scanned_len` said the new text
     /// had been read, so it was never read again, and never searchable.
-    pub fn persist(&mut self, sessions: &[Session], text: &[(String, String)]) -> Result<()> {
+    pub fn persist(&mut self, sessions: &[Session], text: &[(String, TextUpdate)]) -> Result<()> {
         let tx = self.begin()?;
-        write_text(&tx, text)?;
-        write_sessions(&tx, sessions)?;
+        let refused = write_text(&tx, text)?;
+        // A session whose new text another refresh stored first is left as
+        // that one stored it: its row too, or it would claim to have read
+        // further than the text says.
+        write_sessions(
+            &tx,
+            sessions
+                .iter()
+                .filter(|s| !refused.contains(s.path.to_string_lossy().as_ref())),
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -565,6 +577,7 @@ impl Index {
         Some(crate::search::excerpt(&text, needle))
     }
 
+    #[cfg(test)]
     pub fn existing_text(&self, path: &str) -> Result<Option<String>> {
         // Through the rowid map, for the same reason the deletes are:
         // `path` is UNINDEXED, so matching on it reads the whole table.
@@ -641,7 +654,29 @@ impl Index {
     }
 }
 
-fn write_text(tx: &rusqlite::Transaction, rows: &[(String, String)]) -> Result<()> {
+/// What a refresh does to one transcript's indexed text.
+pub enum TextUpdate {
+    /// Replace it: the transcript was read from the start.
+    Replace(String),
+    /// Add the text read on from `from` -- if the stored row still says that
+    /// is where the last read stopped. Two refreshes at once, `R` while the
+    /// rescan behind the list is still going, read on from the same place;
+    /// joined outside the write, both added the same tail, and it was
+    /// indexed twice. The second now finds the first has been.
+    Append { from: u64, tail: String },
+}
+
+/// Write the text, returning the paths whose `Append` another refresh had
+/// already done.
+fn write_text(
+    tx: &rusqlite::Transaction,
+    rows: &[(String, TextUpdate)],
+) -> Result<std::collections::HashSet<String>> {
+    let mut read_to = tx.prepare("SELECT scanned_len FROM sessions WHERE path = ?1")?;
+    let mut stored = tx.prepare(
+        "SELECT b.text FROM body b JOIN body_ref r ON b.rowid = r.rid WHERE r.path = ?1",
+    )?;
+    let mut refused = std::collections::HashSet::new();
     // Delete by rowid, never by path: `path` is UNINDEXED, so
     // `WHERE path = ?` reads the entire table. Doing that once per
     // transcript was 41 of the 43 seconds a full re-index took.
@@ -650,20 +685,37 @@ fn write_text(tx: &rusqlite::Transaction, rows: &[(String, String)]) -> Result<(
     let mut unref = tx.prepare("DELETE FROM body_ref WHERE path = ?1")?;
     let mut ins = tx.prepare("INSERT INTO body (path, text) VALUES (?1, ?2)")?;
     let mut reref = tx.prepare("INSERT OR REPLACE INTO body_ref (path, rid) VALUES (?1, ?2)")?;
-    for (path, text) in rows {
+    for (path, update) in rows {
+        let text: std::borrow::Cow<str> = match update {
+            TextUpdate::Replace(t) => t.into(),
+            TextUpdate::Append { from, tail } => {
+                let at: Option<i64> = read_to.query_row([path], |r| r.get(0)).ok();
+                if at != Some(*from as i64) {
+                    refused.insert(path.clone());
+                    continue;
+                }
+                match stored.query_row([path], |r| r.get::<_, String>(0)) {
+                    Ok(old) => format!("{old} {tail}").into(),
+                    Err(_) => tail.into(),
+                }
+            }
+        };
         if let Ok(rid) = find.query_row([path], |r| r.get::<_, i64>(0)) {
             del.execute([rid])?;
         }
         unref.execute([path])?;
         if !text.is_empty() {
-            ins.execute(params![path, text])?;
+            ins.execute(params![path, text.as_ref()])?;
             reref.execute(params![path, tx.last_insert_rowid()])?;
         }
     }
-    Ok(())
+    Ok(refused)
 }
 
-fn write_sessions(tx: &rusqlite::Transaction, sessions: &[Session]) -> Result<()> {
+fn write_sessions<'a>(
+    tx: &rusqlite::Transaction,
+    sessions: impl IntoIterator<Item = &'a Session>,
+) -> Result<()> {
     let mut st = tx.prepare(
         "INSERT INTO sessions (path,id,project_dir,cwd,git_branch,ai_title,first_prompt,
                 last_prompt,model,permission_mode,version,size,mtime,first_ts,last_ts,entries,
@@ -731,22 +783,16 @@ pub struct Progress {
 /// to what is there -- and when that tail is empty, as it is for a file that
 /// was only touched or is halfway through writing a line, what is there stays.
 ///
-/// Which of the two happened is the scan's to say, in `resumed`. This used to
+/// Which of the two happened is the scan's to say, in `resumed_from`. This used to
 /// decide by comparing against the cached row instead: after a scanner change
 /// every file is read from the start, and each one that had grown was stored
 /// as its old text followed by all of it again.
-fn text_after_scan(idx: &Index, s: &Session, fresh: &str) -> Option<String> {
-    if !s.resumed {
-        return Some(fresh.to_string());
+fn text_after_scan(s: &Session, fresh: String) -> Option<TextUpdate> {
+    match s.resumed_from {
+        None => Some(TextUpdate::Replace(fresh)),
+        Some(_) if fresh.is_empty() => None,
+        Some(from) => Some(TextUpdate::Append { from, tail: fresh }),
     }
-    if fresh.is_empty() {
-        return None;
-    }
-    let key = s.path.to_string_lossy().to_string();
-    Some(match idx.existing_text(&key) {
-        Ok(Some(old)) => format!("{old} {fresh}"),
-        _ => fresh.to_string(),
-    })
 }
 
 /// Full refresh: discover transcripts, scan in parallel reusing cached rows,
@@ -817,14 +863,14 @@ fn refresh_in(
         })
         .collect();
 
-    let mut text_rows: Vec<(String, String)> = Vec::new();
-    for (s, t) in &scanned {
-        let key = s.path.to_string_lossy().to_string();
-        if let Some(text) = text_after_scan(&idx, s, t) {
-            text_rows.push((key, text));
+    let mut text_rows: Vec<(String, TextUpdate)> = Vec::new();
+    let mut sessions: Vec<Session> = Vec::with_capacity(scanned.len());
+    for (s, t) in scanned {
+        if let Some(update) = text_after_scan(&s, t) {
+            text_rows.push((s.path.to_string_lossy().to_string(), update));
         }
+        sessions.push(s);
     }
-    let sessions: Vec<Session> = scanned.into_iter().map(|(s, _)| s).collect();
 
     // Keeping what was read is for next time; this run has it either way.
     // A cache that cannot be written -- left owned by root after a `sudo
@@ -1246,7 +1292,7 @@ mod pipeline_tests {
         let s = crate::scan::scan_with_text(&path, false, None, None, &mut t).unwrap();
         idx.persist(
             std::slice::from_ref(&s),
-            &[(s.path.to_string_lossy().into(), t)],
+            &[(s.path.to_string_lossy().into(), TextUpdate::Replace(t))],
         )
         .unwrap();
         let hits = idx.prose_containing("C++").unwrap();
@@ -1396,11 +1442,39 @@ mod pipeline_tests {
         let mut text = String::new();
         let s = crate::scan::scan_with_text(path, false, None, prev, &mut text).unwrap();
         let key = s.path.to_string_lossy().to_string();
-        if let Some(t) = text_after_scan(idx, &s, &text) {
-            idx.store_text(&[(key, t)]).unwrap();
-        }
-        idx.store(std::slice::from_ref(&s)).unwrap();
+        let rows: Vec<(String, TextUpdate)> = text_after_scan(&s, text)
+            .map(|t| (key, t))
+            .into_iter()
+            .collect();
+        idx.persist(std::slice::from_ref(&s), &rows).unwrap();
         s
+    }
+
+    #[test]
+    fn two_refreshes_at_once_store_new_text_once() {
+        // `R` while the rescan behind the list is still going: both read on
+        // from the same place, and both added what they found.
+        let (_d, mut idx, path, s1) = first_scan(&[said("user", "zebra came first")]);
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(f, "{}", said("user", "quokka came later")).unwrap();
+        drop(f);
+        let (mut ta, mut tb) = (String::new(), String::new());
+        let a = crate::scan::scan_with_text(&path, false, None, Some(&s1), &mut ta).unwrap();
+        let b = crate::scan::scan_with_text(&path, false, None, Some(&s1), &mut tb).unwrap();
+        let key = a.path.to_string_lossy().to_string();
+        for (s, t) in [(a, ta), (b, tb)] {
+            let rows: Vec<(String, TextUpdate)> = text_after_scan(&s, t)
+                .map(|u| (key.clone(), u))
+                .into_iter()
+                .collect();
+            idx.persist(std::slice::from_ref(&s), &rows).unwrap();
+        }
+        let text = idx.existing_text(&key).unwrap().unwrap();
+        assert_eq!(text.matches("quokka").count(), 1, "{text:?}");
+        assert_eq!(text.matches("zebra").count(), 1, "{text:?}");
     }
 
     fn first_scan(lines: &[String]) -> (tempfile::TempDir, Index, std::path::PathBuf, Session) {
@@ -1442,7 +1516,7 @@ mod pipeline_tests {
             other.execute_batch("COMMIT").unwrap();
         });
         let key = s1.path.to_string_lossy().to_string();
-        let r = idx.persist(&[s1], &[(key, "zebra quokka".into())]);
+        let r = idx.persist(&[s1], &[(key, TextUpdate::Replace("zebra quokka".into()))]);
         done.join().unwrap();
         r.expect("it should have waited for the other writer");
         assert!(finds(&idx, "quokka"));
@@ -1531,7 +1605,7 @@ mod pipeline_tests {
         )
         .unwrap();
         let s2 = rescan(&mut idx, &path, Some(&s1));
-        assert!(!s2.resumed);
+        assert!(s2.resumed_from.is_none());
         assert_eq!(s2.user_msgs, 1, "counted from the middle: {s2:?}");
         assert_eq!(s2.first_prompt, "an entirely different quokka");
         let text = idx

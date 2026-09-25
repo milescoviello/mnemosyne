@@ -579,7 +579,7 @@ fn scan_inner(
     if let Some(p) = prev {
         if p.size == size && p.mtime == mtime {
             let mut s = p.clone();
-            s.resumed = true;
+            s.resumed_from = Some(p.scanned_len);
             return Ok(s);
         }
     }
@@ -657,7 +657,7 @@ fn scan_inner(
     }
 
     s.scanned_len = consumed;
-    s.resumed = resume_from > 0;
+    s.resumed_from = (resume_from > 0).then_some(resume_from);
     s.size = size;
     s.mtime = mtime;
     s.path = path.to_path_buf();
