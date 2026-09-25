@@ -34,6 +34,10 @@ const SEGMENT: &str = "/.local/state/wsx/worktrees/";
 /// through, which lowercases it and drops the colon.
 pub const TAG_PREFIX: &str = "wsx/";
 
+/// What a wsx session's folder is labelled with, ahead of its name. Without
+/// it, `OS-DEV/shy-daffodil` could be any folder of that name.
+pub const MARK: &str = "wsx ";
+
 /// A session's folder, read as a place in a wsx workspace.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ref {

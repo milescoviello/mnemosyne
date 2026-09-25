@@ -104,7 +104,9 @@ const TITLE_MAX: usize = 52;
 const PREVIEW_MIN: usize = 20;
 
 impl Cols {
-    fn new(width: usize) -> Cols {
+    /// `wsx` says whether any row carries the wsx mark, which gets a few
+    /// cells of its own rather than taking them from the name after it.
+    fn new(width: usize, wsx: bool) -> Cols {
         // Each column has to earn its place. Below these widths there is not
         // enough room for the table to be worth more than the title, so they
         // are dropped rather than allowed to overflow.
@@ -116,6 +118,11 @@ impl Cols {
             12
         } else {
             0
+        };
+        let folder = if wsx && folder > 0 {
+            folder + crate::model::width(crate::wsx::MARK)
+        } else {
+            folder
         };
         let sub = if width >= 50 { 5 } else { 0 };
         let model = if width >= 150 {
@@ -241,7 +248,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         ])
         .split(area);
 
-    let cols = Cols::new(area.width as usize);
+    let cols = Cols::new(area.width as usize, app.has_wsx());
 
     draw_wordmark(f, app, rows[0]);
     // The blank line under the wordmark is where the reopen offer goes, so
@@ -857,17 +864,26 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                 sp.extend(ripple_rule(width.saturating_sub(used), 0, 0.0));
                 ListItem::new(Line::from(sp))
             }
-            Row::Header(dir, n) => ListItem::new(Line::from(vec![
-                Span::raw(" ".repeat(MARGIN)),
-                Span::styled("▌ ", Style::default().fg(rgb(art::ramp(0.7)))),
-                Span::styled(
-                    format!("{dir}  "),
-                    Style::default()
-                        .fg(rgb(art::ramp(0.8)))
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(format!("{n}"), Style::default().fg(th().chrome)),
-            ])),
+            Row::Header(dir, n) => {
+                // A folder heading is a path, so it never starts with the
+                // mark; a workspace's always does.
+                let (mark, name) = match dir.strip_prefix(crate::wsx::MARK) {
+                    Some(name) => (crate::wsx::MARK, name),
+                    None => ("", dir.as_str()),
+                };
+                ListItem::new(Line::from(vec![
+                    Span::raw(" ".repeat(MARGIN)),
+                    Span::styled("▌ ", Style::default().fg(rgb(art::ramp(0.7)))),
+                    Span::styled(mark, Style::default().fg(th().chrome)),
+                    Span::styled(
+                        format!("{name}  "),
+                        Style::default()
+                            .fg(rgb(art::ramp(0.8)))
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(format!("{n}"), Style::default().fg(th().chrome)),
+                ]))
+            }
             Row::Item(i) | Row::Sub(i) => {
                 let s = &app.all[*i];
                 let is_sub = matches!(r, Row::Sub(_));
@@ -941,10 +957,17 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                         Style::default().fg(th().chrome),
                     ));
                 } else {
+                    // The mark first, dim, and the name in what is left.
+                    let mark = if s.wsx.is_some() && !s.cwd.is_empty() {
+                        crate::wsx::MARK
+                    } else {
+                        ""
+                    };
+                    let room = c.folder.saturating_sub(crate::model::width(mark));
                     let folder = if s.cwd.is_empty() {
                         "—".to_string()
                     } else if let Some(w) = &s.wsx {
-                        w.fit(c.folder)
+                        w.fit(room)
                     } else {
                         short_cwd(&s.cwd)
                     };
@@ -965,10 +988,8 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                     } else {
                         Style::default().fg(rgb(art::ramp(0.45 + d * 0.2)))
                     };
-                    sp.push(Span::styled(
-                        format!("{} ", pad_fit(&folder, c.folder)),
-                        fstyle,
-                    ));
+                    sp.push(Span::styled(mark, Style::default().fg(th().chrome)));
+                    sp.push(Span::styled(format!("{} ", pad_fit(&folder, room)), fstyle));
                 }
 
                 if c.sub == 0 {
@@ -1126,8 +1147,6 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
         s.folder()
     }];
     if let Some(w) = &s.wsx {
-        // Otherwise `OS-DEV/shy-daffodil` could be any folder of that name.
-        facts.push("wsx".into());
         match &w.status {
             crate::wsx::Status::Live { .. } => facts.push("live".into()),
             crate::wsx::Status::Archived { checkout } => {
@@ -1474,8 +1493,8 @@ fn guide() -> Vec<H> {
         Say("LEFT OFF is the last thing you said in that session — usually the fastest"),
         Say("way to recognise one. A folder in red no longer exists; resuming still"),
         Say("works, it just starts wherever you are."),
-        Say("A wsx workspace is named repo/workspace: lit while wsx lists it, dimmed once"),
-        Say("it is archived, when it resumes in the repo's own checkout instead."),
+        Say("A wsx workspace is marked wsx and named repo/workspace: lit while wsx lists"),
+        Say("it, dimmed once it is archived, when it resumes in the repo's checkout instead."),
         Gap,
         Head("if something looks wrong"),
         Key("R", "f5", "reread the transcripts"),
@@ -2325,12 +2344,15 @@ mod render_tests {
     fn a_wsx_workspace_is_named_rather_than_spelled_out() {
         // The folder column is at most twenty cells, and every worktree
         // starts with the same thirty-odd characters of state directory.
+        // The mark gets cells of its own, so it costs the name nothing it
+        // had before.
         let mut a = app();
         for (w, want) in [
-            (178u16, "OS-DEV/shy-daffodil"),
-            (150, "OS-DEV/shy-daffodil"),
-            (120, "OS…/shy-daffodil"),
-            (90, "shy-daffodil"),
+            (178u16, "wsx OS-DEV/shy-daffodil"),
+            (150, "wsx OS-DEV/shy-daffodil"),
+            (120, "wsx OS…/shy-daffodil"),
+            (90, "wsx shy-daffodil"),
+            (60, "wsx shy-daffodil"),
         ] {
             let rows = render(&mut a, w, 30);
             let row = rows
@@ -2356,17 +2378,47 @@ mod render_tests {
     }
 
     #[test]
+    fn every_wsx_row_is_marked_as_wsx_and_no_other_row_is() {
+        // Only the rail used to say so, and only for the row under the
+        // cursor; the list itself showed a name that could have been any
+        // folder's.
+        let mut a = app();
+        for w in [60u16, 90, 120, 150, 178, 240] {
+            let rows = render(&mut a, w, 30);
+            for (title, wsx) in [
+                ("paging on x86", true),
+                ("a GPT disk tool", true),
+                ("yesterday's thing", false),
+            ] {
+                let row = rows
+                    .iter()
+                    .find(|r| r.contains(title))
+                    .unwrap_or_else(|| panic!("{w}: no row for {title:?}"));
+                assert_eq!(row.contains(" wsx "), wsx, "{w}: {row:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_workspace_heading_is_marked_too() {
+        let mut a = app();
+        a.do_action(crate::app::Action::GroupByDir);
+        let rows = render(&mut a, 178, 40);
+        assert!(
+            rows.iter().any(|r| r.contains("▌ wsx OS-DEV/shy-daffodil")),
+            "{rows:#?}"
+        );
+    }
+
+    #[test]
     fn the_rail_names_the_workspace_and_says_what_became_of_it() {
         let mut a = app();
         let live = rail_for(&mut a, "gggggggg-7");
-        assert!(
-            live.contains("OS-DEV/shy-daffodil · wsx · live"),
-            "{live:?}"
-        );
+        assert!(live.contains("wsx OS-DEV/shy-daffodil · live"), "{live:?}");
         // gdisk-app is not in what wsx listed
         let archived = rail_for(&mut a, "hhhhhhhh-8");
         assert!(
-            archived.contains("OS-DEV/gdisk-app · wsx · archived · resumes in /home/u/OS-DEV"),
+            archived.contains("wsx OS-DEV/gdisk-app · archived · resumes in /home/u/OS-DEV"),
             "{archived:?}"
         );
         assert!(!archived.contains("gone"), "{archived:?}");
@@ -2376,7 +2428,7 @@ mod render_tests {
         a.set_wsx(forgot);
         let nowhere = rail_for(&mut a, "hhhhhhhh-8");
         assert!(
-            nowhere.contains("wsx · archived · resumes where you are"),
+            nowhere.contains("wsx OS-DEV/gdisk-app · archived · resumes where you are"),
             "{nowhere:?}"
         );
     }
@@ -2517,8 +2569,8 @@ mod render_tests {
     fn column_widths_always_fit_the_terminal() {
         // 44 is the narrowest width the table still claims to be a table;
         // below that the columns are shed and only the title remains.
-        for w in 44usize..=300 {
-            let c = Cols::new(w);
+        for (w, wsx) in (44usize..=300).flat_map(|w| [(w, false), (w, true)]) {
+            let c = Cols::new(w, wsx);
             let gap = if c.folder > 0 { 1 } else { 0 };
             let used = PREFIX
                 + 4
@@ -2532,7 +2584,7 @@ mod render_tests {
                 + c.msgs
                 + c.tokens
                 + c.tags;
-            assert!(used <= w, "width {w}: columns want {used}");
+            assert!(used <= w, "width {w}, wsx {wsx}: columns want {used}");
         }
     }
 }

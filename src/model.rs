@@ -116,11 +116,11 @@ impl Session {
         }
     }
 
-    /// Where it ran, as the list names it: `OS-DEV/shy-daffodil` for a wsx
-    /// workspace, the folder otherwise.
+    /// Where it ran, as the list names it: `wsx OS-DEV/shy-daffodil` for a
+    /// wsx workspace, the folder otherwise.
     pub fn folder(&self) -> String {
         match &self.wsx {
-            Some(w) => w.label(),
+            Some(w) => format!("{}{}", crate::wsx::MARK, w.label()),
             None => short_cwd(&self.cwd),
         }
     }

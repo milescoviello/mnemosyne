@@ -409,10 +409,13 @@ git worktree of its own, under `~/.local/state/wsx/worktrees/<repo>/<slug>`
 folders those are long paths that differ only at the end, which is exactly
 where the folder column cuts them off. So they are read for what they are.
 
-**Named by workspace.** The folder column shows `OS-DEV/shy-daffodil`, and
-when that does not fit the repo gives way first — `OS…/shy-daffodil`, then
-the bare slug — because every row from one project shares it. Grouping by
-folder and the preview rail use the same name.
+**Named by workspace.** The folder column shows `wsx OS-DEV/shy-daffodil`:
+marked as wsx, so it cannot be taken for a folder of that name, then the repo
+and the workspace. The mark gets cells of its own when there is any wsx
+session to show, so it costs the name nothing. When the name does not fit
+the repo gives way first — `OS…/shy-daffodil`, then the bare slug — because
+every row from one project shares it. Grouping by folder and the preview rail
+use the same name.
 
 **One repo at a time.** No two workspaces share a folder, so nothing used to
 bring one project's sessions together. Each now carries an automatic tag for
@@ -444,7 +447,7 @@ resumed with `enter` leaves out whatever wsx is running, and says which.
 **Archived ones resume in the repo.** Archiving a workspace deletes its
 worktree, but the repo it was a worktree of is still checked out. A worktree
 wsx no longer lists is dimmed rather than drawn in the red of a lost folder,
-the rail says `wsx · archived · resumes in ~/OS-DEV`, and every way of
+the rail says `archived · resumes in ~/OS-DEV`, and every way of
 opening it lands in that checkout. If wsx no longer knows the repo by that
 name, it resumes wherever you are, as any gone folder does. A worktree
 archived with `--keep-worktree` is still there, and resumes in place.

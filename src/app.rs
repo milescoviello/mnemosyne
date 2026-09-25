@@ -883,6 +883,12 @@ impl App {
         }
     }
 
+    /// Whether any session ran in a wsx workspace, which is what the folder
+    /// column makes room for.
+    pub fn has_wsx(&self) -> bool {
+        self.all.iter().any(|s| s.wsx.is_some())
+    }
+
     /// Favourites among the sessions that exist, which is what the list
     /// marks. The overlay outlives transcripts, so counting its entries
     /// showed a star total nothing on screen accounted for.
@@ -3080,10 +3086,13 @@ mod logic_tests {
             })
             .collect();
         assert!(
-            heads.iter().any(|h| h == "OS-DEV/shy-daffodil"),
+            heads.iter().any(|h| h == "wsx OS-DEV/shy-daffodil"),
             "{heads:?}"
         );
-        assert!(heads.iter().any(|h| h == "OS-DEV/gdisk-app"), "{heads:?}");
+        assert!(
+            heads.iter().any(|h| h == "wsx OS-DEV/gdisk-app"),
+            "{heads:?}"
+        );
         assert!(
             !heads.iter().any(|h| h.contains(".local/state")),
             "a heading still spells out the worktree: {heads:?}"
@@ -3259,7 +3268,7 @@ mod logic_tests {
             assert_eq!(s.wsx.is_some(), under, "{:?}", s.cwd);
         }
         let s = a.all.iter().find(|s| s.id == "gggggggg-7").unwrap();
-        assert_eq!(s.folder(), "OS-DEV/shy-daffodil");
+        assert_eq!(s.folder(), "wsx OS-DEV/shy-daffodil");
     }
 
     #[test]
@@ -4484,7 +4493,11 @@ mod logic_tests {
         assert_eq!(a.status, "switched to OS-DEV/page-tables in wsx");
         assert!(a.to_jump.is_empty(), "a jump is made once");
         let s = a.all.iter().find(|s| s.id == "gggggggg-7").unwrap();
-        assert_eq!(s.folder(), "OS-DEV/page-tables", "and the list says so too");
+        assert_eq!(
+            s.folder(),
+            "wsx OS-DEV/page-tables",
+            "and the list says so too"
+        );
     }
 
     #[test]
