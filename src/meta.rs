@@ -32,6 +32,10 @@ fn is_false(b: &bool) -> bool {
 pub struct Meta {
     #[serde(default)]
     pub sessions: BTreeMap<String, Entry>,
+    /// The sessions this run has changed, which are all a save writes over
+    /// what is on disk. Never stored.
+    #[serde(skip)]
+    changed: std::collections::BTreeSet<String>,
 }
 
 /// Counts of what the overlay marks, split from what it no longer reaches.
@@ -77,13 +81,18 @@ impl Meta {
             },
             Err(_) => Meta::default(),
         };
-        // Clean on the way in, not only on the way out. This file is edited
-        // by hand and synced between machines, and everything in it is
-        // drawn to a terminal -- an escape sequence in a note or a tag is a
-        // file deciding what your screen does. Tags are also only ever
-        // matched in their normal form, so a hand-typed `HomeLab` could be
-        // neither removed nor renamed.
-        for e in m.sessions.values_mut() {
+        m.clean();
+        m
+    }
+
+    /// Clean on the way in, not only on the way out. This file is edited by
+    /// hand and synced between machines, and everything in it is drawn to a
+    /// terminal -- an escape sequence in a note or a tag is a file deciding
+    /// what your screen does. Tags are also only ever matched in their
+    /// normal form, so a hand-typed `HomeLab` could be neither removed nor
+    /// renamed.
+    fn clean(&mut self) {
+        for e in self.sessions.values_mut() {
             e.note = clean_note(&e.note);
             e.tags = e
                 .tags
@@ -94,7 +103,6 @@ impl Meta {
             e.tags.sort();
             e.tags.dedup();
         }
-        m
     }
 
     /// Write via temp file + rename, keeping a few generations behind it.
@@ -103,12 +111,36 @@ impl Meta {
     /// tags and notes cannot. Atomic replacement stops a crash mid-write from
     /// truncating it, and the rotation covers the other way of losing data —
     /// a write that succeeds but contains the wrong thing.
-    pub fn save(&self) -> Result<()> {
+    pub fn save(&mut self) -> Result<()> {
         self.save_at(&meta_path())
     }
 
-    pub fn save_at(&self, p: &std::path::Path) -> Result<()> {
+    /// Save what this run changed, over whatever is on disk now.
+    ///
+    /// Two browsers open at once each loaded the file once and saved the
+    /// whole of what they had: a tag added in one was gone the moment the
+    /// other favourited something. Only the sessions changed here are
+    /// written over the file as it is when saving, under a lock so two
+    /// saves take turns, and what the other wrote comes back in. A file
+    /// that is missing or unreadable by now has nothing to merge with, and
+    /// is written from everything this run knows.
+    pub fn save_at(&mut self, p: &std::path::Path) -> Result<()> {
         std::fs::create_dir_all(p.parent().unwrap())?;
+        let _lock = lock(p)?;
+        let on_disk = std::fs::read(p)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Meta>(&b).ok());
+        if let Some(mut disk) = on_disk {
+            disk.clean();
+            for id in std::mem::take(&mut self.changed) {
+                match self.sessions.get(&id) {
+                    Some(e) => disk.sessions.insert(id, e.clone()),
+                    None => disk.sessions.remove(&id),
+                };
+            }
+            self.sessions = disk.sessions;
+        }
+        self.changed.clear();
         rotate_backups(p);
         // Ours alone. Two instances saving at once shared one temp name, so
         // one could truncate the file the other was halfway through writing
@@ -151,6 +183,7 @@ impl Meta {
     }
 
     pub fn toggle_favorite(&mut self, id: &str) -> bool {
+        self.changed.insert(id.to_string());
         let e = self.sessions.entry(id.to_string()).or_default();
         e.favorite = !e.favorite;
         let now = e.favorite;
@@ -163,6 +196,7 @@ impl Meta {
         if tag.is_empty() {
             return;
         }
+        self.changed.insert(id.to_string());
         let e = self.sessions.entry(id.to_string()).or_default();
         if !e.tags.iter().any(|t| t == &tag) {
             e.tags.push(tag);
@@ -171,6 +205,7 @@ impl Meta {
     }
 
     pub fn remove_tag(&mut self, id: &str, tag: &str) {
+        self.changed.insert(id.to_string());
         let tag = normalize_tag(tag);
         if let Some(e) = self.sessions.get_mut(id) {
             e.tags.retain(|t| t != &tag);
@@ -179,6 +214,7 @@ impl Meta {
     }
 
     pub fn set_note(&mut self, id: &str, note: &str) {
+        self.changed.insert(id.to_string());
         let e = self.sessions.entry(id.to_string()).or_default();
         e.note = clean_note(note);
         self.gc(id);
@@ -200,8 +236,9 @@ impl Meta {
             return 0;
         }
         let mut n = 0;
-        for e in self.sessions.values_mut() {
+        for (id, e) in self.sessions.iter_mut() {
             if let Some(pos) = e.tags.iter().position(|t| *t == from) {
+                self.changed.insert(id.clone());
                 e.tags.remove(pos);
                 if !e.tags.contains(&to) {
                     e.tags.push(to.clone());
@@ -225,6 +262,20 @@ impl Meta {
         v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         v
     }
+}
+
+/// Hold the file's lock until the returned handle is dropped.
+fn lock(p: &std::path::Path) -> Result<std::fs::File> {
+    let f = std::fs::File::create(p.with_extension("json.lock"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: a valid descriptor for as long as `f` lives.
+        unsafe {
+            libc::flock(f.as_raw_fd(), libc::LOCK_EX);
+        }
+    }
+    Ok(f)
 }
 
 /// How many previous versions of the overlay to keep.
@@ -300,6 +351,38 @@ mod tests {
             .flatten()
             .any(|e| std::fs::read(e.path()).is_ok_and(|b| b == precious));
         assert!(kept, "the unreadable original is gone");
+    }
+
+    #[test]
+    fn two_browsers_saving_keep_each_others_changes() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("meta.json");
+        let mut first = Meta::default();
+        first.add_tag("s0", "old");
+        first.add_tag("s9", "gone-soon");
+        first.save_at(&p).unwrap();
+
+        let mut a = Meta::load_at(&p);
+        let mut b = Meta::load_at(&p);
+        a.add_tag("s1", "from-a");
+        a.remove_tag("s9", "gone-soon");
+        a.save_at(&p).unwrap();
+        b.toggle_favorite("s2");
+        b.save_at(&p).unwrap();
+
+        let now = Meta::load_at(&p);
+        assert_eq!(
+            now.get("s1").map(|e| e.tags.clone()),
+            Some(vec!["from-a".to_string()])
+        );
+        assert!(now.get("s2").is_some_and(|e| e.favorite), "b's star");
+        assert!(now.get("s9").is_none(), "a's removal came back");
+        assert_eq!(
+            now.get("s0").map(|e| e.tags.clone()),
+            Some(vec!["old".to_string()])
+        );
+        // and b now knows what a did
+        assert!(b.get("s1").is_some());
     }
 
     #[test]

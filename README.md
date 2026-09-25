@@ -677,8 +677,12 @@ with the list rather than with a file that has outlived it; `--stats` says
 how many marks no longer reach anything.
 
 Only `meta.json` cannot be regenerated, so it is written via a temp file and
-rename and kept deliberately small and readable. `workspace.json` is written
-the same way; losing it costs you one reopen offer and nothing else.
+rename and kept deliberately small and readable. A save writes only the
+sessions that run changed, over the file as it is at that moment and under
+`meta.json.lock`, so two browsers open at once keep each other's marks. One
+that cannot be parsed is moved aside to `meta.json.unreadable-<time>` rather
+than read as empty and saved over. `workspace.json` is written the same way;
+losing it costs you one reopen offer and nothing else.
 
 ## Retention warning
 
