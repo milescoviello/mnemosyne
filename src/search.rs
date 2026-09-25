@@ -174,23 +174,87 @@ fn is_conversation(line: &[u8]) -> bool {
 /// Is the match sitting inside a base64 blob rather than prose?
 ///
 /// Pasted images and binary tool payloads arrive as long unbroken base64, and
-/// its alphabet happily spells short words like "nvenc" by chance. Prose has
-/// spaces; a blob does not, so a wide window with no whitespace in it is the
-/// tell.
-fn looks_like_blob(line: &[u8], at: usize) -> bool {
-    const W: usize = 70;
-    let lo = at.saturating_sub(W);
-    let hi = (at + W).min(line.len());
-    if hi - lo < W {
+/// its alphabet happily spells short words like "nvenc" by chance. So a match
+/// that is part of an unbroken run of base64 characters a hundred long is
+/// taken for one.
+///
+/// It was a window of seventy bytes either side with no space or
+/// punctuation in it -- which near either end of a blob reached the quote or
+/// the space outside it, and let `c++` and `xYz` match inside images. And
+/// nothing outside ASCII is base64, so Japanese and Chinese, which go a long
+/// way without an ASCII space, are never taken for it.
+fn looks_like_blob(line: &[u8], at: usize, len: usize) -> bool {
+    const RUN: usize = 100;
+    let b64 = |c: &u8| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'=');
+    let end = (at + len).min(line.len());
+    if !line[at..end].iter().all(b64) {
         return false;
     }
-    // Nor anything outside ASCII, which base64 never is. Japanese and
-    // Chinese go a long way without an ASCII space or full stop -- their
-    // punctuation is full-width -- and a word from the middle of a long
-    // sentence was rejected as a blob, so neither engine could find it.
-    !line[lo..hi]
+    let before = line[..at]
         .iter()
-        .any(|c| matches!(c, b' ' | b'\\' | b'\t' | b'>' | b',' | b'.' | b';') || *c >= 0x80)
+        .rev()
+        .take(RUN)
+        .take_while(|c| b64(c))
+        .count();
+    let after = line[end..].iter().take(RUN).take_while(|c| b64(c)).count();
+    before + (end - at) + after >= RUN
+}
+
+/// Is a match inside the value of one of the transcript's own bookkeeping
+/// fields -- the folder, the branch, the version, ids and types?
+///
+/// Every line carries them, so when the index had no answer and the scan
+/// ran, `main` matched every session on a branch called main, `2.1.0` every
+/// session from that version, and any word in a folder's path everything
+/// run there -- each with raw JSON for an excerpt.
+fn in_bookkeeping(line: &[u8], at: usize) -> bool {
+    const KEYS: &[&[u8]] = &[
+        b"cwd",
+        b"gitBranch",
+        b"version",
+        b"userType",
+        b"entrypoint",
+        b"sessionId",
+        b"session_id",
+        b"uuid",
+        b"parentUuid",
+        b"leafUuid",
+        b"promptId",
+        b"requestId",
+        b"timestamp",
+        b"agentId",
+        b"messageId",
+        b"sourceToolAssistantUUID",
+        b"tool_use_id",
+        b"toolUseID",
+        b"id",
+        b"type",
+        b"role",
+        b"model",
+        b"stop_reason",
+        b"permissionMode",
+        b"origin",
+        b"promptSource",
+        b"subtype",
+        b"slug",
+    ];
+    const REACH: usize = 512;
+    let back = &line[at.saturating_sub(REACH)..at];
+    let Some(q) = back.iter().rposition(|c| *c == b'"') else {
+        return false;
+    };
+    let open = at - back.len() + q;
+    // `"key":"` just before the value's opening quote
+    if open < 3 || line[open - 1] != b':' || line[open - 2] != b'"' || line[open - 3] == b'\\' {
+        return false;
+    }
+    let key_end = open - 2;
+    let key_back = &line[key_end.saturating_sub(40)..key_end];
+    let Some(k) = key_back.iter().rposition(|c| *c == b'"') else {
+        return false;
+    };
+    let key = &key_back[k + 1..];
+    KEYS.contains(&key)
 }
 
 /// Is a match inside one of the JSON's own keys rather than a value?
@@ -245,8 +309,9 @@ fn content_hit(l: &Line, needle: &memmem::Finder) -> Option<usize> {
     let spans = injected_spans(line);
     let bad = |at: usize| {
         spans.iter().any(|(a, b)| at >= *a && at < *b)
-            || looks_like_blob(line, at)
+            || looks_like_blob(line, at, len)
             || in_key(line, at, len)
+            || in_bookkeeping(line, at)
     };
     if !bad(first) {
         return Some(first);
@@ -893,12 +958,35 @@ mod tests {
 
     #[test]
     fn short_base64_run_is_not_treated_as_a_blob() {
-        // Documented limit: the test needs a clear window either side, so a
-        // run shorter than that is allowed through. Harmless -- a chance hit
-        // in a few dozen characters is rare, and rejecting it would risk
-        // discarding real prose.
+        // A run shorter than a blob is let through: a chance hit in a few
+        // dozen characters is rare, and rejecting it would risk discarding
+        // real prose.
         let short = wrap("QUJDnvencREVG");
         assert!(content(short.as_bytes(), b"nvenc").is_some());
+    }
+
+    #[test]
+    fn a_match_near_either_end_of_a_blob_is_still_the_blob() {
+        let pad = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5YWJjZGVm".repeat(4);
+        for blob in [
+            wrap(&format!("see this: {pad}xYz{}", &pad[..20])),
+            wrap(&format!("{}xYz{pad} was the image", &pad[..20])),
+        ] {
+            assert_eq!(content(blob.as_bytes(), b"xyz"), None, "{}", &blob[..80]);
+        }
+    }
+
+    #[test]
+    fn the_transcript_s_bookkeeping_is_not_a_match() {
+        let line = r#"{"parentUuid":"p","message":{"role":"user","content":[{"type":"text","text":"a question"}]},"type":"user","cwd":"/home/u/scratchpad/proj","version":"2.1.0","gitBranch":"main"}"#;
+        for q in ["main", "2.1.0", "scratchpad", "user"] {
+            assert_eq!(content(line.as_bytes(), q.as_bytes()), None, "{q} matched");
+        }
+        let said = r#"{"message":{"role":"user","content":[{"type":"text","text":"merge it into main"}]},"type":"user","gitBranch":"main"}"#;
+        assert!(
+            content(said.as_bytes(), b"main").is_some(),
+            "said in the conversation"
+        );
     }
 
     #[test]
