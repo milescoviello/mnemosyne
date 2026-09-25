@@ -738,9 +738,22 @@ fn main() -> Result<()> {
     // panic left raw mode on, the alternate screen up, mouse reporting on and
     // the keyboard in the protocol we asked for -- an unusable shell, with
     // the message explaining it painted onto a screen you cannot see.
+    //
+    // Only for a panic on this thread. The hook is the whole process's, and
+    // a panic behind the browser -- in the rescan, or the update check --
+    // put the terminal back while the browser went on drawing: onto the
+    // normal screen, in cooked mode, under the panic message. That thread's
+    // message waits for the browser to close instead.
     {
+        let main_thread = std::thread::current().id();
         let default_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
+            if std::thread::current().id() != main_thread {
+                if let Ok(mut held) = BACKGROUND_PANICS.lock() {
+                    held.push(info.to_string());
+                }
+                return;
+            }
             let _ = disable_raw_mode();
             let _ = execute!(
                 stderr(),
@@ -837,6 +850,11 @@ fn main() -> Result<()> {
     let _ = execute!(term.backend_mut(), DisableMouseCapture);
     execute!(term.backend_mut(), LeaveAlternateScreen)?;
     term.show_cursor()?;
+    if let Ok(held) = BACKGROUND_PANICS.lock() {
+        for m in held.iter() {
+            eprintln!("mnemosyne: a background task failed: {m}");
+        }
+    }
     res?;
 
     // What was handed over counts as open: it will be running moments from
@@ -893,6 +911,9 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Panics on threads behind the browser, said once the browser has closed.
+static BACKGROUND_PANICS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 /// The rescan running behind the list, if there is one.
 type Indexing = Option<std::thread::JoinHandle<Result<Vec<model::Session>>>>;
 
@@ -903,6 +924,7 @@ fn run<B: ratatui::backend::Backend>(
     indexing: &mut Indexing,
 ) -> Result<()> {
     let mut last_live = Instant::now();
+    let mut injected = false;
     loop {
         term.draw(|f| ui::draw(f, app))?;
 
@@ -916,9 +938,15 @@ fn run<B: ratatui::backend::Backend>(
         }
 
         // Fault injection, so the terminal-restoring panic hook can be
-        // tested for real rather than reasoned about.
-        if std::env::var_os("MNEMOSYNE_PANIC_TEST").is_some() {
-            panic!("deliberate panic for the terminal-restore test");
+        // tested for real rather than reasoned about. `background` panics a
+        // thread of its own instead, once, which must leave the browser up.
+        match std::env::var("MNEMOSYNE_PANIC_TEST").as_deref() {
+            Ok("background") if !injected => {
+                injected = true;
+                std::thread::spawn(|| panic!("deliberate background panic"));
+            }
+            Ok("background") | Err(_) => {}
+            Ok(_) => panic!("deliberate panic for the terminal-restore test"),
         }
 
         app.absorb_deep();

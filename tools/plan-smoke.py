@@ -181,6 +181,17 @@ def main():
     check("a panic still says what happened", "deliberate panic" in screen,
           repr(screen[-200:]))
 
+    # ...but only a panic on the thread that owns the terminal. One behind
+    # the browser, in the rescan or the update check, used to put the
+    # terminal back while the browser carried on drawing.
+    _, screen, code = run(binary, home, ["", "q"], timeout=30,
+                          extra_env={"MNEMOSYNE_PANIC_TEST": "background"})
+    check("a panic behind the browser leaves it running", code == 0, f"exit {code}")
+    leave = screen.find("\x1b[?1049l")
+    said = screen.find("deliberate background panic")
+    check("and it is said once the browser has closed",
+          leave != -1 and said > leave, f"left at {leave}, said at {said}")
+
     print()
     if failures:
         print(f"{len(failures)} failed")
