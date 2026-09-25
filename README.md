@@ -1,8 +1,12 @@
+<p align="center">
+  <img src="docs/logo.svg" alt="ΜΝΗΜΟΣΥΝΗ, cut into a leaf of gold" width="712">
+</p>
+
 # mnemosyne
 
 [![ci](https://github.com/milescoviello/mnemosyne/actions/workflows/ci.yml/badge.svg)](https://github.com/milescoviello/mnemosyne/actions/workflows/ci.yml)
-[![release](https://img.shields.io/github/v/release/milescoviello/mnemosyne?color=2a9d8f)](https://github.com/milescoviello/mnemosyne/releases/latest)
-[![license](https://img.shields.io/badge/license-MIT-2a9d8f)](LICENSE)
+[![release](https://img.shields.io/github/v/release/milescoviello/mnemosyne?color=b8892f)](https://github.com/milescoviello/mnemosyne/releases/latest)
+[![license](https://img.shields.io/badge/license-MIT-b8892f)](LICENSE)
 
 A terminal browser for your Claude Code history. Every session you have ever
 run, across every folder, in one searchable list — with favourites, tags,
@@ -803,6 +807,7 @@ cargo clippy --all-targets -- -D warnings
 tools/shell-selftest.sh           # the wrappers under bash, zsh and fish, 180 checks
 tools/install-selftest.sh         # install.sh into empty homes, then `mn` in each shell
 python3 tools/gen-tablet.py rust  # regenerate the tablet baked into src/art.rs
+python3 tools/gen-tablet.py svg docs/logo.svg      # and the logo, from the same pixels
 python3 tools/demo-corpus.py /tmp/demo-home        # invented sessions
 HOME=/tmp/demo-home python3 tools/screenshot.py docs/list.png 150 24
 python3 tools/demo-corpus.py /tmp/demo-home --reopen-offer   # + a pre-reboot set
