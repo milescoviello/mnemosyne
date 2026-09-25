@@ -1191,21 +1191,47 @@ impl App {
                 },
             }
         };
-        if !self.selected.is_empty() {
-            let mut out = Vec::new();
-            for r in &self.view {
-                if let Row::Item(i) | Row::Sub(i) = r {
-                    let key = self.all[*i].path.to_string_lossy().to_string();
-                    if self.selected.contains(&key) {
-                        out.push(mk(&self.all[*i]));
-                    }
-                }
-            }
-            if !out.is_empty() {
-                return out;
+        let picks = self.picks();
+        if picks.is_empty() {
+            return self.current().map(mk).into_iter().collect();
+        }
+        let mut out: Vec<ResumeTarget> = Vec::new();
+        for i in picks {
+            // A subagent resumes its parent, so a parent picked along with
+            // its children is one session, not a window each on it.
+            let t = mk(&self.all[i]);
+            if !out.iter().any(|o| o.id == t.id) {
+                out.push(t);
             }
         }
-        self.current().map(mk).into_iter().collect()
+        out
+    }
+
+    /// Everything picked with space, as indices into `all`: the ones on
+    /// screen first, in list order, then any a filter is hiding.
+    ///
+    /// The hidden ones count. They are in the header's "picked" and `t`
+    /// tags them; enter used to skip them, and when none were on screen it
+    /// resumed the row under the cursor instead -- a session nobody picked.
+    fn picks(&self) -> Vec<usize> {
+        if self.selected.is_empty() {
+            return Vec::new();
+        }
+        let picked = |i: usize| {
+            self.selected
+                .contains(&self.all[i].path.to_string_lossy().to_string())
+        };
+        let mut out: Vec<usize> = self
+            .view
+            .iter()
+            .filter_map(|r| match r {
+                Row::Item(i) | Row::Sub(i) if picked(*i) => Some(*i),
+                _ => None,
+            })
+            .collect();
+        let shown: HashSet<usize> = out.iter().copied().collect();
+        out.extend((0..self.all.len()).filter(|i| !shown.contains(i) && picked(*i)));
+        out
     }
 
     /// Ask what to call the tmux session, then resume into it.
@@ -1220,7 +1246,7 @@ impl App {
         // Already running somewhere: go there instead of asking what to call
         // a second one.
         if let Some(s) = self.current().map(|s| self.resumed(s)) {
-            if s.has_tmux && self.selected.is_empty() {
+            if s.has_tmux && self.picks().is_empty() {
                 let name = s.tmux_session.clone();
                 self.pending_tmux = Some(target);
                 self.tmux_name = name;
@@ -1395,18 +1421,23 @@ impl App {
             self.status = "nothing selected".into();
             return;
         }
+        let picked = !self.picks().is_empty();
         // Several at once cannot all land here, so they become windows, and
-        // one wsx is already running is left out of them rather than opened
-        // a second time. The explicit routes are taken at their word.
-        if target == Target::Here && !self.selected.is_empty() {
+        // one already running -- by wsx or anyone else -- is left out of them
+        // rather than opened a second time, as enter on its own row would
+        // refuse it. The explicit routes are taken at their word.
+        if target == Target::Here && picked {
             let mut held: Vec<String> = Vec::new();
+            let mut running = 0usize;
             targets.retain(|t| {
-                let claim = self
-                    .all
-                    .iter()
-                    .find(|o| !o.is_subagent && o.id == t.id)
-                    .and_then(|s| self.wsx_claim(s));
-                match claim {
+                let Some(s) = self.all.iter().find(|o| !o.is_subagent && o.id == t.id) else {
+                    return true;
+                };
+                let busy = s.live_exact || s.has_tmux || self.launched.iter().any(|l| l.id == s.id);
+                match self.wsx_claim(s) {
+                    // wsx's own agent is wsx's, whatever else is true of it
+                    Some(Claim::Agent(j)) if s.live_in_wsx => held.push(j.label()),
+                    _ if busy => running += 1,
                     Some(Claim::Agent(j)) => held.push(j.label()),
                     Some(Claim::Not { label, .. }) => held.push(label),
                     None => return true,
@@ -1415,11 +1446,22 @@ impl App {
             });
             held.sort();
             held.dedup();
+            let mut why: Vec<String> = Vec::new();
             if !held.is_empty() {
+                why.push(format!("{}: live in wsx", held.join(", ")));
+            }
+            if running > 0 {
+                why.push(format!("{running} already running"));
+            }
+            if !why.is_empty() {
                 let note = format!(
-                    "left out {}: live in wsx — ctrl+n opens {} anyway",
-                    held.join(", "),
-                    if held.len() == 1 { "it" } else { "them" }
+                    "left out {} — ctrl+n opens {} anyway",
+                    why.join("; "),
+                    if held.len() + running == 1 {
+                        "it"
+                    } else {
+                        "them"
+                    }
                 );
                 self.status = note.clone();
                 if targets.is_empty() {
@@ -1428,7 +1470,7 @@ impl App {
                 self.notes.push(note);
             }
         }
-        let claim = if target == Target::Here && self.selected.is_empty() {
+        let claim = if target == Target::Here && !picked {
             self.current()
                 .map(|s| self.resumed(s))
                 .and_then(|s| self.wsx_claim(s))
@@ -1463,7 +1505,7 @@ impl App {
                 // few seconds -- opening a window and pressing enter beats
                 // that poll, and a guard you can outrun is not a guard.
                 let just_opened = self.launched.iter().any(|t| t.id == s.id);
-                if (s.live_exact || s.has_tmux || just_opened) && self.selected.is_empty() {
+                if (s.live_exact || s.has_tmux || just_opened) && !picked {
                     self.status = if just_opened && !s.has_tmux && !s.live_exact {
                         "already opened in a window just now".to_string()
                     } else if s.has_tmux {
@@ -3821,6 +3863,84 @@ mod logic_tests {
             "the browser closes, so it has to be said after: {:?}",
             a.notes
         );
+    }
+
+    fn resumed_ids(a: &App) -> Vec<String> {
+        match &a.outcome {
+            Some(Outcome::Resume { targets, .. }) => targets.iter().map(|t| t.id.clone()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn enter_opens_what_is_picked_even_when_a_filter_hides_it() {
+        // Two picked, then a filter that shows neither. The header still
+        // said "2 picked" and `t` still tagged both, but enter resumed the
+        // row under the cursor -- a session nobody had picked.
+        let mut a = app();
+        a.selected.insert("/p/bbbbbbbb-2.jsonl".into());
+        a.selected.insert("/p/cccccccc-3.jsonl".into());
+        a.fuzzy = "ancient".into();
+        a.rebuild();
+        a.do_action(Action::Resume);
+        assert_eq!(resumed_ids(&a), vec!["bbbbbbbb-2", "cccccccc-3"]);
+    }
+
+    #[test]
+    fn a_picked_session_already_running_is_left_out() {
+        // Enter on its row refuses it. Picked, it went through unguarded:
+        // one pick resumed here beside the one already running.
+        let mut a = app();
+        a.all[0].live_exact = true;
+        a.all[0].live_pid = Some(4242);
+        a.selected.insert("/p/aaaaaaaa-1.jsonl".into());
+        on(&mut a, "bbbbbbbb-2");
+        a.do_action(Action::Resume);
+        assert!(a.outcome.is_none(), "resumed: {:?}", a.outcome);
+        assert!(a.status.contains("already running"), "{:?}", a.status);
+
+        a.selected.insert("/p/bbbbbbbb-2.jsonl".into());
+        a.do_action(Action::Resume);
+        assert_eq!(resumed_ids(&a), vec!["bbbbbbbb-2"]);
+        assert!(
+            a.notes.iter().any(|n| n.contains("1 already running")),
+            "{:?}",
+            a.notes
+        );
+    }
+
+    #[test]
+    fn a_hidden_pick_does_not_let_a_running_row_through() {
+        let mut a = app();
+        a.all[0].live_exact = true;
+        a.all[0].live_pid = Some(4242);
+        a.selected.insert("/p/bbbbbbbb-2.jsonl".into());
+        a.fuzzy = "today's work".into();
+        a.rebuild();
+        on(&mut a, "aaaaaaaa-1");
+        a.do_action(Action::Resume);
+        assert_eq!(resumed_ids(&a), vec!["bbbbbbbb-2"]);
+    }
+
+    #[test]
+    fn a_parent_picked_with_its_subagents_is_opened_once() {
+        // Each subagent resumes its parent, so three picks were three
+        // windows on one transcript.
+        let mut a = app();
+        a.show_subagents = true;
+        a.expanded.insert("aaaaaaaa-1".into());
+        a.rebuild();
+        for p in [
+            "/p/aaaaaaaa-1.jsonl",
+            "/p/agent-a1.jsonl",
+            "/p/agent-a2.jsonl",
+        ] {
+            a.selected.insert(p.into());
+        }
+        a.do_action(Action::NewWindow);
+        let (_, targets) = a.to_open.first().expect("opened");
+        let ids: Vec<&str> = targets.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["aaaaaaaa-1"]);
     }
 
     #[test]
