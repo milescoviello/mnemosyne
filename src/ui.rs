@@ -983,12 +983,11 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                         cue = "";
                     }
                     sp.push(Span::raw("  "));
+                    // Padded by columns, not characters: a prompt in CJK
+                    // came out half as wide as its column, and every
+                    // column after it moved left to fill the gap.
                     sp.push(Span::styled(
-                        format!(
-                            "{:<w$}",
-                            fit(cue, c.preview.saturating_sub(2)),
-                            w = c.preview
-                        ),
+                        pad_fit(&fit(cue, c.preview.saturating_sub(2)), c.preview),
                         Style::default().fg(th().chrome),
                     ));
                 }
@@ -1564,8 +1563,26 @@ fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(Clear, area);
     let body_w = (area.width as usize).saturating_sub(MARGIN * 2);
 
-    // Key column, narrowed when there is little room to spare.
-    let kw: usize = if body_w > 70 { 16 } else { 12 };
+    // Key column, narrowed when there is little room to spare -- but never
+    // below its longest key and a space. A fixed width ran the longest into
+    // their descriptions: `click a headingsort by that column` on a narrow
+    // terminal, and `ctrl+shift+tboth: a new terminal window` at 80 and 120.
+    let longest = |pick: fn(&H) -> Option<&str>| {
+        rows.iter()
+            .filter_map(pick)
+            .map(crate::model::width)
+            .max()
+            .unwrap_or(0)
+    };
+    let key_w = longest(|r| match r {
+        H::Key(k, _, _) | H::Mark(k, _) => Some(k),
+        _ => None,
+    });
+    let alt_w = longest(|r| match r {
+        H::Key(_, a, _) => Some(a),
+        _ => None,
+    });
+    let kw: usize = (key_w + 1).max(if body_w > 70 { 16 } else { 12 });
 
     let mut lines: Vec<Line> = Vec::new();
     if show_art {
@@ -1611,7 +1628,7 @@ fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
             H::Key(k, alt, desc) => {
                 // Descriptions wrap under themselves rather than running off
                 // the edge; on a narrow terminal the alias column goes first.
-                let aw = if body_w > 58 { 11 } else { 0 };
+                let aw = if body_w > 58 { (alt_w + 1).max(11) } else { 0 };
                 let head = kw + aw;
                 for (n, chunk) in wrap_words(desc, body_w.saturating_sub(head + 2))
                     .into_iter()
@@ -2107,6 +2124,63 @@ mod render_tests {
                 a.help_scroll <= a.help_height,
                 "{w}x{h}: help scrolled into nothing"
             );
+        }
+    }
+
+    #[test]
+    fn a_key_in_the_help_never_runs_into_what_it_does() {
+        // `ctrl+shift+tboth: a new terminal window` at 80 and 120, and
+        // `click a headingsort by that column` on a narrow terminal.
+        let mut a = app();
+        a.input_mode = InputMode::Help;
+        for page in [crate::app::HelpPage::Guide, crate::app::HelpPage::Keys] {
+            a.help_page = page;
+            for w in [50u16, 60, 64, 76, 80, 120, 178] {
+                a.help_scroll = 0;
+                let rows = render(&mut a, w, 200);
+                let all = rows.join("\n");
+                for (key, desc) in [
+                    ("ctrl+shift+t", "both"),
+                    ("click a heading", "sort"),
+                    ("click ⌁n", "open"),
+                ] {
+                    if let Some(row) = rows.iter().find(|r| r.contains(key)) {
+                        assert!(!row.contains(&format!("{key}{desc}")), "{w}: {row:?}");
+                    }
+                }
+                assert!(!all.contains("headingsort"), "{w}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_prompt_in_cjk_keeps_the_columns_after_it_in_place() {
+        // LEFT OFF was padded by characters, so a CJK prompt came out half
+        // as wide as its column and MODEL moved left to fill the gap.
+        let mut a = app();
+        let at = |a: &mut App, w: u16| -> (usize, usize) {
+            let rows = render(a, w, 30);
+            let find = |needle: &str| {
+                rows.iter()
+                    .find(|r| r.contains(needle))
+                    .and_then(|r| {
+                        let i = r.find("opus-5")?;
+                        Some(crate::model::width(&r[..i]))
+                    })
+                    .unwrap_or(0)
+            };
+            (find("yesterday's thing"), find("last week"))
+        };
+        for w in [130u16, 150, 178] {
+            let (plain, _) = at(&mut a, w);
+            let i = a.all.iter().position(|s| s.id == "cccccccc-3").unwrap();
+            a.all[i].last_prompt = "ソフトウェアの設計について話しましょう".into();
+            a.rebuild();
+            let (_, cjk) = at(&mut a, w);
+            assert!(plain > 0, "{w}: no MODEL column to measure");
+            assert_eq!(cjk, plain, "{w}: MODEL moved");
+            a.all[i].last_prompt = "back to plain".into();
+            a.rebuild();
         }
     }
 
