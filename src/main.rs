@@ -469,7 +469,10 @@ fn main() -> Result<()> {
         // row, which is right for the browser and wrong here: this prints
         // every hit once and then exits, so the column that says *why* a
         // session matched came out empty on the default search.
-        if how == search::How::Indexed {
+        // Only when there is one to fill: a hit the prose lookup found came
+        // with its excerpt, and for `c++` this pass would match nearly every
+        // document just to throw the answer away.
+        if how == search::How::Indexed && hits.values().any(|s| s.is_empty()) {
             let expr = search::fts_expr(q);
             if let Ok(idx) = index::Index::open() {
                 if let Ok(all) = idx.excerpts(&expr, q) {
