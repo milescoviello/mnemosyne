@@ -13,7 +13,7 @@ pub const EXAMPLE: &str = r##"# mnemosyne configuration.
 # Delete any line to go back to its default.
 
 # The gold ramp, tarnished to fresh. Every gradient in the interface samples
-# it: the age of each session, the tablet on the opening screen, the progress
+# it: the age of each session, the mark on the opening screen, the progress
 # bar. Two or more stops.
 ramp = ["#2b2117", "#5f4524", "#9a7438", "#d4a94f", "#efcf7a", "#fbefc4"]
 

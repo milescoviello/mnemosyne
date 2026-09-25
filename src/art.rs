@@ -1,129 +1,108 @@
-//! The tablet, and the gold it is cut from.
+//! The mark, and the gold it is drawn in.
 //!
-//! The Orphic gold tablets were thin leaves of gold buried with the dead,
-//! telling them which spring to drink from in the underworld: not Lethe,
-//! which makes you forget, but Mnemosyne, which lets you remember. So the
-//! name is cut into a leaf of gold, in Greek capitals -- ΜΝΗΜΟΣΥΝΗ -- above
-//! the first words of the tablet from Hipponion, "this is the work of
-//! Memory".
+//! The mark is a meander -- the Greek key -- drawn as a single square
+//! spiral: one unbroken path that turns inward, the way back through the
+//! maze. The Orphic gold tablets told the dead which spring to drink from to
+//! remember, and the gold is theirs.
 //!
-//! The letters are set by hand on a pixel grid, by `tools/gen-tablet.py`, and
-//! baked in. A terminal cell is about twice as tall as it is wide, so each
-//! half of a cell (▀ over ▄) is close to a square pixel, and a cell can hold
-//! two colours: the top half as foreground, the bottom as background. Eight
-//! pixels of letter is four rows. A rasteriser smears every diagonal at that
-//! size; a hand-set pixel does not.
+//! It is a symbol, not a word. The name was drawn here twice before, cut
+//! into a slab of gold and then as gilded block letters, and both were
+//! worse than no name at all.
 //!
-//! Only the geometry is baked. The light is worked out here, per pixel and
-//! per frame, because it moves: the letters are cut left to right while the
-//! index builds, and then a glint crosses the leaf. The same gold ramp dyes
-//! everything else in the interface, from the age of a session to the keys
-//! in the footer, so a palette set in the config recolours the tablet too.
+//! Nothing is baked. The spiral is walked here, a cell of path at a time,
+//! and each cell drawn as a square of pixels. A terminal cell is about twice
+//! as tall as it is wide, so half a cell (▀ over ▄) is close to a square
+//! pixel, and a cell holds two colours: the top half as foreground, the
+//! bottom as background. At the large size every path cell is two pixels a
+//! side, so each stroke is whole cells, and a whole cell is drawn as its
+//! background rather than as █: a glyph does not always reach the top and
+//! bottom of its cell, and a column of them showed a hairline at every row.
+//!
+//! The light is worked out per pixel and per frame, because it moves: while
+//! the index builds the gold runs along the path from its outer end to the
+//! centre, and then a glint crosses it. The same gold ramp dyes everything
+//! else in the interface, from the age of a session to the keys in the
+//! footer, so a palette set in the config regilds the mark too.
 
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
-pub const INSCRIPTION: &str = "ΜΝΑΜΟΣΥΝΑΣ ΤΟΔΕ ΕΡΓΟΝ";
-
-/// 89 columns by 8 rows.
-pub const TABLET_WIDE: [&str; 16] = [
-    " ggggggggggggggggggggggggggggfgggggggggggggggggggggggggggggfgggggggggggg ggggggggggggg   ",
-    "gggggggggggggggggggggggggggggfgggggggggggggggggggggggggggggfggggggggggggggggggggggggggg  ",
-    "gggggggggggggggggggggggggggggfgggggggggggggggggggggggggggggfgggggggggggggggggggggggggggg ",
-    "ggggg#ggggg#gg#ggggg#gg#ggggg#gg#ggggg#gggg###gggg#######gg#ggggg#gg#ggggg#gg#ggggg#ggg  ",
-    "ggggg##ggg##gg##gggg#gg#ggggg#gg##ggg##ggg#ggg#gggg#gggg#ggf#ggg#ggg##gggg#gg#ggggg#gggg ",
-    "ggggg#g#g#g#gg#g#ggg#gg#ggggg#gg#g#g#g#gg#ggggg#gggg#ggggggfg#g#gggg#g#ggg#gg#ggggg#gggg ",
-    "ggggg#gg#gg#gg#gg#gg#gg#######gg#gg#gg#gg#ggggg#ggggg#gggggfgg#ggggg#gg#gg#gg#######ggggg",
-    "ggggg#ggggg#gg#ggg#g#gg#ggggg#gg#ggggg#gg#ggggg#ggggg#gggggfgg#ggggg#ggg#g#gg#ggggg#ggggg",
-    "ggggg#ggggg#gg#gggg##gg#ggggg#gg#ggggg#gg#ggggg#gggg#ggggggfgg#ggggg#gggg##gg#ggggg#gggg ",
-    "ggggg#ggggg#gg#ggggg#gg#ggggg#gg#ggggg#ggg#ggg#gggg#gggg#ggfgg#ggggg#ggggg#gg#ggggg#ggggg",
-    "ggggg#ggggg#gg#ggggg#gg#ggggg#gg#ggggg#gggg###gggg#######ggfgg#ggggg#ggggg#gg#ggggg#ggggg",
-    "gggggggggggggggggggggggggggggfgggggggggggggggggggggggggggggfggggggggggggggggggggggggggg  ",
-    "gggggggggggggggggggggggggggggfggggtttttttttttttttttttttggggfgggggggggggggggggggggggggggg ",
-    "gggggggggggggggggggggggggggggfggggtttttttttttttttttttttggggfggggggggggggggggggggggggggggg",
-    "gggggggggggggggggggggggggggggfgggggggggggggggggggggggggggggfgggggggggggggggggggggggggggg ",
-    " ggggggggggggggggg ggggggggggfgggggggggggggggggggggggggg  gfgggggggggggggggggggggggggggg ",
-];
-
-/// 79 columns by 8 rows.
-pub const TABLET_MED: [&str; 16] = [
-    " gggggggggggggggggggggggggfgggggggggggggggggggggggggfgggggggggg gggggggggggg   ",
-    "ggggggggggggggggggggggggggfgggggggggggggggggggggggggfgggggggggggggggggggggggg  ",
-    "ggggggggggggggggggggggggggfgggggggggggggggggggggggggfggggggggggggggggggggggggg ",
-    "gggg#ggggg#g#ggggg#g#ggggg#g#ggggg#ggg###ggg#######g#ggggg#g#ggggg#g#ggggg#gg  ",
-    "gggg##ggg##g##gggg#g#ggggg#g##ggg##gg#ggg#ggg#gggg#gf#ggg#gg##gggg#g#ggggg#ggg ",
-    "gggg#g#g#g#g#g#ggg#g#ggggg#g#g#g#g#g#ggggg#ggg#gggggfg#g#ggg#g#ggg#g#ggggg#ggg ",
-    "gggg#gg#gg#g#gg#gg#g#######g#gg#gg#g#ggggg#gggg#ggggfgg#gggg#gg#gg#g#######gggg",
-    "gggg#ggggg#g#ggg#g#g#ggggg#g#ggggg#g#ggggg#gggg#ggggfgg#gggg#ggg#g#g#ggggg#gggg",
-    "gggg#ggggg#g#gggg##g#ggggg#g#ggggg#g#ggggg#ggg#gggggfgg#gggg#gggg##g#ggggg#ggg ",
-    "gggg#ggggg#g#ggggg#g#ggggg#g#ggggg#gg#ggg#ggg#gggg#gfgg#gggg#ggggg#g#ggggg#gggg",
-    "gggg#ggggg#g#ggggg#g#ggggg#g#ggggg#ggg###ggg#######gfgg#gggg#ggggg#g#ggggg#gggg",
-    "ggggggggggggggggggggggggggfgggggggggggggggggggggggggfgggggggggggggggggggggggg  ",
-    "ggggggggggggggggggggggggggfggtttttttttttttttttttttggfggggggggggggggggggggggggg ",
-    "ggggggggggggggggggggggggggfggtttttttttttttttttttttggfgggggggggggggggggggggggggg",
-    "ggggggggggggggggggggggggggfgggggggggggggggggggggggggfggggggggggggggggggggggggg ",
-    " ggggggggggggggg gggggggggfgggggggggggggggggggggg  gfggggggggggggggggggggggggg ",
-];
-
-/// 59 columns by 7 rows.
-pub const TABLET_SMALL: [&str; 14] = [
-    " ggggggggggggggggggfgggggggggggggggggggfggggggg gggggggg   ",
-    "gggggggggggggggggggfgggggggggggggggggggfggggggggggggggggg  ",
-    "ggg#ggg#g#ggg#g#ggg#g#ggg#gg###gg#####g#ggg#g#ggg#g#ggg#gg ",
-    "ggg##g##g##gg#g#ggg#g##g##g#ggg#gg#gg#gf#g#gg##gg#g#ggg#g  ",
-    "ggg#g#g#g#g#g#g#####g#g#g#g#ggg#ggg#gggfg#ggg#g#g#g#####gg ",
-    "ggg#ggg#g#gg##g#ggg#g#ggg#g#ggg#ggg#gggfg#ggg#gg##g#ggg#gg ",
-    "ggg#ggg#g#ggg#g#ggg#g#ggg#g#ggg#gg#gg#gfg#ggg#ggg#g#ggg#ggg",
-    "ggg#ggg#g#ggg#g#ggg#g#ggg#gg###gg#####gfg#ggg#ggg#g#ggg#ggg",
-    "gggggggggggggggggggfgggggggggggggggggggfgggggggggggggggggg ",
-    "gggggggggggggggggggfgggggggggggggggggggfggggggggggggggggggg",
-    "gggggggggggggggggggtttttttttttttttttttttggggggggggggggggggg",
-    "gggggggggggggggggggtttttttttttttttttttttggggggggggggggggg  ",
-    "gggggggggggggggggggfgggggggggggggggggggfgggggggggggggggggg ",
-    " ggggggggggg ggggggfggggggggggggggggg  fgggggggggggggggggg ",
-];
-
-/// The name as the tablet spells it.
+/// The name as the header spells it.
 pub const GREEK: &str = "ΜΝΗΜΟΣΥΝΗ";
 
-/// What one pixel of the leaf is.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Px {
-    /// Off the edge of the leaf, where the terminal shows through.
-    Bare,
-    Gold,
-    /// Where it was folded to be carried, and flattened out again.
-    Fold,
-    /// Part of a letter.
-    Cut,
-    /// Under the line of text, which is set in the terminal's own type.
-    Text,
+/// A square spiral `n` cells a side: its cells in order from the outer end
+/// to the centre, a cell of gap between each turn and the next. `n` is one
+/// more than a multiple of four, which is what lands it on the centre.
+///
+/// Walked by arm length -- three sides the full width, then two of each
+/// length, two shorter each time -- so every turn joins the next. Stepping
+/// the arms in from the edges instead left each ring two cells short of the
+/// one outside it: broken squares that only looked like a spiral.
+fn spiral(n: usize) -> Vec<(usize, usize)> {
+    let n = n as isize;
+    let mut arms = vec![n - 1; 3];
+    let mut len = n - 3;
+    while len > 0 {
+        arms.extend([len, len]);
+        len -= 2;
+    }
+    let (mut x, mut y) = (0isize, 0isize);
+    let mut path = vec![(0, 0)];
+    for (k, arm) in arms.into_iter().enumerate() {
+        let (dx, dy) = [(1, 0), (0, 1), (-1, 0), (0, -1)][k % 4];
+        for _ in 0..arm {
+            x += dx;
+            y += dy;
+            path.push((x as usize, y as usize));
+        }
+    }
+    path
 }
 
-pub struct Tablet {
-    px: Vec<Vec<Px>>,
+pub struct Mark {
+    /// Where each pixel falls along the path, or None off it.
+    px: Vec<Vec<Option<usize>>>,
+    /// Cells of path, end to end.
+    len: usize,
+    /// Pixels to a path cell, each way.
+    scale: usize,
     /// Width in columns, which is also width in pixels.
     pub width: usize,
 }
 
-impl Tablet {
-    fn from(src: &[&str]) -> Tablet {
-        let px: Vec<Vec<Px>> = src
-            .iter()
-            .map(|r| {
-                r.chars()
-                    .map(|c| match c {
-                        'g' => Px::Gold,
-                        'f' => Px::Fold,
-                        '#' => Px::Cut,
-                        't' => Px::Text,
-                        _ => Px::Bare,
-                    })
-                    .collect()
-            })
-            .collect();
-        let width = px.first().map(|r| r.len()).unwrap_or(0);
-        Tablet { px, width }
+/// How a mark is toned: where on the ramp the head and foot of it sit.
+#[derive(Clone, Copy)]
+struct Tone {
+    foot: f64,
+    head: f64,
+}
+
+/// The terminal's.
+const GOLD: Tone = Tone {
+    foot: 0.58,
+    head: 0.9,
+};
+
+impl Mark {
+    /// A spiral `n` cells a side, each cell `scale` pixels square.
+    fn new(n: usize, scale: usize) -> Mark {
+        let side = n * scale;
+        // half blocks pair the rows, so round the height up to even
+        let mut px = vec![vec![None; side]; side + side % 2];
+        let path = spiral(n);
+        for (i, (cx, cy)) in path.iter().enumerate() {
+            for dy in 0..scale {
+                for dx in 0..scale {
+                    px[cy * scale + dy][cx * scale + dx] = Some(i);
+                }
+            }
+        }
+        Mark {
+            px,
+            len: path.len(),
+            scale,
+            width: side,
+        }
     }
 
     /// Height in terminal rows: two pixels to a row.
@@ -131,100 +110,69 @@ impl Tablet {
         self.px.len() / 2
     }
 
-    fn at(&self, x: isize, y: isize) -> Px {
-        if x < 0 || y < 0 {
-            return Px::Bare;
-        }
-        self.px
-            .get(y as usize)
-            .and_then(|r| r.get(x as usize))
-            .copied()
-            .unwrap_or(Px::Bare)
+    fn at(&self, x: usize, y: usize) -> Option<usize> {
+        self.px.get(y).and_then(|r| r.get(x)).copied().flatten()
     }
 
-    /// The colour of one pixel, or None where the leaf is not.
+    /// How far a glint reaches either side of its centre: a quarter of the
+    /// mark, so it reads as a glint at any size rather than a wash.
+    fn reach(&self) -> f64 {
+        (self.width as f64 * 0.22).clamp(3.0, 8.0)
+    }
+
+    /// Where a glint's centre starts and ends to cross the mark whole: clear
+    /// of it at both ends, so it neither appears on it nor vanishes there.
+    pub fn glint_path(&self) -> (f64, f64) {
+        let lean = self.px.len().saturating_sub(1) as f64 * SLANT;
+        (-self.reach(), self.width as f64 + lean + self.reach())
+    }
+
+    /// The colour of one pixel, or None off the path.
     fn colour(&self, x: usize, y: usize, light: &Light) -> Option<Rgb> {
-        let (xi, yi) = (x as isize, y as isize);
-        let here = self.at(xi, yi);
-        if here == Px::Bare {
-            return None;
-        }
-        let cut = |px: Px, x: usize| px == Px::Cut && (x as f64) < light.cut_to;
-        if cut(here, x) {
-            // The last few columns cut are still bright from the point
-            // that cut them.
-            let behind = light.cut_to - x as f64;
-            let groove = ramp(0.2);
-            return Some(if behind < 3.0 && light.cut_to < self.width as f64 {
-                lerp(groove, lift(ramp(1.0), 0.5), 1.0 - behind / 3.0)
-            } else {
-                groove
-            });
-        }
+        self.toned(x, y, light, GOLD)
+    }
 
-        // Light from the upper left, and a broad sheen across it: metal
-        // reads as metal by its highlights, not by its hue.
-        let w = self.width.max(1) as f64;
-        let h = self.px.len().max(1) as f64;
-        let u = x as f64 / w * 0.7 + y as f64 / h * 0.3;
-        let sheen = (1.0 - (u - 0.3).abs() / 0.22).max(0.0).powi(2);
-        // hammered, not polished: a little grain that never moves
-        let grain =
-            ((x as u64).wrapping_mul(73_856_093) ^ (y as u64).wrapping_mul(19_349_663)) % 1000;
-        let grain = grain as f64 / 1000.0 - 0.5;
-        let mut c = lift(ramp(0.52 + (1.0 - u) * 0.3 + grain * 0.04), sheen * 0.22);
-
-        if here == Px::Fold {
-            c = darken(c, 0.16);
-        } else if self.at(xi - 1, yi) == Px::Fold {
-            // the far side of a crease catches the light
-            c = lift(c, 0.10);
+    fn toned(&self, x: usize, y: usize, light: &Light, tone: Tone) -> Option<Rgb> {
+        let i = self.at(x, y)?;
+        // How far along the path the gold has run, in cells. Past it the
+        // path is already there in dim bronze, so the mark is whole from
+        // the first frame and the gold is plainly running along it.
+        let front = light.traced.clamp(0.0, 1.0) * self.len as f64;
+        if i as f64 >= front {
+            return Some(sink(ramp(0.35), 0.6));
         }
-        let bare = |dx: isize, dy: isize| self.at(xi + dx, yi + dy) == Px::Bare;
-        if bare(1, 0) || bare(-1, 0) || bare(0, 1) || bare(0, -1) {
-            c = darken(c, 0.2);
-        }
-        // the lower lip of a groove, lit
-        if y > 0 && cut(self.at(xi, yi - 1), x) {
-            c = lift(c, 0.16);
+        // Bright at the head of the mark, deeper gold at its foot. Lit a
+        // path cell at a time, not a pixel: the two pixels of a doubled
+        // cell came out two colours, and the cell half one and half the
+        // other where it should be solid. A lit top edge on each stroke
+        // went too, because it set every corner off as a darker square.
+        let top = y - y % self.scale;
+        let rows = (self.px.len() / self.scale).max(2) as f64;
+        let up = 1.0 - (y / self.scale) as f64 / (rows - 1.0);
+        let mut c = ramp(tone.foot + up * (tone.head - tone.foot));
+        // the last few cells run still bright from the brush
+        let behind = front - i as f64;
+        if behind < 4.0 && light.traced < 1.0 {
+            c = lift(c, (1.0 - behind / 4.0) * 0.6);
         }
         if let Some(g) = light.glint {
-            let d = (x as f64 + y as f64 * 0.6 - g).abs();
-            if d < 9.0 {
-                c = lift(c, (1.0 - d / 9.0).powi(2) * 0.55);
+            let d = (x as f64 + top as f64 * SLANT - g).abs();
+            if d < self.reach() {
+                c = lift(c, (1.0 - d / self.reach()).powi(2) * 0.6);
             }
         }
         Some(c)
     }
 
-    /// The leaf as terminal rows, lit as `light` says.
+    /// The mark as terminal rows, lit as `light` says. Off the path nothing
+    /// is drawn, so the terminal's background shows through.
     pub fn lines(&self, light: &Light) -> Vec<Line<'static>> {
-        let text: Vec<char> = INSCRIPTION.chars().collect();
         (0..self.height())
             .map(|row| {
-                let (y0, y1) = (row * 2, row * 2 + 1);
-                // where the line of text starts on this row, if it is on it
-                let text_x = self.px[y0].iter().position(|p| *p == Px::Text);
                 let spans: Vec<Span<'static>> = (0..self.width)
                     .map(|x| {
-                        let top = self.colour(x, y0, light);
-                        let bottom = self.colour(x, y1, light);
-                        if let (Some(t0), Some(t), Some(b)) = (text_x, top, bottom) {
-                            let i = x.wrapping_sub(t0);
-                            if self.px[y0][x] == Px::Text && i < text.len() {
-                                let bg = lerp(t, b, 0.5);
-                                // cut as the pass over the letters above reaches it
-                                let ch = if (x as f64) < light.cut_to {
-                                    text[i]
-                                } else {
-                                    ' '
-                                };
-                                return Span::styled(
-                                    ch.to_string(),
-                                    Style::default().fg(rgb(ramp(0.2))).bg(rgb(bg)),
-                                );
-                            }
-                        }
+                        let top = self.colour(x, row * 2, light);
+                        let bottom = self.colour(x, row * 2 + 1, light);
                         match (top, bottom) {
                             (None, None) => Span::raw(" "),
                             (Some(t), None) => Span::styled("▀", Style::default().fg(rgb(t))),
@@ -244,33 +192,37 @@ impl Tablet {
     }
 }
 
-/// How the leaf is lit on one frame.
+/// How far a glint leans: this many columns left for each pixel down.
+const SLANT: f64 = 0.6;
+
+/// How the mark is lit on one frame.
 #[derive(Clone, Copy, Debug)]
 pub struct Light {
-    /// How many columns of the inscription have been cut. Anything past
-    /// this is still smooth gold.
-    pub cut_to: f64,
+    /// How much of the path, 0 to 1, the gold has run along.
+    pub traced: f64,
     /// Where the glint is, in columns, if there is one.
     pub glint: Option<f64>,
 }
 
 impl Light {
-    /// Fully cut and at rest.
+    /// Gilded end to end, and at rest.
     pub const STILL: Light = Light {
-        cut_to: f64::INFINITY,
+        traced: 1.0,
         glint: None,
     };
 }
 
-/// The largest tablet that fits in `width` columns, or None when even the
-/// smallest would not.
-pub fn tablet_for(width: usize) -> Option<Tablet> {
-    for art in [&TABLET_WIDE[..], &TABLET_MED[..], &TABLET_SMALL[..]] {
-        if width >= art[0].chars().count() {
-            return Some(Tablet::from(art));
-        }
-    }
-    None
+/// The sizes the mark comes in, largest first: cells a side, and pixels to
+/// a cell.
+const SIZES: [(usize, usize); 3] = [(13, 2), (13, 1), (9, 1)];
+
+/// The largest mark that fits in `width` columns and `height` rows, or None
+/// when even the smallest would not.
+pub fn mark_for(width: usize, height: usize) -> Option<Mark> {
+    SIZES
+        .iter()
+        .map(|&(n, scale)| Mark::new(n, scale))
+        .find(|m| m.width <= width && m.height() <= height)
 }
 
 // ---------------------------------------------------------------- the gold
@@ -334,24 +286,84 @@ pub fn lift(c: Rgb, amount: f64) -> Rgb {
     lerp(c, (255, 252, 240), amount.clamp(0.0, 1.0))
 }
 
-fn darken(c: Rgb, amount: f64) -> Rgb {
-    lerp(c, (0, 0, 0), amount.clamp(0.0, 1.0))
-}
-
 /// Dim toward the background, for anything meant to recede.
 pub fn sink(c: Rgb, amount: f64) -> Rgb {
     lerp(c, (14, 11, 8), amount.clamp(0.0, 1.0))
 }
 
-/// Letters for the compact reveal to settle out of: the rest of the
-/// alphabet the name is cut in.
-pub const NOISE: &[char] = &[
-    'Α', 'Β', 'Γ', 'Δ', 'Ε', 'Ζ', 'Θ', 'Ι', 'Κ', 'Λ', 'Ξ', 'Π', 'Ρ', 'Τ', 'Φ', 'Χ', 'Ψ', 'Ω',
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The logo in the README, for a page that is light: the terminal's gold
+    /// all but vanishes on white, so it is bronze there, with no lit edge.
+    const BRONZE: Tone = Tone {
+        foot: 0.22,
+        head: 0.52,
+    };
+
+    /// The logo as an SVG, a unit to a pixel. One path per colour, each run
+    /// of it a rectangle.
+    fn svg(m: &Mark, tone: Tone) -> String {
+        let px = 8;
+        let h = m.px.len();
+        let mut runs: std::collections::BTreeMap<Rgb, String> = Default::default();
+        for y in 0..h {
+            let mut x = 0;
+            while x < m.width {
+                let Some(c) = m.toned(x, y, &Light::STILL, tone) else {
+                    x += 1;
+                    continue;
+                };
+                let mut n = 1;
+                while x + n < m.width && m.toned(x + n, y, &Light::STILL, tone) == Some(c) {
+                    n += 1;
+                }
+                runs.entry(c)
+                    .or_default()
+                    .push_str(&format!("M{x} {y}h{n}v1h-{n}z"));
+                x += n;
+            }
+        }
+        let mut out = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {w} {h}\" \
+             width=\"{pw}\" height=\"{ph}\" shape-rendering=\"crispEdges\">\n\
+             <title>mnemosyne</title>\n",
+            w = m.width,
+            pw = m.width * px,
+            ph = h * px,
+        );
+        for ((r, g, b), d) in runs {
+            out.push_str(&format!(
+                "<path fill=\"#{r:02x}{g:02x}{b:02x}\" d=\"{d}\"/>\n"
+            ));
+        }
+        out.push_str("</svg>\n");
+        out
+    }
+
+    #[test]
+    fn the_logos_are_what_the_terminal_draws() {
+        // Drawn from the same mark, so the README cannot show something the
+        // terminal does not. `MNEMOSYNE_WRITE_LOGOS=1 cargo test logos`
+        // redraws them after a change.
+        let m = Mark::new(13, 2);
+        for (file, tone) in [
+            ("docs/logo-dark.svg", GOLD),
+            ("docs/logo-light.svg", BRONZE),
+        ] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
+            let want = svg(&m, tone);
+            if std::env::var_os("MNEMOSYNE_WRITE_LOGOS").is_some() {
+                std::fs::write(&path, &want).unwrap();
+            }
+            let have = std::fs::read_to_string(&path).unwrap_or_default();
+            assert!(
+                have == want,
+                "{file} is not what the terminal draws: MNEMOSYNE_WRITE_LOGOS=1 cargo test logos"
+            );
+        }
+    }
 
     #[test]
     fn the_example_config_ships_the_default_ramp() {
@@ -368,69 +380,132 @@ mod tests {
     }
 
     #[test]
-    fn every_tablet_is_whole_rows_of_one_width() {
-        for art in [&TABLET_WIDE[..], &TABLET_MED[..], &TABLET_SMALL[..]] {
-            assert_eq!(art.len() % 2, 0, "half blocks pair the rows");
-            let w = art[0].chars().count();
-            assert!(art.iter().all(|r| r.chars().count() == w));
-        }
-    }
-
-    #[test]
-    fn the_line_of_text_fits_its_place_on_every_tablet() {
-        for art in [&TABLET_WIDE[..], &TABLET_MED[..], &TABLET_SMALL[..]] {
-            let t = Tablet::from(art);
-            let rows: Vec<usize> = (0..t.px.len())
-                .filter(|y| t.px[*y].contains(&Px::Text))
-                .collect();
-            // one whole terminal row, starting on its top half
-            assert_eq!(rows.len(), 2);
-            assert_eq!(rows[0] % 2, 0);
-            let n = t.px[rows[0]].iter().filter(|p| **p == Px::Text).count();
-            assert_eq!(n, INSCRIPTION.chars().count());
+    fn the_spiral_is_one_path_that_never_touches_itself() {
+        for n in [9, 13] {
+            let path = spiral(n);
+            let set: std::collections::HashSet<_> = path.iter().copied().collect();
+            assert_eq!(set.len(), path.len(), "{n}: a cell twice");
+            for w in path.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                assert_eq!(a.0.abs_diff(b.0) + a.1.abs_diff(b.1), 1, "{n}: a jump");
+            }
+            // Each cell touches only the ones before and after it: a turn
+            // running into the one outside it would close the maze.
+            for (i, &(x, y)) in path.iter().enumerate() {
+                let touching = path
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &(u, v))| x.abs_diff(u) + y.abs_diff(v) == 1)
+                    .count();
+                let ends = (i == 0 || i == path.len() - 1) as usize;
+                assert_eq!(touching, 2 - ends, "{n}: {x},{y} touches another turn");
+            }
+            // it winds in to the centre
+            assert_eq!(*path.last().unwrap(), (n / 2, n / 2));
         }
     }
 
     #[test]
     fn the_largest_that_fits_is_chosen() {
-        assert_eq!(
-            tablet_for(200).unwrap().width,
-            TABLET_WIDE[0].chars().count()
-        );
-        assert_eq!(tablet_for(80).unwrap().width, TABLET_MED[0].chars().count());
-        assert_eq!(
-            tablet_for(60).unwrap().width,
-            TABLET_SMALL[0].chars().count()
-        );
-        assert!(tablet_for(40).is_none());
+        assert_eq!(mark_for(200, 60).unwrap().width, 26);
+        assert_eq!(mark_for(200, 10).unwrap().width, 13);
+        assert_eq!(mark_for(20, 60).unwrap().width, 13);
+        assert_eq!(mark_for(10, 60).unwrap().width, 9);
+        assert!(mark_for(8, 60).is_none());
+        assert!(mark_for(200, 4).is_none());
     }
 
     #[test]
-    fn uncut_letters_are_plain_gold() {
-        let t = tablet_for(200).unwrap();
-        let blank = Light {
-            cut_to: 0.0,
+    fn the_large_mark_is_whole_cells_of_background() {
+        // Two pixels a side, so no half block; and each cell its background
+        // colour rather than a █, which leaves a hairline at every row
+        // where the glyph stops short of the cell.
+        let m = mark_for(200, 60).unwrap();
+        let mut solid = 0;
+        for line in m.lines(&Light::STILL) {
+            for s in &line.spans {
+                assert_eq!(s.content, " ");
+                solid += s.style.bg.is_some() as usize;
+            }
+        }
+        assert!(solid > 0);
+    }
+
+    #[test]
+    fn it_looks_square() {
+        // A cell is about twice as tall as it is wide.
+        for (w, h) in [(200, 60), (200, 10), (10, 60)] {
+            let m = mark_for(w, h).unwrap();
+            assert!(
+                m.width.abs_diff(m.height() * 2) <= 1,
+                "{} x {}",
+                m.width,
+                m.height()
+            );
+        }
+    }
+
+    #[test]
+    fn the_gold_runs_from_the_outer_end_to_the_centre() {
+        let m = Mark::new(13, 1);
+        let half = Light {
+            traced: 0.5,
             glint: None,
         };
-        let (x, y) = (0..t.px.len())
-            .flat_map(|y| (0..t.width).map(move |x| (x, y)))
-            .find(|(x, y)| t.px[*y][*x] == Px::Cut)
-            .unwrap();
-        assert_ne!(t.colour(x, y, &blank), Some(ramp(0.2)));
-        assert_eq!(t.colour(x, y, &Light::STILL), Some(ramp(0.2)));
+        let bare = Some(sink(ramp(0.35), 0.6));
+        // the outer end is gilded half way, the centre not yet
+        assert_ne!(m.colour(0, 0, &half), bare);
+        assert_eq!(m.colour(6, 6, &half), bare);
+        assert_ne!(m.colour(6, 6, &Light::STILL), bare);
+    }
+
+    #[test]
+    fn a_glint_starts_and_ends_clear_of_the_mark() {
+        for (w, h) in [(200, 60), (200, 10), (10, 60)] {
+            let m = mark_for(w, h).unwrap();
+            let (from, to) = m.glint_path();
+            for g in [from, to] {
+                let lit = Light {
+                    traced: 1.0,
+                    glint: Some(g),
+                };
+                assert!(
+                    (0..m.px.len()).all(|y| (0..m.width)
+                        .all(|x| m.colour(x, y, &lit) == m.colour(x, y, &Light::STILL))),
+                    "{}: the glint at {g} is still on the mark",
+                    m.width
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_is_drawn_off_the_path() {
+        // The terminal's background has to show through: a colour there
+        // would paint a slab behind the mark.
+        for (w, h) in [(200, 60), (200, 10), (10, 60)] {
+            let m = mark_for(w, h).unwrap();
+            for (row, line) in m.lines(&Light::STILL).iter().enumerate() {
+                for (x, s) in line.spans.iter().enumerate() {
+                    let on = m.at(x, row * 2).is_some() || m.at(x, row * 2 + 1).is_some();
+                    let painted = s.style.bg.is_some() || s.content != " ";
+                    assert_eq!(painted, on, "{} at {x},{row}", m.width);
+                }
+            }
+        }
     }
 
     #[test]
     fn every_row_draws_exactly_its_width() {
-        for w in [60, 80, 200] {
-            let t = tablet_for(w).unwrap();
-            for line in t.lines(&Light::STILL) {
+        for (w, h) in [(200, 60), (200, 10), (10, 60)] {
+            let m = mark_for(w, h).unwrap();
+            for line in m.lines(&Light::STILL) {
                 let cells: usize = line
                     .spans
                     .iter()
                     .map(|s| crate::model::width(&s.content))
                     .sum();
-                assert_eq!(cells, t.width);
+                assert_eq!(cells, m.width);
             }
         }
     }

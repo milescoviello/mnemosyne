@@ -7,8 +7,8 @@
 //! * An edge of gold runs down the left, coloured on the ramp by how old each
 //!   session is — fresh leaf for today, tarnished bronze for last year. Age
 //!   becomes something you see rather than read.
-//! * The name in the header is a chip of the same gold the opening screen
-//!   cuts it into.
+//! * The name in the header is cut into a chip of the same gold the
+//!   opening screen draws its mark in.
 //! * Beside the gold, three colours that each mean one thing: lapis for your
 //!   own marks, cypress for anything alive, cinnabar for anything lost.
 //! * Rules are dotted and fade out rather than cross the screen. There are
@@ -585,8 +585,8 @@ fn draw_reopen(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// The tablet in miniature: the name cut into a chip of gold, lit from the
-/// left the way the big one is.
+/// The name, cut dark into a chip of the gold the opening screen's mark is
+/// drawn in, lit from the left.
 fn chip() -> Vec<Span<'static>> {
     let letters: Vec<char> = art::GREEK.chars().collect();
     let n = letters.len() + 1;
@@ -1666,11 +1666,12 @@ fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
         crate::app::HelpPage::Keys => keys(),
     };
 
-    let tablet = art::tablet_for(area.width.saturating_sub(6) as usize);
-    let art_h = tablet.as_ref().map(|t| t.height()).unwrap_or(0);
-    // The tablet is decoration; the text is the point. It only appears when
+    // The medium mark at most: over the help it is a heading, not a splash.
+    let mark = art::mark_for(area.width.saturating_sub(6) as usize, 7);
+    let art_h = mark.as_ref().map(|m| m.height()).unwrap_or(0);
+    // The mark is decoration; the text is the point. It only appears when
     // there is room for it on top of everything else.
-    let show_art = tablet.is_some() && area.height as usize >= rows.len() + art_h + 8;
+    let show_art = mark.is_some() && area.height as usize >= rows.len() + art_h + 8;
 
     f.render_widget(Clear, area);
     let body_w = (area.width as usize).saturating_sub(MARGIN * 2);
@@ -1698,10 +1699,10 @@ fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
 
     let mut lines: Vec<Line> = Vec::new();
     if show_art {
-        let t = tablet.as_ref().unwrap();
-        let indent = (area.width as usize).saturating_sub(t.width) / 2;
+        let m = mark.as_ref().unwrap();
+        let indent = (area.width as usize).saturating_sub(m.width) / 2;
         lines.push(Line::raw(""));
-        for line in t.lines(&art::Light::STILL) {
+        for line in m.lines(&art::Light::STILL) {
             let mut sp: Vec<Span> = vec![Span::raw(" ".repeat(indent))];
             sp.extend(line.spans);
             lines.push(Line::from(sp));

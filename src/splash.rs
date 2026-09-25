@@ -1,9 +1,10 @@
 //! Opening animation.
 //!
-//! The name is cut into a leaf of gold, letter by letter, left to right,
-//! with the point of the tool still bright where it last cut. Once it is
-//! done a glint crosses the leaf, and goes on crossing it for as long as the
-//! animation stays up.
+//! The mark is a meander, a single spiral, and the gold runs along it from
+//! its outer end to the centre while the index builds, still bright where
+//! it has just been. Once it is done a glint crosses it, and goes on
+//! crossing it for as long as the animation stays up. No words: the name is
+//! in the header of the list this opens onto.
 //!
 //! It is covering real work: the index builds on a background thread while
 //! this runs, and the bar reports genuine progress whenever there is any left
@@ -16,7 +17,7 @@ use crate::model::human_size;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 use ratatui::{backend::Backend, Terminal};
@@ -47,15 +48,11 @@ const SWEEP_MS: f64 = 1800.0;
 const CROSSING: f64 = 0.6;
 
 const BAR_W: usize = 48;
+/// Rows under the mark: a blank, the status, a blank, the bar, a blank, the
+/// hint.
+const UNDER: usize = 6;
 
 use art::rgb;
-
-fn lcg(state: &mut u64) -> u64 {
-    *state = state
-        .wrapping_mul(6_364_136_223_846_793_005)
-        .wrapping_add(1_442_695_040_888_963_407);
-    *state >> 33
-}
 
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
     Rect {
@@ -110,7 +107,6 @@ pub enum End {
 /// twelve seconds re-reading every transcript.
 pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress, must_wait: bool) -> Result<End> {
     let start = Instant::now();
-    let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut ended = End::Done;
     let mut bar_high = 0.0f64;
     let mut showed_counts = false;
@@ -122,16 +118,15 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress, must_wait: bool) ->
     /// Finishing inside this means the index was already warm.
     const WARM_IF_DONE_BY_MS: f64 = 300.0;
 
-    // Pick the largest tablet this terminal can hold; None means fall back
-    // to the letter reveal.
-    let term_w = term.size().map(|s| s.width as usize).unwrap_or(80);
-    let tablet = art::tablet_for(term_w.saturating_sub(4));
-    let letters: Vec<char> = art::GREEK.chars().collect();
-    let mark_w = tablet
-        .as_ref()
-        .map(|t| t.width)
-        .unwrap_or(letters.len() * 2);
-    let mark_h = tablet.as_ref().map(|t| t.height()).unwrap_or(1);
+    // The largest mark this terminal can hold with the six lines under it;
+    // None means there is room only for those.
+    let size = term.size().ok();
+    let term_w = size.map(|s| s.width as usize).unwrap_or(80);
+    let term_h = size.map(|s| s.height as usize).unwrap_or(24);
+    let mark = art::mark_for(term_w.saturating_sub(4), term_h.saturating_sub(UNDER + 1));
+    let mark_w = mark.as_ref().map(|m| m.width).unwrap_or(0);
+    let mark_h = mark.as_ref().map(|m| m.height()).unwrap_or(0);
+    let (glint_from, glint_to) = mark.as_ref().map(|m| m.glint_path()).unwrap_or((0.0, 0.0));
 
     loop {
         let elapsed = start.elapsed();
@@ -158,18 +153,18 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress, must_wait: bool) ->
         let rev = (ms / reveal_ms).min(1.0);
         let complete = rev >= 1.0;
 
-        // The point of the tool is the light while the letters are cut;
-        // after that, a glint every so often.
+        // The fresh gold is the light while it runs along the path; after
+        // that, a glint every so often.
         let light = if !complete {
             art::Light {
-                cut_to: rev * mark_w as f64,
+                traced: rev,
                 glint: None,
             }
         } else {
             let t = ((ms - reveal_ms) / SWEEP_MS).fract() / CROSSING;
             art::Light {
-                cut_to: f64::INFINITY,
-                glint: (t <= 1.0).then_some(t * (mark_w as f64 + 24.0) - 12.0),
+                traced: 1.0,
+                glint: (t <= 1.0).then_some(glint_from + t * (glint_to - glint_from)),
             }
         };
 
@@ -210,40 +205,17 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress, must_wait: bool) ->
 
         term.draw(|f| {
             let area = f.area();
-            let big = tablet.is_some()
+            // Chosen for the size it started at; a terminal made smaller
+            // since goes without rather than cutting the mark off.
+            let big = mark.is_some()
                 && area.width as usize >= mark_w + 4
-                && area.height as usize >= mark_h + 8;
+                && area.height as usize > mark_h + UNDER;
 
             let mut lines: Vec<Line> = Vec::new();
-
             if big {
-                lines.extend(tablet.as_ref().unwrap().lines(&light));
-            } else {
-                // Compact fallback: the name settling, letter by letter, out
-                // of the rest of the alphabet it is written in.
-                let settled = (rev * letters.len() as f64) as usize;
-                let mut spans: Vec<Span> = Vec::new();
-                for (i, ch) in letters.iter().enumerate() {
-                    if i < settled {
-                        let p = 0.6 + i as f64 / letters.len() as f64 * 0.4;
-                        spans.push(Span::styled(
-                            format!("{ch} "),
-                            Style::default()
-                                .fg(rgb(art::ramp(p)))
-                                .add_modifier(Modifier::BOLD),
-                        ));
-                    } else {
-                        let g = art::NOISE[(lcg(&mut rng) as usize) % art::NOISE.len()];
-                        spans.push(Span::styled(
-                            format!("{g} "),
-                            Style::default().fg(rgb(art::sink(art::ramp(0.4), 0.5))),
-                        ));
-                    }
-                }
-                lines.push(Line::from(spans));
+                lines.extend(mark.as_ref().unwrap().lines(&light));
+                lines.push(Line::raw(""));
             }
-
-            lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled(
                 status.clone(),
                 Style::default().fg(rgb(art::ramp(0.62))),
@@ -322,7 +294,7 @@ fn fitting_hint(hint: &'static str, area_w: u16) -> &'static str {
     }
 }
 
-/// Wide enough for everything in the box. It was the wordmark's width, or
+/// Wide enough for everything in the box. It was the mark's width, or
 /// 44 without one: narrower than the 48-cell bar, which never looked full,
 /// and than the long hint, which lost its ending -- at 80x24, the part
 /// saying how to leave.

@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="docs/logo.svg" alt="ΜΝΗΜΟΣΥΝΗ, cut into a leaf of gold" width="712">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.svg">
+    <img src="docs/logo-light.svg" alt="the mnemosyne mark, a gold meander" width="168">
+  </picture>
 </p>
 
 # mnemosyne
@@ -824,8 +827,7 @@ cargo test          # 445 tests, no network and no fixtures on disk
 cargo clippy --all-targets -- -D warnings
 tools/shell-selftest.sh           # the wrappers under bash, zsh and fish, 195 checks
 tools/install-selftest.sh         # install.sh into empty homes, then `mn` in each shell
-python3 tools/gen-tablet.py rust  # regenerate the tablet baked into src/art.rs
-python3 tools/gen-tablet.py svg docs/logo.svg      # and the logo, from the same pixels
+MNEMOSYNE_WRITE_LOGOS=1 cargo test logos   # redraw docs/logo-*.svg from the mark
 python3 tools/demo-corpus.py /tmp/demo-home        # invented sessions
 HOME=/tmp/demo-home python3 tools/screenshot.py docs/list.png 150 24
 python3 tools/demo-corpus.py /tmp/demo-home --reopen-offer   # + a pre-reboot set
