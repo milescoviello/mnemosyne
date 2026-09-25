@@ -1693,13 +1693,16 @@ impl App {
             }
         }
         // A subagent resumes as its session, and this one's is gone: there is
-        // nothing to resume, only something to read.
-        if self
-            .current()
-            .is_some_and(|s| s.is_subagent && self.resumed(s).is_subagent)
-            && self.picks().is_empty()
-        {
+        // nothing to resume, only something to read. Picked, the same.
+        let orphaned = |s: &Session| s.is_subagent && self.resumed(s).is_subagent;
+        let picks = self.picks();
+        if picks.is_empty() && self.current().is_some_and(orphaned) {
             self.status = "the session this subagent belongs to is gone — v reads it".into();
+            return;
+        }
+        if picks.iter().any(|&i| orphaned(&self.all[i])) {
+            self.status =
+                "a picked subagent's session is gone — v reads it, space unpicks it".into();
             return;
         }
         // Guard against silently starting a second client on a transcript that
@@ -3601,6 +3604,21 @@ mod logic_tests {
         a.fuzzy = "orphaned".into();
         a.rebuild();
         assert_eq!(a.session_count(), 1, "nowhere to be found");
+        a.do_action(Action::Resume);
+        assert!(a.outcome.is_none(), "resumed a session that is not there");
+        assert!(a.status.contains("v reads it"), "{:?}", a.status);
+    }
+
+    #[test]
+    fn a_picked_subagent_whose_session_is_gone_is_not_resumed_either() {
+        // Picked with space, it went by its parent's id all the same, and
+        // enter ran `claude --resume` on a conversation that is not there.
+        let mut a = app();
+        let mut orphan = subagent("agent-z9", "no-such-parent");
+        orphan.path = "/p/agent-z9.jsonl".into();
+        a.all.push(orphan);
+        a.rebuild();
+        a.selected.insert("/p/agent-z9.jsonl".into());
         a.do_action(Action::Resume);
         assert!(a.outcome.is_none(), "resumed a session that is not there");
         assert!(a.status.contains("v reads it"), "{:?}", a.status);
