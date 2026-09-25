@@ -211,9 +211,15 @@ fn check_args(args: &[String]) -> std::result::Result<(), String> {
 ///
 /// The "N most recent", as the help says -- not the list's order, which
 /// floats favourites to the top, so an old favourite was reopened ahead of
-/// what you were working on an hour ago.
+/// what you were working on an hour ago. Nor a conversation a live wsx
+/// workspace will put back itself when it starts: restored here too, it
+/// ran twice.
 fn most_recent_first(app: &App) -> Vec<&model::Session> {
-    let mut v: Vec<&model::Session> = app.all.iter().filter(|s| !s.is_subagent).collect();
+    let mut v: Vec<&model::Session> = app
+        .all
+        .iter()
+        .filter(|s| !s.is_subagent && !app.belongs_to_wsx(s))
+        .collect();
     v.sort_by_key(|s| std::cmp::Reverse(s.mtime));
     v
 }
@@ -526,7 +532,8 @@ fn main() -> Result<()> {
     if let Some(i) = args.iter().position(|a| a == "--restore") {
         let n: usize = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(5);
         let live = live::live_map();
-        let app = App::new(sessions, meta::Meta::load(), live, restore_model);
+        let mut app = App::new(sessions, meta::Meta::load(), live, restore_model);
+        app.set_wsx(wsx::load());
         let mut out = std::io::stdout().lock();
         let mut opened = 0;
         for s in most_recent_first(&app) {
@@ -1209,6 +1216,20 @@ mod restore_tests {
         assert_eq!(order[0], "bbbbbbbb-2", "{order:?}");
         assert_eq!(*order.last().unwrap(), "aaaaaaaa-1");
         assert!(!order.iter().any(|id| id.starts_with("agent-")));
+    }
+
+    #[test]
+    fn restore_leaves_a_live_wsx_workspace_to_wsx() {
+        // gggggggg-7 is the newest conversation at the top of the live
+        // shy-daffodil worktree: wsx carries it on when it starts.
+        let a = crate::app::fixtures::app();
+        let order: Vec<&str> = most_recent_first(&a)
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert!(!order.contains(&"gggggggg-7"), "{order:?}");
+        // an archived workspace's is not wsx's any more
+        assert!(order.contains(&"hhhhhhhh-8"), "{order:?}");
     }
 }
 

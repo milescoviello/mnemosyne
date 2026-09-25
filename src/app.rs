@@ -1368,6 +1368,13 @@ impl App {
     ///
     /// A session started further down the worktree is none of these: no
     /// agent runs there, and `--continue` never reaches it.
+    /// A conversation wsx will bring back itself: one it is running, or the
+    /// one at the top of a live workspace that it carries on when it starts.
+    /// Opened here as well, it would be a second client beside wsx's.
+    pub fn belongs_to_wsx(&self, s: &Session) -> bool {
+        self.wsx_claim(s).is_some()
+    }
+
     fn wsx_claim(&self, s: &Session) -> Option<Claim> {
         let w = s.wsx.as_ref()?;
         let crate::wsx::Status::Live { worktree } = &w.status else {
