@@ -110,6 +110,18 @@ const BODY_REF: &str = "CREATE TABLE IF NOT EXISTS body_ref (
     rid  INTEGER NOT NULL
 )";
 
+/// Whether opening the cache failed because the file is not a sound
+/// database -- the one failure that deleting it fixes.
+fn is_corrupt(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        matches!(
+            c.downcast_ref::<rusqlite::Error>()
+                .and_then(|e| e.sqlite_error_code()),
+            Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+        )
+    })
+}
+
 fn schema_current(conn: &Connection) -> bool {
     let Ok(mut st) = conn.prepare("PRAGMA table_info(sessions)") else {
         return false;
@@ -159,6 +171,15 @@ impl Index {
         let path = db_path();
         match Index::open_at(&path) {
             Ok(i) => Ok(i),
+            // Only a file that is itself bad is deleted. Anything else --
+            // above all another instance holding the write lock past the
+            // busy timeout -- says nothing against the file, and deleting it
+            // from under that instance threw away everything it went on to
+            // write, while its commits kept reporting success.
+            Err(first) if !is_corrupt(&first) => {
+                eprintln!("mnemosyne: cache unusable ({first}) — running without it");
+                Index::open_memory()
+            }
             Err(first) => {
                 let _ = std::fs::remove_file(&path);
                 let _ = std::fs::remove_file(path.with_extension("db-wal"));
@@ -863,6 +884,23 @@ mod tests {
             .unwrap();
         assert_eq!(idx.text_rows().unwrap(), 0);
         assert_eq!(idx.rowid_map_len().unwrap(), 0, "the map kept a dead entry");
+    }
+
+    #[test]
+    fn only_a_bad_file_is_taken_for_one_worth_deleting() {
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("i.db");
+        std::fs::write(&db, b"this is not a database, it is a sentence").unwrap();
+        let bad = Index::open_at(&db).err().expect("garbage opened");
+        assert!(is_corrupt(&bad), "{bad}");
+
+        // Another instance holding the lock is no reason to delete it.
+        let busy: anyhow::Error = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            None,
+        )
+        .into();
+        assert!(!is_corrupt(&busy));
     }
 
     #[test]
