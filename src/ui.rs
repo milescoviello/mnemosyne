@@ -1603,11 +1603,11 @@ fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
         crate::app::HelpPage::Keys => keys(),
     };
 
-    let mark = art::mark_for(area.width.saturating_sub(6) as usize);
-    let art_h = mark.as_ref().map(|m| m.height()).unwrap_or(0);
-    // The wordmark is decoration; the text is the point. It only appears when
+    let tablet = art::tablet_for(area.width.saturating_sub(6) as usize);
+    let art_h = tablet.as_ref().map(|t| t.height()).unwrap_or(0);
+    // The tablet is decoration; the text is the point. It only appears when
     // there is room for it on top of everything else.
-    let show_art = mark.is_some() && area.height as usize >= rows.len() + art_h + 8;
+    let show_art = tablet.is_some() && area.height as usize >= rows.len() + art_h + 8;
 
     f.render_widget(Clear, area);
     let body_w = (area.width as usize).saturating_sub(MARGIN * 2);
@@ -1635,22 +1635,14 @@ fn draw_help(f: &mut Frame, app: &mut App, area: Rect) {
 
     let mut lines: Vec<Line> = Vec::new();
     if show_art {
-        let m = mark.as_ref().unwrap();
-        let indent = (area.width as usize).saturating_sub(m.width) / 2;
-        for (row, chars) in m.rows.iter().enumerate() {
+        let t = tablet.as_ref().unwrap();
+        let indent = (area.width as usize).saturating_sub(t.width) / 2;
+        lines.push(Line::raw(""));
+        for line in t.lines(&art::Light::STILL) {
             let mut sp: Vec<Span> = vec![Span::raw(" ".repeat(indent))];
-            sp.extend(chars.iter().enumerate().map(|(x, ch)| {
-                if *ch == ' ' {
-                    return Span::raw(" ");
-                }
-                Span::styled(
-                    ch.to_string(),
-                    Style::default().fg(rgb(art::column_color(x, m.width, -99.0, row, art_h))),
-                )
-            }));
+            sp.extend(line.spans);
             lines.push(Line::from(sp));
         }
-        lines.push(ripple_line(area.width as usize, indent.max(2), 1.7));
     }
     lines.push(Line::raw(""));
 

@@ -1,9 +1,9 @@
 //! Opening animation.
 //!
-//! The wordmark rises out of a rippling pool -- Mnemosyne is the spring of
-//! memory, the counter-pool to Lethe -- lit by a gradient that runs from deep
-//! water to pale foam, with a shimmer band that leads the reveal and then
-//! keeps sweeping.
+//! The name is cut into a leaf of gold, letter by letter, left to right,
+//! with the point of the tool still bright where it last cut. Once it is
+//! done a glint crosses the leaf, and goes on crossing it for as long as the
+//! animation stays up.
 //!
 //! It is covering real work: the index builds on a background thread while
 //! this runs, and the bar reports genuine progress whenever there is any left
@@ -16,7 +16,7 @@ use crate::model::human_size;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 use ratatui::{backend::Backend, Terminal};
@@ -41,14 +41,14 @@ fn floors() -> (Duration, Duration) {
 const FRAME: Duration = Duration::from_millis(28);
 const REVEAL_COLD_MS: f64 = 780.0;
 const REVEAL_WARM_MS: f64 = 300.0;
-const SWEEP_MS: f64 = 1500.0;
+/// One glint and the pause after it.
+const SWEEP_MS: f64 = 1800.0;
+/// The share of each sweep the glint spends crossing; the rest is rest.
+const CROSSING: f64 = 0.6;
 
 const BAR_W: usize = 48;
-const RIPPLE_ROWS: usize = 2;
 
-fn rgb((r, g, b): (u8, u8, u8)) -> Color {
-    Color::Rgb(r, g, b)
-}
+use art::rgb;
 
 fn lcg(state: &mut u64) -> u64 {
     *state = state
@@ -66,26 +66,24 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
     }
 }
 
-/// A gradient progress bar with eighth-cell resolution.
+/// Progress as a gold thread drawn along a tarnished one, in half-cell
+/// steps.
 fn bar_line(pct: f64) -> Line<'static> {
     let exact = pct.clamp(0.0, 1.0) * BAR_W as f64;
     let full = exact.floor() as usize;
-    let frac = exact - full as f64;
+    let half = exact - full as f64 >= 0.5;
     let mut spans: Vec<Span> = Vec::with_capacity(BAR_W);
     for x in 0..BAR_W {
         let p = x as f64 / (BAR_W - 1) as f64;
+        let gold = Style::default().fg(rgb(art::ramp(0.5 + p * 0.45)));
         if x < full {
-            spans.push(Span::styled("█", Style::default().fg(rgb(art::ramp(p)))));
-        } else if x == full && frac > 0.08 {
-            let i = ((frac * art::PARTIALS.len() as f64) as usize).min(art::PARTIALS.len() - 1);
-            spans.push(Span::styled(
-                art::PARTIALS[i].to_string(),
-                Style::default().fg(rgb(art::ramp(p))),
-            ));
+            spans.push(Span::styled("━", gold));
+        } else if x == full && half {
+            spans.push(Span::styled("╸", gold));
         } else {
             spans.push(Span::styled(
-                "░",
-                Style::default().fg(rgb(art::sink(art::ramp(p), 0.72))),
+                "─",
+                Style::default().fg(rgb(art::sink(art::ramp(0.35), 0.45))),
             ));
         }
     }
@@ -124,15 +122,16 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress, must_wait: bool) ->
     /// Finishing inside this means the index was already warm.
     const WARM_IF_DONE_BY_MS: f64 = 300.0;
 
-    // Pick the largest wordmark this terminal can hold; None means fall back
+    // Pick the largest tablet this terminal can hold; None means fall back
     // to the letter reveal.
     let term_w = term.size().map(|s| s.width as usize).unwrap_or(80);
-    let mark = art::mark_for(term_w.saturating_sub(4));
-    let mark_w = mark
+    let tablet = art::tablet_for(term_w.saturating_sub(4));
+    let letters: Vec<char> = art::GREEK.chars().collect();
+    let mark_w = tablet
         .as_ref()
-        .map(|m| m.width)
-        .unwrap_or(art::WORD.chars().count() * 2);
-    let mark_h = mark.as_ref().map(|m| m.height()).unwrap_or(1);
+        .map(|t| t.width)
+        .unwrap_or(letters.len() * 2);
+    let mark_h = tablet.as_ref().map(|t| t.height()).unwrap_or(1);
 
     loop {
         let elapsed = start.elapsed();
@@ -159,12 +158,19 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress, must_wait: bool) ->
         let rev = (ms / reveal_ms).min(1.0);
         let complete = rev >= 1.0;
 
-        // the shimmer leads the reveal, then keeps sweeping across
-        let band = if !complete {
-            rev * mark_w as f64
+        // The point of the tool is the light while the letters are cut;
+        // after that, a glint every so often.
+        let light = if !complete {
+            art::Light {
+                cut_to: rev * mark_w as f64,
+                glint: None,
+            }
         } else {
-            let t = ((ms - reveal_ms) / SWEEP_MS).fract();
-            t * (mark_w as f64 + 30.0) - 15.0
+            let t = ((ms - reveal_ms) / SWEEP_MS).fract() / CROSSING;
+            art::Light {
+                cut_to: f64::INFINITY,
+                glint: (t <= 1.0).then_some(t * (mark_w as f64 + 24.0) - 12.0),
+            }
         };
 
         let candidate = if finished {
@@ -204,88 +210,36 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress, must_wait: bool) ->
 
         term.draw(|f| {
             let area = f.area();
-            let big = mark.is_some() && area.width as usize >= mark_w + 4 && area.height >= 16;
+            let big = tablet.is_some()
+                && area.width as usize >= mark_w + 4
+                && area.height as usize >= mark_h + 8;
 
             let mut lines: Vec<Line> = Vec::new();
 
             if big {
-                let m = mark.as_ref().unwrap();
-                let revealed = (rev * mark_w as f64) as usize;
-                for (r, row) in m.rows.iter().enumerate() {
-                    let mut spans: Vec<Span> = Vec::with_capacity(mark_w);
-                    for (x, ch) in row.iter().enumerate() {
-                        if x < revealed {
-                            // Blank cells of the art stay blank; only inked
-                            // ones take colour, so the tone does the drawing.
-                            if *ch == ' ' {
-                                spans.push(Span::raw(" "));
-                            } else {
-                                let c = art::column_color(x, mark_w, band, r, mark_h);
-                                spans.push(Span::styled(
-                                    ch.to_string(),
-                                    Style::default().fg(rgb(c)),
-                                ));
-                            }
-                        } else {
-                            // Not yet surfaced. Only the crests show, so this
-                            // reads as open water instead of a wall of glyphs.
-                            let (w, i) = art::ripple_at(x, ms / 240.0, r as f64 * 1.9);
-                            // Only the highest crests, and dim: a dense field
-                            // here fights the art instead of framing it.
-                            if i > 0.93 {
-                                let c = art::sink(art::ramp(0.34), 0.68);
-                                spans
-                                    .push(Span::styled(w.to_string(), Style::default().fg(rgb(c))));
-                            } else {
-                                spans.push(Span::raw(" "));
-                            }
-                        }
-                    }
-                    lines.push(Line::from(spans));
-                }
+                lines.extend(tablet.as_ref().unwrap().lines(&light));
             } else {
-                // compact fallback: spaced letters resolving out of noise
-                let letters: Vec<char> = art::WORD.chars().collect();
+                // Compact fallback: the name settling, letter by letter, out
+                // of the rest of the alphabet it is written in.
                 let settled = (rev * letters.len() as f64) as usize;
                 let mut spans: Vec<Span> = Vec::new();
                 for (i, ch) in letters.iter().enumerate() {
                     if i < settled {
-                        let c = art::column_color(i * 2, letters.len() * 2, band / 6.0, 0, 1);
+                        let p = 0.6 + i as f64 / letters.len() as f64 * 0.4;
                         spans.push(Span::styled(
                             format!("{ch} "),
-                            Style::default().fg(rgb(c)).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(rgb(art::ramp(p)))
+                                .add_modifier(Modifier::BOLD),
                         ));
                     } else {
-                        let g = art::WAVES_FALLBACK
-                            [(lcg(&mut rng) as usize) % art::WAVES_FALLBACK.len()];
+                        let g = art::NOISE[(lcg(&mut rng) as usize) % art::NOISE.len()];
                         spans.push(Span::styled(
                             format!("{g} "),
-                            Style::default().fg(rgb(art::sink(art::ramp(0.3), 0.55))),
+                            Style::default().fg(rgb(art::sink(art::ramp(0.4), 0.5))),
                         ));
                     }
                 }
-                lines.push(Line::from(spans));
-            }
-
-            // the pool the name rose out of
-            for r in 0..RIPPLE_ROWS {
-                let w = if big {
-                    mark_w
-                } else {
-                    art::WORD.chars().count() * 2
-                };
-                let cells = art::ripple(w, ms / 230.0 + r as f64 * 0.8, r as f64 * 2.1);
-                let fade = 0.35 + r as f64 * 0.3;
-                let spans: Vec<Span> = cells
-                    .into_iter()
-                    .map(|(ch, i)| {
-                        if i < 0.58 {
-                            return Span::raw(" ");
-                        }
-                        let c = art::sink(art::ramp(0.16 + i * 0.34), fade);
-                        Span::styled(ch.to_string(), Style::default().fg(rgb(c)))
-                    })
-                    .collect();
                 lines.push(Line::from(spans));
             }
 
@@ -297,11 +251,11 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress, must_wait: bool) ->
             lines.push(Line::raw(""));
             lines.push(bar_line(bar_high));
             lines.push(Line::raw(""));
+            // Quiet, but there to be read: at the old strength it all but
+            // vanished against the gold above it.
             lines.push(Line::from(Span::styled(
                 fitting_hint(hint, area.width),
-                Style::default()
-                    .fg(rgb(art::sink(art::ramp(0.4), 0.55)))
-                    .add_modifier(Modifier::DIM),
+                Style::default().fg(rgb(art::sink(art::ramp(0.4), 0.3))),
             )));
 
             let h = lines.len() as u16;
