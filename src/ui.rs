@@ -2779,13 +2779,16 @@ mod glyph_tests {
     /// carries — it rendered as a box and there was no way to tell from a
     /// text capture, because the codepoint survives whether or not the font
     /// can draw it.
-    const ALLOWED: &str = "▌▐▸┄❯★●◌◆⌁│└─—…·“”↵→←↑↓▏ ";
+    const ALLOWED: &str = "▌▐▀▄█▸┄━╸❯★●◌◆⌁│└─—…·“”↵→←↑↓▏ ";
 
+    /// Everything that draws: the list, and the wordmark and opening
+    /// screen, which were not checked at all while this read only ui.rs.
     fn ui_source_glyphs() -> Vec<char> {
         let src = include_str!("ui.rs");
         // stop before this module so the allowlist does not test itself
         let body = src.split("mod glyph_tests").next().unwrap();
-        let mut out: Vec<char> = body
+        let all = [body, include_str!("art.rs"), include_str!("splash.rs")].concat();
+        let mut out: Vec<char> = all
             .chars()
             .filter(|c| !c.is_ascii() && !c.is_alphabetic())
             .collect();
