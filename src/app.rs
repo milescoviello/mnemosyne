@@ -334,6 +334,8 @@ pub struct App {
     panes: Vec<crate::live::Pane>,
     /// wsx is worth asking again; the loop does it off the main thread.
     pub want_wsx: bool,
+    /// What `wsx` holds is its answer, not only what it said last run.
+    pub wsx_answered: bool,
 
     /// By path, with the size it was read at: a session that has grown is
     /// read again rather than shown as it was the first time, and replaces
@@ -408,6 +410,7 @@ impl App {
             ask_wsx: false,
             panes: Vec::new(),
             want_wsx: false,
+            wsx_answered: true,
             preview_cache: HashMap::new(),
             matcher: Matcher::new(Config::DEFAULT),
             deep_tx,
@@ -1616,6 +1619,20 @@ impl App {
         // already has one. Tmux is exempt: attaching to the existing session is
         // exactly the right move there, and is what "resume" should mean.
         if target == Target::Here {
+            // What wsx said last run calls a workspace made since archived.
+            // Until it answers again -- a moment -- that is not to be taken
+            // at its word: its agent could be running there.
+            let unsure = !self.wsx_answered
+                && self.current().map(|s| self.resumed(s)).is_some_and(|s| {
+                    matches!(
+                        s.wsx.as_ref().map(|w| &w.status),
+                        Some(crate::wsx::Status::Archived { .. })
+                    )
+                });
+            if unsure {
+                self.status = "asking wsx about this workspace — enter again in a moment".into();
+                return;
+            }
             // The session that would be resumed, not the row: a subagent is
             // never running itself, so asking it let enter on one start a
             // second client on the parent it resumes.
@@ -4549,6 +4566,19 @@ mod logic_tests {
         let tree = format!("{WSX_ROOT}/OS-DEV/shy-daffodil");
         running(&mut a, vec![claude(2794, None, &tree, true)]);
         assert!(a.running_ids().contains("gggggggg-7"));
+    }
+
+    #[test]
+    fn a_workspace_wsx_has_not_answered_about_yet_is_not_taken_for_archived() {
+        let mut a = app();
+        a.wsx_answered = false;
+        on(&mut a, "hhhhhhhh-8"); // archived, as far as the fixture's wsx knows
+        a.do_action(Action::Resume);
+        assert!(a.outcome.is_none(), "resumed on last run's word");
+        assert!(a.status.contains("asking wsx"), "{:?}", a.status);
+        a.wsx_answered = true;
+        a.do_action(Action::Resume);
+        assert!(a.outcome.is_some());
     }
 
     #[test]

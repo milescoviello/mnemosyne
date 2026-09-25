@@ -722,6 +722,7 @@ fn main() -> Result<()> {
     app.ask_wsx = true;
     app.set_wsx(wsx::remembered());
     app.want_wsx = true;
+    app.wsx_answered = false;
     app.show_subagents = has("--subagents");
     app.rebuild();
 
@@ -1043,8 +1044,13 @@ fn run<B: ratatui::backend::Backend>(
             asking_wsx = Some(std::thread::spawn(wsx::load));
         }
         if asking_wsx.as_ref().is_some_and(|h| h.is_finished()) {
-            if let Some(Ok(fresh)) = asking_wsx.take().map(|h| h.join()) {
-                app.set_wsx(fresh);
+            if let Some(h) = asking_wsx.take() {
+                if let Ok(fresh) = h.join() {
+                    app.set_wsx(fresh);
+                }
+                // however it ended: waiting on an answer that is not coming
+                // would hold enter back for good
+                app.wsx_answered = true;
             }
         }
 
