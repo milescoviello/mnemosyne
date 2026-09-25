@@ -164,8 +164,12 @@ fn schema_current(conn: &Connection) -> bool {
     let refs: i64 = conn
         .query_row("SELECT count(*) FROM body_ref", [], |r| r.get(0))
         .unwrap_or(-1);
+    // Counted off FTS5's own one-row-per-document table. Counting `body`
+    // itself walks the whole index -- 25ms here, on every open, and the
+    // index is opened for every search and for the excerpt under the
+    // cursor each time it moves.
     let bodies: i64 = conn
-        .query_row("SELECT count(*) FROM body", [], |r| r.get(0))
+        .query_row("SELECT count(*) FROM body_docsize", [], |r| r.get(0))
         .unwrap_or(-1);
     refs >= 0 && bodies >= 0 && refs == bodies
 }
@@ -317,8 +321,9 @@ impl Index {
         )?;
         conn.execute_batch(BODY_REF)?;
 
-        // Only claim the version once the tables really match it.
-        if !schema_current(&conn) {
+        // Only claim the version once the tables really match it -- which
+        // needs asking again only if they were just made.
+        if (reset || !schema_ok) && !schema_current(&conn) {
             conn.execute_batch(
                 "DROP TABLE IF EXISTS sessions;
                  DROP TABLE IF EXISTS body;
