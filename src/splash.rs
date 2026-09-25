@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 /// costume — so it plays a brief version instead.
 /// Floors, from the config. Its defaults are the values these always were.
 fn floors() -> (Duration, Duration) {
-    let c = crate::config::Config::load();
+    let c = crate::config::get();
     (
         Duration::from_millis(c.splash.floor_cold_ms),
         Duration::from_millis(c.splash.floor_warm_ms),

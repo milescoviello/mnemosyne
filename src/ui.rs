@@ -43,7 +43,7 @@ struct Theme {
 static THEME: std::sync::OnceLock<Theme> = std::sync::OnceLock::new();
 
 fn th() -> &'static Theme {
-    THEME.get_or_init(|| Theme::from_config(&crate::config::Config::load()))
+    THEME.get_or_init(|| Theme::from_config(crate::config::get()))
 }
 
 impl Theme {

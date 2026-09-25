@@ -336,8 +336,12 @@ fn main() -> Result<()> {
     // started from was all they ever saw. A first run restored nothing and
     // said nothing; later ones missed every session since the last browser.
     let answers_and_exits = has("--restore") || has("--reopen");
+    // Read now, before anything takes the screen: whatever it has to say
+    // about the file lands where you can read it.
+    let cfg = config::get();
     let use_splash = interactive
         && !answers_and_exits
+        && cfg.splash.enabled
         && !has("--no-splash")
         && std::env::var_os("MNEMOSYNE_NO_SPLASH").is_none();
 
@@ -706,7 +710,6 @@ fn main() -> Result<()> {
     app.show_subagents = has("--subagents");
     app.rebuild();
 
-    let cfg = config::Config::load();
     if let Some(stops) = &cfg.ramp {
         let parsed: Vec<(u8, u8, u8)> = stops
             .iter()

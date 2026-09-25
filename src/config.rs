@@ -134,29 +134,88 @@ pub fn path() -> std::path::PathBuf {
     crate::index::state_dir().join("config.toml")
 }
 
+/// The config, read once.
+///
+/// The browser, the theme and the splash each used to read it for
+/// themselves, and a complaint about the file came out once for each --
+/// two of them from inside the alternate screen, drawn over the interface
+/// where nothing ever cleared them. `main` asks first, before the screen is
+/// taken, so whatever it has to say is said on the terminal you can read.
+pub fn get() -> &'static Config {
+    static CONFIG: std::sync::OnceLock<Config> = std::sync::OnceLock::new();
+    CONFIG.get_or_init(Config::load)
+}
+
 impl Config {
-    /// Read the config, or the defaults. A malformed file is reported once
-    /// and then ignored: losing your colours is not worth refusing to start.
-    pub fn load() -> Config {
+    /// Read the config, or the defaults. What cannot be used is reported and
+    /// left out: losing your colours is not worth refusing to start.
+    fn load() -> Config {
         let p = path();
         let Ok(raw) = std::fs::read_to_string(&p) else {
             return Config::default();
         };
-        match toml::from_str(&raw) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("mnemosyne: ignoring {}: {e}", p.display());
-                Config::default()
+        let (c, problems) = Config::parse(&raw);
+        for e in problems {
+            eprintln!("mnemosyne: ignoring {e} in {}", p.display());
+        }
+        c
+    }
+
+    /// Everything in `raw` that can be used, and what could not.
+    ///
+    /// One key at a time. A single bad value used to throw the whole file
+    /// away -- so `mouse = "no"` switched `[update] auto = false` back on,
+    /// and the next start replaced the binary it was there to keep.
+    pub fn parse(raw: &str) -> (Config, Vec<String>) {
+        let mut t: toml::Table = match toml::from_str(raw) {
+            Ok(t) => t,
+            Err(e) => return (Config::default(), vec![e.to_string()]),
+        };
+        let mut problems = Vec::new();
+        for (name, keep) in [
+            ("splash", usable::<Splash> as Usable),
+            ("start", usable::<Start>),
+            ("update", usable::<Update>),
+        ] {
+            if let Some(toml::Value::Table(sec)) = t.get(name) {
+                let kept = keep(sec, &format!("{name}."), &mut problems);
+                t.insert(name.into(), toml::Value::Table(kept));
             }
         }
+        let t = usable::<Config>(&t, "", &mut problems);
+        let c = toml::Value::Table(t).try_into().unwrap_or_default();
+        (c, problems)
     }
+}
+
+type Usable = fn(&toml::Table, &str, &mut Vec<String>) -> toml::Table;
+
+/// The keys of `t` that `T` accepts on their own, with the rest reported.
+fn usable<T: serde::de::DeserializeOwned>(
+    t: &toml::Table,
+    at: &str,
+    problems: &mut Vec<String>,
+) -> toml::Table {
+    let mut kept = toml::Table::new();
+    for (k, v) in t {
+        let one = toml::Table::from_iter([(k.clone(), v.clone())]);
+        match toml::Value::Table(one).try_into::<T>() {
+            Ok(_) => {
+                kept.insert(k.clone(), v.clone());
+            }
+            Err(e) => problems.push(format!("{at}{k} ({})", e.message())),
+        }
+    }
+    kept
 }
 
 /// Parse "#rrggbb" or a colour name into RGB.
 pub fn parse_color(s: &str) -> Option<(u8, u8, u8)> {
     let s = s.trim();
     if let Some(hex) = s.strip_prefix('#') {
-        if hex.len() == 6 {
+        // ASCII first: six bytes can be fewer characters, and slicing at two
+        // bytes then cut one in half -- `#aébcd` ended the program.
+        if hex.len() == 6 && hex.is_ascii() {
             let c = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
             return Some((c(0)?, c(2)?, c(4)?));
         }
@@ -216,6 +275,35 @@ mod tests {
         assert!(!c.splash.enabled);
         assert_eq!(c.splash.floor_cold_ms, 1500, "untouched keys stay default");
         assert!(c.start.mouse);
+    }
+
+    #[test]
+    fn one_bad_value_costs_only_itself() {
+        let (c, problems) = Config::parse(
+            "accent = 7\n[start]\nmouse = \"no\"\npreview = false\n[update]\nauto = false\n",
+        );
+        assert!(!c.update.auto, "a typo elsewhere turned updates back on");
+        assert!(!c.start.preview, "the good key beside the bad one was lost");
+        assert!(c.start.mouse, "the bad one falls back to its default");
+        assert!(c.accent.is_none());
+        assert_eq!(problems.len(), 2, "{problems:?}");
+        assert!(
+            problems.iter().any(|p| p.starts_with("start.mouse")),
+            "{problems:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_toml_is_reported_and_defaulted() {
+        let (c, problems) = Config::parse("this is = = not toml");
+        assert!(c.update.auto);
+        assert_eq!(problems.len(), 1);
+    }
+
+    #[test]
+    fn a_colour_with_a_wide_character_is_refused_not_a_crash() {
+        assert_eq!(parse_color("#aébcd"), None);
+        assert_eq!(parse_color("#１２"), None);
     }
 
     #[test]
