@@ -1151,6 +1151,15 @@ impl App {
         self.view.clear();
         self.cursor = 0;
         self.all = fresh;
+        // A pick whose transcript has gone is not a pick. Kept, the header
+        // went on saying "1 picked" while enter, finding nothing picked,
+        // resumed the row under the cursor instead.
+        let present: HashSet<String> = self
+            .all
+            .iter()
+            .map(|s| s.path.to_string_lossy().to_string())
+            .collect();
+        self.selected.retain(|p| present.contains(p));
         self.live = crate::live::live_map();
         // A rescan is when new workspaces' sessions turn up, and archived
         // ones' worktrees go, so it is when wsx is asked again -- behind the
@@ -4315,6 +4324,20 @@ mod logic_tests {
         on(&mut a, "aaaaaaaa-1");
         a.do_action(Action::Resume);
         assert_eq!(resumed_ids(&a), vec!["bbbbbbbb-2"]);
+    }
+
+    #[test]
+    fn a_pick_whose_transcript_went_is_not_picked_any_more() {
+        let mut a = app();
+        a.selected.insert("/p/bbbbbbbb-2.jsonl".into());
+        let fresh: Vec<Session> = a
+            .all
+            .iter()
+            .filter(|s| s.id != "bbbbbbbb-2")
+            .cloned()
+            .collect();
+        a.absorb_rescan(fresh);
+        assert!(a.selected.is_empty(), "the header still counts it");
     }
 
     #[test]
