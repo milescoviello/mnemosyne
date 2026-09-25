@@ -91,6 +91,14 @@ fn date_band(mtime: i64) -> &'static str {
 }
 
 /// A tag the list gives sessions itself, which nobody may give one by hand.
+/// Tags as the filter matches them: as they are shown, `#perf`.
+fn tag_words(tags: &[String]) -> String {
+    tags.iter()
+        .map(|t| format!("#{t}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn is_automatic(tag: &str) -> bool {
     tag.starts_with(crate::wsx::TAG_PREFIX)
 }
@@ -617,7 +625,7 @@ impl App {
                 crate::model::short_cwd(&s.cwd),
                 wsx,
                 s.git_branch,
-                s.tags.join(" "),
+                tag_words(&s.tags),
                 s.last_prompt,
                 s.id
             );
@@ -642,7 +650,9 @@ impl App {
             return 0;
         }
         let s = &self.all[i];
-        let hay = format!("{} {}", s.title(), s.folder());
+        // Tags count toward how good a match is too. Written as they are
+        // shown, `#perf`, so typing what you see finds it.
+        let hay = format!("{} {} {}", s.title(), s.folder(), tag_words(&s.tags));
         let pat = Pattern::parse(
             self.fuzzy.trim(),
             CaseMatching::Ignore,
@@ -663,33 +673,40 @@ impl App {
             }
         }
 
-        // Favourites always float to the top; then the chosen sort; then a
-        // fuzzy-score tiebreak when the user is typing.
-        let scores: HashMap<usize, u32> = if self.fuzzy.trim().is_empty() {
-            HashMap::new()
-        } else {
+        // Favourites float to the top, then the chosen sort -- except while
+        // a filter is being typed, when the best match comes first. Pinned
+        // above it, a favourite that barely matched sat on top, and `/`, a
+        // title, enter, enter resumed the favourite.
+        let filtering = !self.fuzzy.trim().is_empty();
+        let scores: HashMap<usize, u32> = if filtering {
             idx.iter().map(|&i| (i, self.fuzzy_score(i))).collect()
+        } else {
+            HashMap::new()
         };
         let sort = self.sort;
         let all = &self.all;
         idx.sort_by(|&a, &b| {
             let (x, y) = (&all[a], &all[b]);
-            y.favorite
-                .cmp(&x.favorite)
-                .then_with(|| {
-                    let sa = scores.get(&a).copied().unwrap_or(0);
-                    let sb = scores.get(&b).copied().unwrap_or(0);
-                    sb.cmp(&sa)
-                })
-                .then_with(|| match sort {
-                    Sort::Recency => y.mtime.cmp(&x.mtime),
-                    Sort::Size => y.size.cmp(&x.size),
-                    Sort::Entries => y.entries.cmp(&x.entries),
-                    Sort::Duration => y.duration_secs().cmp(&x.duration_secs()),
-                    Sort::Title => x.title().to_lowercase().cmp(&y.title().to_lowercase()),
-                    Sort::Folder => x.cwd.cmp(&y.cwd).then_with(|| y.mtime.cmp(&x.mtime)),
-                    Sort::Tokens => y.total_tokens().cmp(&x.total_tokens()),
-                })
+            let score = || {
+                let sa = scores.get(&a).copied().unwrap_or(0);
+                let sb = scores.get(&b).copied().unwrap_or(0);
+                sb.cmp(&sa)
+            };
+            let pinned = || y.favorite.cmp(&x.favorite);
+            let first = if filtering {
+                score().then_with(pinned)
+            } else {
+                pinned()
+            };
+            first.then_with(|| match sort {
+                Sort::Recency => y.mtime.cmp(&x.mtime),
+                Sort::Size => y.size.cmp(&x.size),
+                Sort::Entries => y.entries.cmp(&x.entries),
+                Sort::Duration => y.duration_secs().cmp(&x.duration_secs()),
+                Sort::Title => x.title().to_lowercase().cmp(&y.title().to_lowercase()),
+                Sort::Folder => x.cwd.cmp(&y.cwd).then_with(|| y.mtime.cmp(&x.mtime)),
+                Sort::Tokens => y.total_tokens().cmp(&x.total_tokens()),
+            })
         });
 
         let mut rows: Vec<Row> = Vec::new();
@@ -733,7 +750,9 @@ impl App {
             // they are their own band: without that the run of pinned rows
             // cuts across the dates and you get "today, yesterday, today,
             // yesterday" as the list crosses back into time order.
-            let banded = self.sort == Sort::Recency;
+            // Nor while filtering, when the list is in order of how well
+            // each matches: the bands repeated and went backwards.
+            let banded = self.sort == Sort::Recency && !filtering;
             let mut band = String::new();
             for &i in &idx {
                 if banded {
@@ -2402,15 +2421,20 @@ impl App {
                         self.rebuild();
                     }
                     KeyCode::Enter => self.input_mode = InputMode::Normal,
+                    // The cursor goes to the best match as the filter
+                    // changes. Left where it was, enter resumed whatever it
+                    // happened to be on.
                     KeyCode::Backspace => {
                         self.fuzzy.pop();
                         self.rebuild();
+                        self.goto_top();
                     }
                     KeyCode::Up => self.move_by(-1),
                     KeyCode::Down => self.move_by(1),
                     KeyCode::Char(c) if !ctrl => {
                         self.fuzzy.push(c);
                         self.rebuild();
+                        self.goto_top();
                     }
                     _ => {}
                 }
@@ -3407,6 +3431,38 @@ mod logic_tests {
         );
         // and what it showed before is not kept beside it
         assert_eq!(a.preview_cache.len(), 1);
+    }
+
+    #[test]
+    fn typing_a_filter_puts_the_best_match_under_the_cursor() {
+        // aaaaaaaa-1 is a favourite. It used to stay pinned on top however
+        // loosely it matched, with the cursor still on it.
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut a = app();
+        a.on_key(KeyEvent::from(KeyCode::Char('/')));
+        for c in "last week".chars() {
+            a.on_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        assert_eq!(a.current().unwrap().title(), "last week");
+        assert!(
+            !a.view.iter().any(|r| matches!(r, Row::Divider(_))),
+            "date bands over a list in match order"
+        );
+        a.on_key(KeyEvent::from(KeyCode::Enter));
+        a.do_action(Action::Resume);
+        let Some(Outcome::Resume { targets, .. }) = &a.outcome else {
+            panic!()
+        };
+        assert_eq!(targets[0].id, "cccccccc-3");
+    }
+
+    #[test]
+    fn a_tag_is_found_as_it_is_shown() {
+        let mut a = app();
+        a.fuzzy = "#eft".into();
+        a.rebuild();
+        assert_eq!(a.item_count(), 1);
+        assert_eq!(a.current().unwrap().id, "cccccccc-3");
     }
 
     #[test]
