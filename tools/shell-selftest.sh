@@ -211,6 +211,34 @@ run_shell() {
         skip "$shell_name: tmux checks" "tmux is not installed"
     fi
 
+    # --- a chat already running under a name that needs quoting
+    # The window's command names the tmux session it attaches to, and that
+    # name is whatever the chat already runs under. tmux allows spaces and
+    # `$(...)` in one; unquoted, the first split it and the second ran.
+    if [ -n "$real_tmux" ]; then
+        "$bin/tmux" kill-server 2>/dev/null
+        rm -f "$tmp/pwned"
+        "$bin/tmux" new-session -d -s 'eft work $(touch pwned)' -c "$tmp/work-a" \
+            "claude --resume 026bcdb5-8d88-4ad7-9f23-58649bf4f353"
+        write_plan "wintmux\t$tmp/work-a\t026bcdb5-8d88-4ad7-9f23-58649bf4f353\t\tdefault\tquoted one\n"
+        : > "$log"
+        (cd "$tmp" && MN_TERM_RUN=1 "$runner" -c "$source_line; mn" >/dev/null 2>&1)
+        # The window is started detached, so give it a moment to have run.
+        local waited=0
+        while [ ! -e "$tmp/pwned" ] && [ "$waited" -lt 30 ]; do
+            sleep 0.1; waited=$((waited + 1))
+        done
+        if [ -e "$tmp/pwned" ]; then
+            bad "$shell_name: a tmux name is never run as a command" "touch ran"
+        else
+            ok "$shell_name: a tmux name is never run as a command"
+        fi
+        has "$shell_name: and the window still goes to it" "attach-session -t" "$(cat "$log")"
+        "$bin/tmux" kill-server 2>/dev/null
+    else
+        skip "$shell_name: a tmux name that needs quoting" "tmux is not installed"
+    fi
+
     # --- nothing is drawn over the browser, and each window is said once
     # Window lines arrive while the browser is still on screen. Anything
     # printed then lands on top of it and vanishes with it -- which fish did

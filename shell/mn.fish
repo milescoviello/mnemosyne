@@ -214,7 +214,9 @@ function __mn_wintmux --description 'Open a resumed session in its own window, r
     set -l name $res[-2]
     set -l state $res[-1]
     set -l ttl $argv[4]
-    set -l term (__mn_term_open "$argv[1]" "exec tmux attach-session -t ="$name)
+    # Quoted: the name is whatever the chat already runs under, and tmux
+    # allows spaces and `(...)` in one.
+    set -l term (__mn_term_open "$argv[1]" "exec tmux attach-session -t "(string escape -- "=$name"))
     or begin
         echo (__mn_opened "$ttl" "tmux $name" $state)" — no terminal to show it in; ctrl+t attaches"
         return 0
@@ -348,7 +350,11 @@ function __mn_term_open --description 'Run a command in a new terminal window; e
     # detached from this shell.
     if command -q osascript
         set -l tmp (mktemp -t mn-open)
-        printf '#!/bin/sh\nrm -f %s\ncd %s\n%s\n' (string escape -- $tmp) (string escape -- $cwd) "$inner" >$tmp
+        # The script is read by /bin/sh, and what this function is handed is
+        # quoted for fish: `string escape` writes `'John\'s'`, which sh cannot
+        # read, so a folder with an apostrophe never opened. sh is given only
+        # words it can read, and the command goes to fish as one of them.
+        printf '#!/bin/sh\nrm -f %s\ncd %s\nexec fish -lc %s\n' (__mn_sh_quote $tmp) (__mn_sh_quote $cwd) (__mn_sh_quote "$inner") >$tmp
         chmod +x $tmp
         osascript -e "tell application \"Terminal\" to do script \"$tmp\"" \
             -e 'tell application "Terminal" to activate' >/dev/null
@@ -356,6 +362,10 @@ function __mn_term_open --description 'Run a command in a new terminal window; e
         return 0
     end
     return 1
+end
+
+function __mn_sh_quote --description 'One word, quoted for /bin/sh'
+    printf "'%s'" (string replace -a "'" "'\\''" -- $argv[1] | string collect)
 end
 
 function __mn_spawn --description 'Start a window that outlives the terminal that asked for it'
