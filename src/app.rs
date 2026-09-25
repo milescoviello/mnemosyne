@@ -335,9 +335,10 @@ pub struct App {
     /// wsx is worth asking again; the loop does it off the main thread.
     pub want_wsx: bool,
 
-    /// Keyed on the size as well as the path, so a session that has grown
-    /// since is read again rather than shown as it was the first time.
-    preview_cache: HashMap<(String, u64), Vec<Turn>>,
+    /// By path, with the size it was read at: a session that has grown is
+    /// read again rather than shown as it was the first time, and replaces
+    /// what was kept for it rather than being kept beside it.
+    preview_cache: HashMap<String, (u64, Vec<Turn>)>,
     matcher: Matcher,
     deep_tx: Sender<DeepResult>,
     pub deep_rx: Receiver<DeepResult>,
@@ -934,12 +935,14 @@ impl App {
         let size = std::fs::metadata(path)
             .map(|m| m.len())
             .unwrap_or(self.all[i].size);
-        let key = (path.to_string_lossy().to_string(), size);
-        if let Some(v) = self.preview_cache.get(&key) {
-            return v.clone();
+        let key = path.to_string_lossy().to_string();
+        if let Some((at, v)) = self.preview_cache.get(&key) {
+            if *at == size {
+                return v.clone();
+            }
         }
         let turns = preview::tail_turns(&self.all[i], want);
-        self.preview_cache.insert(key, turns.clone());
+        self.preview_cache.insert(key, (size, turns.clone()));
         turns
     }
 
@@ -3365,6 +3368,8 @@ mod logic_tests {
             "{:?}",
             turns.iter().map(|t| &t.text).collect::<Vec<_>>()
         );
+        // and what it showed before is not kept beside it
+        assert_eq!(a.preview_cache.len(), 1);
     }
 
     #[test]
