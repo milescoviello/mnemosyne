@@ -710,10 +710,13 @@ fn main() -> Result<()> {
         live::live_map(),
         restore_model,
     );
-    // Asked once now, and again on every rescan. About twenty milliseconds,
-    // and never more than half a second, whatever state wsx is in.
+    // What wsx said last time, to draw the first frame with; it is asked
+    // again behind the list, and on every rescan. Waiting for its answer
+    // before drawing anything was sixty milliseconds -- three quarters of a
+    // start -- and workspaces seldom change between two of them.
     app.ask_wsx = true;
-    app.set_wsx(wsx::load());
+    app.set_wsx(wsx::remembered());
+    app.want_wsx = true;
     app.show_subagents = has("--subagents");
     app.rebuild();
 
@@ -945,6 +948,7 @@ fn run<B: ratatui::backend::Backend>(
 ) -> Result<()> {
     let mut last_live = Instant::now();
     let mut injected = false;
+    let mut asking_wsx: Option<std::thread::JoinHandle<wsx::State>> = None;
     loop {
         term.draw(|f| ui::draw(f, app))?;
 
@@ -998,6 +1002,20 @@ fn run<B: ratatui::backend::Backend>(
         // does for a window: nothing about it needs this terminal.
         if !app.to_jump.is_empty() {
             app.finish_jumps(wsx::load(), wsx::jump);
+        }
+
+        // wsx, asked off this thread and folded in when it answers.
+        if app.want_wsx && asking_wsx.is_none() {
+            app.want_wsx = false;
+            asking_wsx = Some(std::thread::spawn(wsx::load));
+        }
+        if asking_wsx.as_ref().is_some_and(|h| h.is_finished()) {
+            if let Some(Ok(fresh)) = asking_wsx.take().map(|h| h.join()) {
+                app.set_wsx(fresh);
+                // which agents are wsx's depends on it too
+                app.apply_overlay();
+                app.rebuild();
+            }
         }
 
         // The rescan started behind the list; fold it in the moment it

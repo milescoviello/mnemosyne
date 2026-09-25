@@ -55,7 +55,7 @@ pub struct Ref {
 }
 
 /// One line of `wsx workspace list`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Workspace {
     pub repo: String,
     pub slug: String,
@@ -249,7 +249,8 @@ impl Status {
 }
 
 /// What this machine's wsx has to say about a folder.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct State {
     /// Where its worktrees are, if there is a home to find them under.
     pub root: Option<String>,
@@ -366,8 +367,46 @@ fn jump_with(wsx: &[&str], j: &Jump, macos: bool) -> Result<(), String> {
 }
 
 /// Ask this machine's wsx what is live, and where each repo lives.
+///
+/// An answer is kept, for the browser to start from next time: wsx takes
+/// about sixty milliseconds to say, and a start that waited for it spent
+/// three quarters of its time doing so.
 pub fn load() -> State {
-    load_with(&["wsx"])
+    let state = load_with(&["wsx"]);
+    if state.available {
+        remember(&state, &cache_path());
+    }
+    state
+}
+
+fn cache_path() -> std::path::PathBuf {
+    crate::index::state_dir().join("wsx.json")
+}
+
+/// What wsx said last time, to draw with until it answers again. Where its
+/// worktrees are is read afresh: that is the environment's to say, not the
+/// cache's.
+pub fn remembered() -> State {
+    remembered_at(&cache_path())
+}
+
+fn remembered_at(p: &std::path::Path) -> State {
+    let mut s: State = std::fs::read(p)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    s.root = worktrees_root();
+    s
+}
+
+fn remember(state: &State, p: &std::path::Path) {
+    let Ok(body) = serde_json::to_vec(state) else {
+        return;
+    };
+    let tmp = p.with_extension(format!("json.tmp.{}", std::process::id()));
+    if std::fs::write(&tmp, body).is_ok() && std::fs::rename(&tmp, p).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 /// `load`, with the command that stands for wsx handed in.
@@ -832,6 +871,23 @@ echo 'no such command' >&2; exit 1"#,
             "waited {:?} for something that was given 100ms",
             t.elapsed()
         );
+    }
+
+    #[test]
+    fn what_wsx_said_is_there_to_start_from_next_time() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("wsx.json");
+        assert!(!remembered_at(&p).available, "nothing said yet");
+        let said = known(vec![listed(
+            "OS-DEV",
+            "shy-daffodil",
+            &format!("{ROOT}/OS-DEV/shy-daffodil"),
+        )]);
+        remember(&said, &p);
+        let back = remembered_at(&p);
+        assert!(back.available);
+        assert_eq!(back.workspaces, said.workspaces);
+        assert_eq!(back.repos, said.repos);
     }
 
     #[test]

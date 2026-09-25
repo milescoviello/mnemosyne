@@ -329,6 +329,8 @@ pub struct App {
     /// the same binary can switch a running wsx to another workspace, or open
     /// a terminal on the desktop of whoever runs the suite.
     pub ask_wsx: bool,
+    /// wsx is worth asking again; the loop does it off the main thread.
+    pub want_wsx: bool,
 
     /// Keyed on the size as well as the path, so a session that has grown
     /// since is read again rather than shown as it was the first time.
@@ -400,6 +402,7 @@ impl App {
             reopen: Vec::new(),
             wsx: crate::wsx::State::default(),
             ask_wsx: false,
+            want_wsx: false,
             preview_cache: HashMap::new(),
             matcher: Matcher::new(Config::DEFAULT),
             deep_tx,
@@ -1140,9 +1143,10 @@ impl App {
         self.all = fresh;
         self.live = crate::live::live_map();
         // A rescan is when new workspaces' sessions turn up, and archived
-        // ones' worktrees go, so it is when wsx is asked again.
+        // ones' worktrees go, so it is when wsx is asked again -- behind the
+        // list: asked here, the browser stopped for as long as wsx took.
         if self.ask_wsx {
-            self.wsx = crate::wsx::load();
+            self.want_wsx = true;
         }
         self.recompute_totals();
         self.apply_overlay();
