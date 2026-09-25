@@ -27,6 +27,12 @@ use ratatui::Frame;
 
 /// Resolved once from the config, so the palette can follow a desktop theme
 /// without a rebuild. Missing keys keep the values the tool shipped with.
+///
+/// The defaults are the gold leaf's: gold for the record and its age, and
+/// three colours beside it that each mean one thing. Lapis is your own ink
+/// -- tags, notes, what you said. Cypress is alive: running now, or a wsx
+/// workspace still there to go to. Cinnabar, the red ochre painted into
+/// Greek inscriptions, is what has been lost. Everything else is stone.
 struct Theme {
     accent: Color,
     chrome: Color,
@@ -56,16 +62,16 @@ impl Theme {
                 .unwrap_or(fallback)
         };
         Theme {
-            accent: pick(&c.accent, Color::Cyan),
-            chrome: pick(&c.chrome, Color::DarkGray),
-            fav: pick(&c.favorite, Color::Yellow),
-            live: pick(&c.live, Color::Green),
-            tag: pick(&c.tag, Color::Magenta),
-            text: pick(&c.text, Color::Gray),
-            bright: pick(&c.bright, Color::White),
-            gone: pick(&c.gone, Color::Rgb(150, 84, 84)),
-            band: pick(&c.band, Color::Rgb(18, 42, 58)),
-            panel: pick(&c.panel, Color::Rgb(9, 17, 28)),
+            accent: pick(&c.accent, Color::Rgb(134, 176, 142)), // cypress
+            chrome: pick(&c.chrome, Color::Rgb(125, 114, 99)),  // worn stone
+            fav: pick(&c.favorite, Color::Rgb(245, 197, 66)),   // a gold star
+            live: pick(&c.live, Color::Rgb(134, 176, 142)),     // cypress
+            tag: pick(&c.tag, Color::Rgb(138, 162, 230)),       // lapis
+            text: pick(&c.text, Color::Rgb(203, 194, 176)),     // limestone
+            bright: pick(&c.bright, Color::Rgb(245, 239, 227)), // marble
+            gone: pick(&c.gone, Color::Rgb(208, 101, 75)),      // cinnabar
+            band: pick(&c.band, Color::Rgb(43, 34, 21)),
+            panel: pick(&c.panel, Color::Rgb(18, 14, 10)),
         }
     }
 }
@@ -1828,6 +1834,31 @@ mod render_tests {
             }
         }
         v
+    }
+
+    #[test]
+    fn the_example_config_ships_the_default_colours() {
+        // It says deleting a line brings back the default, which is only
+        // true while the two agree.
+        let example: crate::config::Config = toml::from_str(crate::config::EXAMPLE).unwrap();
+        let (a, b) = (
+            Theme::from_config(&example),
+            Theme::from_config(&Default::default()),
+        );
+        for (name, x, y) in [
+            ("accent", a.accent, b.accent),
+            ("chrome", a.chrome, b.chrome),
+            ("favorite", a.fav, b.fav),
+            ("live", a.live, b.live),
+            ("tag", a.tag, b.tag),
+            ("text", a.text, b.text),
+            ("bright", a.bright, b.bright),
+            ("gone", a.gone, b.gone),
+            ("band", a.band, b.band),
+            ("panel", a.panel, b.panel),
+        ] {
+            assert_eq!(x, y, "{name} in the example is not the default");
+        }
     }
 
     #[test]
