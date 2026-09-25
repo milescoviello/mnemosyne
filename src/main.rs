@@ -323,7 +323,7 @@ fn main() -> Result<()> {
 
     if has("--refresh") {
         let t = Instant::now();
-        let s = index::refresh(include_subagents)?;
+        let s = index::rebuild(include_subagents)?;
         println!(
             "indexed {} transcripts ({} subagent) in {:.2}s",
             s.len(),
@@ -1029,6 +1029,7 @@ fn run<B: ratatui::backend::Backend>(
     let mut last_live = Instant::now();
     let mut injected = false;
     let mut asking_wsx: Option<std::thread::JoinHandle<wsx::State>> = None;
+    let mut rebuilding = false;
     loop {
         if signalled().is_some() {
             return Ok(());
@@ -1116,7 +1117,28 @@ fn run<B: ratatui::backend::Backend>(
         if indexing.as_ref().is_some_and(|h| h.is_finished()) {
             if let Some(h) = indexing.take() {
                 app.indexing = false;
-                if let Ok(Ok(fresh)) = h.join() {
+                let result = h.join();
+                if rebuilding {
+                    rebuilding = false;
+                    // The marks are read again with it: `R` is for when
+                    // something looks wrong. What happened to a file that
+                    // could not be read goes to the status line and is
+                    // said again after, not printed onto the browser.
+                    match result {
+                        Ok(Ok(fresh)) => {
+                            let (meta, said) = meta::Meta::load_quietly();
+                            app.meta = meta;
+                            app.absorb_rescan(fresh);
+                            app.status = app.reindex_message();
+                            if let Some(said) = said {
+                                app.status = said.clone();
+                                app.notes.push(said);
+                            }
+                        }
+                        Ok(Err(e)) => app.status = format!("reindexing failed: {e}"),
+                        Err(_) => app.status = "reindexing failed".into(),
+                    }
+                } else if let Ok(Ok(fresh)) = result {
                     app.absorb_rescan(fresh);
                 }
             }
@@ -1151,20 +1173,15 @@ fn run<B: ratatui::backend::Backend>(
             }
         }
 
+        // `R`: every transcript read again, behind the list rather than in
+        // front of it -- a rebuild takes a second or more, and the browser
+        // stopped for all of it. A rescan already going is superseded; the
+        // two writing at once is safe.
         if app.want_refresh {
             app.want_refresh = false;
-            let fresh = index::refresh(true)?;
-            // Said in the status line and again once the browser has
-            // closed: printed, it went on the browser, and the next frame
-            // wiped it before anyone learned where the file went.
-            let (meta, said) = meta::Meta::load_quietly();
-            app.meta = meta;
-            app.absorb_rescan(fresh);
-            app.status = app.reindex_message();
-            if let Some(said) = said {
-                app.status = said.clone();
-                app.notes.push(said);
-            }
+            app.indexing = true;
+            rebuilding = true;
+            *indexing = Some(std::thread::spawn(|| index::rebuild(true)));
         }
 
         // keep the running/not-running markers honest without re-reading disk

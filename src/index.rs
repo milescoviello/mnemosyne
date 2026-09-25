@@ -801,6 +801,17 @@ pub fn refresh(include_subagents: bool) -> Result<Vec<Session>> {
     refresh_with_progress(include_subagents, None)
 }
 
+/// Read every transcript again, whether it changed or not.
+///
+/// What `--refresh` and `R` promise: a rebuild, for when something looks
+/// wrong. They were ordinary refreshes, which skip every file whose size
+/// and time are as recorded -- so whatever was wrong in its row stayed
+/// wrong, and only deleting the cache by hand put it right.
+pub fn rebuild(include_subagents: bool) -> Result<Vec<Session>> {
+    let idx = Index::open()?;
+    refresh_in(idx, scan::discover(include_subagents), None, true)
+}
+
 pub fn refresh_with_progress(
     include_subagents: bool,
     progress: Option<Progress>,
@@ -818,7 +829,12 @@ pub fn refresh_with_progress(
     }
     let _finish = Finish(progress.clone());
     let idx = Index::open()?;
-    refresh_in(idx, scan::discover(include_subagents), progress.as_ref())
+    refresh_in(
+        idx,
+        scan::discover(include_subagents),
+        progress.as_ref(),
+        false,
+    )
 }
 
 /// A refresh against a given index and set of transcripts.
@@ -826,10 +842,12 @@ fn refresh_in(
     mut idx: Index,
     found: Vec<(PathBuf, bool, Option<String>)>,
     progress: Option<&Progress>,
+    everything: bool,
 ) -> Result<Vec<Session>> {
     use std::sync::atomic::Ordering;
 
-    let stale = idx.stale;
+    // Read afresh, as though an older scanner had written every row.
+    let stale = idx.stale || everything;
     let cached = idx.load()?;
     if let Some(p) = &progress {
         p.total.store(found.len(), Ordering::Relaxed);
@@ -1564,8 +1582,24 @@ mod pipeline_tests {
 
         // untouched, and the scanner is the same: nothing to rewrite
         let idx = Index::open_at(&db).unwrap();
-        refresh_in(idx, vec![(path.clone(), false, None)], None).unwrap();
+        refresh_in(idx, vec![(path.clone(), false, None)], None, false).unwrap();
         assert_eq!(title(&db), "from before");
+
+        // unless asked to rebuild, which is what --refresh and R are for
+        let idx = Index::open_at(&db).unwrap();
+        refresh_in(idx, vec![(path.clone(), false, None)], None, true).unwrap();
+        assert_eq!(
+            title(&db),
+            "zebra came first",
+            "a rebuild kept the wrong row"
+        );
+        Connection::open(&db)
+            .unwrap()
+            .execute(
+                "UPDATE sessions SET first_prompt='from before' WHERE path=?1",
+                [&key],
+            )
+            .unwrap();
 
         // an older scanner's rows are rewritten, file changed or not
         Connection::open(&db)
@@ -1574,7 +1608,7 @@ mod pipeline_tests {
             .unwrap();
         let idx = Index::open_at(&db).unwrap();
         assert!(idx.stale);
-        refresh_in(idx, vec![(path, false, None)], None).unwrap();
+        refresh_in(idx, vec![(path, false, None)], None, false).unwrap();
         assert_eq!(title(&db), "zebra came first");
     }
 
@@ -1593,7 +1627,7 @@ mod pipeline_tests {
         drop(f);
 
         let idx = Index::open_at(&db).unwrap();
-        let got = refresh_in(idx, vec![(path, false, None)], None)
+        let got = refresh_in(idx, vec![(path, false, None)], None, false)
             .expect("an unwritable cache stopped the refresh");
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].user_msgs, 2, "the new line was read all the same");
