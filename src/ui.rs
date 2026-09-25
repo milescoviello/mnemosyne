@@ -7,8 +7,8 @@
 //! * An edge of gold runs down the left, coloured on the ramp by how old each
 //!   session is — fresh leaf for today, tarnished bronze for last year. Age
 //!   becomes something you see rather than read.
-//! * The name in the header is cut into a chip of the same gold the
-//!   opening screen draws its mark in.
+//! * The header carries the opening screen's mark in miniature, in the top
+//!   left corner, beside the column headings.
 //! * Beside the gold, three colours that each mean one thing: lapis for your
 //!   own marks, cypress for anything alive, cinnabar for anything lost.
 //! * Rules are dotted and fade out rather than cross the screen. There are
@@ -80,6 +80,8 @@ impl Theme {
 }
 
 const MARGIN: usize = 2;
+/// Columns the corner mark takes, and the one between it and what follows.
+const CORNER: usize = 5 + 1;
 /// margin + gutter + gap + cursor + gap + marker + gap
 const PREFIX: usize = MARGIN + 1 + 1 + 1 + 1 + 1 + 1;
 
@@ -266,6 +268,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     let cols = Cols::new(area.width as usize, app.has_wsx());
 
+    // The mark in miniature: three rows down the corner, across the header,
+    // the line under it and the column headings, which start to its right.
+    // Only where all three rows are there to hold it; a terminal a few
+    // lines high gives some of them no height, and the mark would land on
+    // whatever came next.
+    let corner = rows[..3].iter().all(|r| r.height == 1) && area.width as usize > PREFIX;
+
     draw_wordmark(f, app, rows[0]);
     // The blank line under the wordmark is where the reopen offer goes, so
     // an offer never pushes the list around: it fills air that was there
@@ -277,9 +286,20 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // on top of another: with the offer up, clicking a column heading hit
     // the Reopen button nobody could see, and opened a window for each.
     if !app.reopen.is_empty() && rows[1].height > 0 {
-        draw_reopen(f, app, rows[1]);
+        let indent = MARGIN + if corner { CORNER } else { 0 };
+        draw_reopen(f, app, rows[1], indent);
     }
     draw_colheads(f, app, &cols, rows[2]);
+    if corner {
+        let mark = art::corner();
+        let at = Rect {
+            x: area.x + MARGIN as u16,
+            y: rows[0].y,
+            width: mark.width as u16,
+            height: mark.height() as u16,
+        };
+        f.render_widget(Paragraph::new(mark.lines(&art::Light::STILL)), at);
+    }
     draw_list(f, app, &cols, rows[3]);
     if rail > 0 {
         draw_rail(f, app, rows[4], cols.preview == 0);
@@ -476,7 +496,9 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
 /// `None` for a hint that is there to be read rather than pressed.
 type Button = (&'static str, &'static str, Option<Action>);
 
-fn draw_reopen(f: &mut Frame, app: &mut App, area: Rect) {
+/// `indent` is where the line starts: past the corner mark, when it is
+/// drawn beside it.
+fn draw_reopen(f: &mut Frame, app: &mut App, area: Rect, indent: usize) {
     let n = app.reopen.len();
     let what = if n == 1 {
         "1 session was".to_string()
@@ -519,7 +541,7 @@ fn draw_reopen(f: &mut Frame, app: &mut App, area: Rect) {
     ];
 
     let room = area.width as usize;
-    let fixed = MARGIN + 2 + 3; // margin, marker, the gap before the buttons
+    let fixed = indent + 2 + 3; // indent, marker, the gap before the buttons
     let width_of = |b: &[Button]| -> usize { b.iter().map(|(k, l, _)| width(k) + width(l)).sum() };
 
     let mut chosen: Option<(String, &[Button])> = None;
@@ -557,14 +579,14 @@ fn draw_reopen(f: &mut Frame, app: &mut App, area: Rect) {
     let dim = Style::default().fg(th().chrome);
 
     let mut spans = vec![
-        Span::raw(" ".repeat(MARGIN)),
+        Span::raw(" ".repeat(indent)),
         // Hollow, not solid: `●` means running *now* everywhere else in this
         // interface, and these are exactly the sessions that are not.
         Span::styled("◌ ", Style::default().fg(th().live)),
         Span::styled(head.clone(), Style::default().fg(th().text)),
         Span::raw("   "),
     ];
-    let mut x = area.x + MARGIN as u16 + 2 + width(&head) as u16 + 3;
+    let mut x = area.x + indent as u16 + 2 + width(&head) as u16 + 3;
 
     app.hits.banner_y = Some(area.y);
     for (k, label, action) in buttons {
@@ -585,26 +607,6 @@ fn draw_reopen(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// The name, cut dark into a chip of the gold the opening screen's mark is
-/// drawn in, lit from the left.
-fn chip() -> Vec<Span<'static>> {
-    let letters: Vec<char> = art::GREEK.chars().collect();
-    let n = letters.len() + 1;
-    let gold = |i: usize| rgb(art::ramp(0.86 - 0.22 * i as f64 / n as f64));
-    let mut spans = vec![Span::styled("▐", Style::default().fg(gold(0)))];
-    for (i, ch) in letters.iter().enumerate() {
-        spans.push(Span::styled(
-            ch.to_string(),
-            Style::default()
-                .fg(rgb(art::ramp(0.2)))
-                .bg(gold(i + 1))
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    spans.push(Span::styled("▌", Style::default().fg(gold(n))));
-    spans
-}
-
 /// Who said a turn, and in what: your words in your own ink, Claude's in
 /// the gold of the record.
 fn speaker(role: &str) -> (&'static str, Color) {
@@ -615,10 +617,10 @@ fn speaker(role: &str) -> (&'static str, Color) {
     }
 }
 
-/// The name, and on the right what the list is showing.
+/// On the right, what the list is showing. The left is kept clear for the
+/// corner mark, which is drawn over it.
 fn draw_wordmark(f: &mut Frame, app: &App, area: Rect) {
-    let mut spans = vec![Span::raw(" ".repeat(MARGIN))];
-    spans.extend(chip());
+    let mut spans = vec![Span::raw(" ".repeat(MARGIN + CORNER))];
 
     // The right side is built as separate pieces so it can be thinned rather
     // than truncated: a narrow terminal drops whole facts, worst-first,
@@ -1927,32 +1929,78 @@ mod render_tests {
         }
     }
 
+    /// The corner mark as a terminal draws it, a row at a time, with the
+    /// column after it that keeps everything else off it.
+    fn mark_rows() -> Vec<String> {
+        art::corner()
+            .lines(&art::Light::STILL)
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+                    + " "
+            })
+            .collect()
+    }
+
+    fn corner_of(rows: &[String]) -> Vec<String> {
+        rows.iter()
+            .take(3)
+            .map(|r| r.chars().skip(MARGIN).take(CORNER).collect())
+            .collect()
+    }
+
     #[test]
-    fn the_wordmark_never_collides_with_the_counts() {
+    fn the_mark_sits_in_the_corner_and_nothing_runs_into_it() {
         // The header used to read "mnemosyne331 sessions" once the token
-        // total made the right-hand side too long to fit.
+        // total made the right-hand side too long to fit; the counts must
+        // keep clear of the mark the same way.
         let mut a = app();
         for (w, h) in sizes() {
-            if h < 4 {
+            if h < 10 {
                 continue;
             }
             let rows = render(&mut a, w, h);
-            let top = &rows[0];
-            let name = format!("{}▌", art::GREEK);
-            // Wherever there is a header at all it has room for the name, so
-            // the name must be there: a test that only looks when it finds
-            // it passes on a header that lost it. A terminal a few rows high
-            // gives the header no row.
-            let Some(i) = top.find(&name) else {
-                assert!(h < 10, "{w}x{h}: no name in the header: {top:?}");
-                continue;
-            };
-            let after = &top[i + name.len()..];
-            assert!(
-                after.is_empty() || after.starts_with(' '),
-                "{w}x{h}: header ran together: {top:?}"
-            );
+            assert_eq!(corner_of(&rows), mark_rows(), "{w}x{h}: {:#?}", &rows[..3]);
         }
+    }
+
+    #[test]
+    fn the_mark_is_whole_or_not_there() {
+        // Three rows or none, and those three the header, the line under
+        // it and the column headings: half a mark in the corner of a
+        // four-line terminal would sit on the list.
+        let mut a = app();
+        for (w, h) in sizes() {
+            let rows = render(&mut a, w, h);
+            if rows.len() < 3 {
+                continue;
+            }
+            let corner = corner_of(&rows);
+            if corner == mark_rows() {
+                assert!(rows[2].contains("AGE"), "{w}x{h}: {rows:#?}");
+            } else {
+                assert!(
+                    corner.iter().all(|r| !r.contains(['▀', '▄', '█'])),
+                    "{w}x{h}: part of a mark: {rows:#?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_offer_starts_past_the_mark() {
+        let mut a = app();
+        offer(&mut a, 2);
+        let rows = render(&mut a, 120, 30);
+        assert_eq!(corner_of(&rows)[1], mark_rows()[1]);
+        assert!(
+            rows[1].chars().nth(MARGIN + CORNER) == Some('◌'),
+            "{:?}",
+            rows[1]
+        );
     }
 
     #[test]
@@ -2044,8 +2092,10 @@ mod render_tests {
         let mut a = app();
         let rows = render(&mut a, 120, 30);
         assert!(!rows.iter().any(|r| r.contains("before the reboot")));
+        // past the corner mark, which takes the start of it
+        let rest: String = rows[1].chars().skip(MARGIN + CORNER).collect();
         assert!(
-            rows[1].trim().is_empty(),
+            rest.trim().is_empty(),
             "the line under the wordmark should stay empty: {:?}",
             rows[1]
         );

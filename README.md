@@ -50,9 +50,10 @@ before the far side rather than running a hard line across the terminal.
 They appear only when sorting by recency, where time order makes them mean
 something.
 
-The name in the header is a **chip of gold** with ΜΝΗΜΟΣΥΝΗ cut into it, in
-the gold of the [opening screen](#the-opening-animation)'s mark. No borders
-anywhere; structure comes from alignment.
+The header carries the [opening screen](#the-opening-animation)'s **mark in
+miniature**, a spiral five cells across in the top left corner, three rows
+down beside the column headings. It is a symbol, not the name spelled out.
+No borders anywhere; structure comes from alignment.
 
 At a wide terminal a title column alone leaves a sixty-column void in every
 row, so the leftover space becomes a **LEFT OFF** column carrying the last
@@ -741,7 +742,7 @@ terminals that `s` will sort by, and each session's own count sits in the
 rail:
 
 ```
-  ▐ΜΝΗΜΟΣΥΝΗ▌                      331 sessions · 90.72b tokens · ●2 live · recency
+                                   331 sessions · 90.72b tokens · ●2 live · recency
 ```
 
 The header total is deliberately **not** filtered — it is a property of the

@@ -27,9 +27,6 @@
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 
-/// The name as the header spells it.
-pub const GREEK: &str = "ΜΝΗΜΟΣΥΝΗ";
-
 /// A square spiral `n` cells a side: its cells in order from the outer end
 /// to the centre, a cell of gap between each turn and the next. `n` is one
 /// more than a multiple of four, which is what lands it on the centre.
@@ -216,6 +213,12 @@ impl Light {
 /// a cell.
 const SIZES: [(usize, usize); 3] = [(13, 2), (13, 1), (9, 1)];
 
+/// The mark in miniature, for the corner of the list: a spiral five cells a
+/// side, the smallest that still turns in on itself, three rows tall.
+pub fn corner() -> Mark {
+    Mark::new(5, 1)
+}
+
 /// The largest mark that fits in `width` columns and `height` rows, or None
 /// when even the smallest would not.
 pub fn mark_for(width: usize, height: usize) -> Option<Mark> {
@@ -381,7 +384,7 @@ mod tests {
 
     #[test]
     fn the_spiral_is_one_path_that_never_touches_itself() {
-        for n in [9, 13] {
+        for n in [5, 9, 13] {
             let path = spiral(n);
             let set: std::collections::HashSet<_> = path.iter().copied().collect();
             assert_eq!(set.len(), path.len(), "{n}: a cell twice");
