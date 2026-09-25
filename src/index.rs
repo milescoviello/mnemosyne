@@ -118,6 +118,21 @@ const BODY_REF: &str = "CREATE TABLE IF NOT EXISTS body_ref (
     rid  INTEGER NOT NULL
 )";
 
+/// Say the cache cannot be used -- once, however often it is opened.
+///
+/// It is opened for every search, and in the browser for the excerpt under
+/// the cursor each time it moves. A cache that could not be used said so
+/// every time, on stderr, which is the screen the browser is drawn on.
+/// Returns whether this was the time it was said.
+fn say_unusable(why: &str) -> bool {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    eprintln!("mnemosyne: cache unusable ({why}) — running without it");
+    true
+}
+
 /// Whether opening the cache failed because the file is not a sound
 /// database -- the one failure that deleting it fixes.
 fn is_corrupt(e: &anyhow::Error) -> bool {
@@ -185,7 +200,7 @@ impl Index {
             // from under that instance threw away everything it went on to
             // write, while its commits kept reporting success.
             Err(first) if !is_corrupt(&first) => {
-                eprintln!("mnemosyne: cache unusable ({first}) — running without it");
+                say_unusable(&first.to_string());
                 Index::open_memory()
             }
             Err(first) => {
@@ -195,9 +210,7 @@ impl Index {
                 match Index::open_at(&path) {
                     Ok(i) => Ok(i),
                     Err(second) => {
-                        eprintln!(
-                            "mnemosyne: cache unusable ({first}; after reset: {second}) — running without it"
-                        );
+                        say_unusable(&format!("{first}; after reset: {second}"));
                         Index::open_memory()
                     }
                 }
@@ -898,6 +911,13 @@ mod tests {
             .unwrap();
         assert_eq!(idx.text_rows().unwrap(), 0);
         assert_eq!(idx.rowid_map_len().unwrap(), 0, "the map kept a dead entry");
+    }
+
+    #[test]
+    fn a_cache_that_cannot_be_used_says_so_once() {
+        assert!(say_unusable("the first time"));
+        assert!(!say_unusable("and not again"));
+        assert!(!say_unusable("nor again"));
     }
 
     #[test]
