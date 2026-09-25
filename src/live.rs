@@ -47,20 +47,23 @@ pub const fn detection_supported() -> bool {
 /// `-r` with no argument is normal (it opens Claude's own picker), so a value
 /// is only taken when it actually looks like a session id — otherwise the
 /// next flag would be swallowed as one.
+///
+/// Which session a process is writing to is what matters. `--session-id`
+/// names it outright. `--fork-session` means it is not the one resumed --
+/// the fork gets an id of its own -- so the one resumed is not running.
 pub fn parse_claude_args(args: &[String]) -> (Option<String>, Option<String>) {
     let mut resume_id = None;
+    let mut session_id = None;
+    let mut fork = false;
     let mut model = None;
+    let uuid = |v: Option<&str>| v.filter(|v| looks_like_uuid(v)).map(str::to_string);
     for (i, a) in args.iter().enumerate() {
         let a = a.as_str();
         let next = args.get(i + 1).map(|s| s.as_str());
         match a {
-            "--resume" | "-r" => {
-                if let Some(v) = next {
-                    if looks_like_uuid(v) {
-                        resume_id = Some(v.to_string());
-                    }
-                }
-            }
+            "--resume" | "-r" => resume_id = uuid(next).or(resume_id),
+            "--session-id" => session_id = uuid(next).or(session_id),
+            "--fork-session" => fork = true,
             "--model" => {
                 if let Some(v) = next {
                     model = Some(v.to_string());
@@ -68,16 +71,17 @@ pub fn parse_claude_args(args: &[String]) -> (Option<String>, Option<String>) {
             }
             _ => {
                 if let Some(v) = a.strip_prefix("--resume=") {
-                    if looks_like_uuid(v) {
-                        resume_id = Some(v.to_string());
-                    }
+                    resume_id = uuid(Some(v)).or(resume_id);
+                } else if let Some(v) = a.strip_prefix("--session-id=") {
+                    session_id = uuid(Some(v)).or(session_id);
                 } else if let Some(v) = a.strip_prefix("--model=") {
                     model = Some(v.to_string());
                 }
             }
         }
     }
-    (resume_id, model)
+    let id = session_id.or(if fork { None } else { resume_id });
+    (id, model)
 }
 
 /// The parent pid out of `/proc/<pid>/stat`.
@@ -421,6 +425,37 @@ mod tests {
         );
         assert_eq!(resume_id_in("\"exec claude\""), None);
         assert_eq!(resume_id_in(""), None);
+    }
+
+    #[test]
+    fn a_fork_is_not_the_session_it_was_forked_from() {
+        let id = "026bcdb5-8d88-4ad7-9f23-58649bf4f353";
+        let other = "11112222-3333-4444-5555-666677778888";
+        let v = |s: &str| s.split(' ').map(str::to_string).collect::<Vec<_>>();
+        assert_eq!(
+            parse_claude_args(&v(&format!("claude --resume {id} --fork-session"))).0,
+            None
+        );
+        assert_eq!(
+            parse_claude_args(&v(&format!("claude --session-id {other}")))
+                .0
+                .as_deref(),
+            Some(other)
+        );
+        assert_eq!(
+            parse_claude_args(&v(&format!(
+                "claude --resume {id} --fork-session --session-id={other}"
+            )))
+            .0
+            .as_deref(),
+            Some(other)
+        );
+        assert_eq!(
+            parse_claude_args(&v(&format!("claude --resume {id}")))
+                .0
+                .as_deref(),
+            Some(id)
+        );
     }
 
     #[test]
