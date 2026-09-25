@@ -75,8 +75,17 @@ fn find_ci(hay: &[u8], needle: &[u8]) -> Option<usize> {
 /// Turn a raw JSON line into something readable around the hit.
 fn snippet(line: &[u8], at: usize) -> String {
     const PAD: usize = 90;
-    let lo = at.saturating_sub(PAD);
-    let hi = (at + PAD).min(line.len());
+    let mut lo = at.saturating_sub(PAD);
+    let mut hi = (at + PAD).min(line.len());
+    // Whole characters only. Cut mid-way, the pieces decode as U+FFFD, and a
+    // hit in Japanese text came out as `…��本語…`.
+    let continues = |i: usize| i < line.len() && line[i] & 0xC0 == 0x80;
+    while lo < at && continues(lo) {
+        lo += 1;
+    }
+    while continues(hi) {
+        hi += 1;
+    }
     let raw = String::from_utf8_lossy(&line[lo..hi]);
     let cleaned: String = raw
         .replace("\\n", " ")
@@ -150,9 +159,13 @@ fn looks_like_blob(line: &[u8], at: usize) -> bool {
     if hi - lo < W {
         return false;
     }
+    // Nor anything outside ASCII, which base64 never is. Japanese and
+    // Chinese go a long way without an ASCII space or full stop -- their
+    // punctuation is full-width -- and a word from the middle of a long
+    // sentence was rejected as a blob, so neither engine could find it.
     !line[lo..hi]
         .iter()
-        .any(|c| matches!(c, b' ' | b'\\' | b'\t' | b'>' | b',' | b'.' | b';'))
+        .any(|c| matches!(c, b' ' | b'\\' | b'\t' | b'>' | b',' | b'.' | b';') || *c >= 0x80)
 }
 
 /// First occurrence of `needle` that is real conversation, not injected context.
@@ -277,7 +290,10 @@ pub fn excerpt(text: &str, needle: &str) -> String {
     // so "page fault" matches a transcript that only ever wrote
     // "page-fault" -- the query never appears in it literally, and landing
     // on the first word is far more use than the opening line.
-    let lowered = needle.trim().to_lowercase();
+    // Folded the way `find_ci` folds, ASCII only: a Unicode lowercase
+    // turned `Москве` into `москве`, which then never matched the text it
+    // was typed from.
+    let lowered = needle.trim().to_ascii_lowercase();
     let at = find_ci(hay, lowered.as_bytes()).or_else(|| {
         lowered
             .split_whitespace()
@@ -386,7 +402,24 @@ pub fn run(sessions: &[Session], query: &str, mode: Mode) -> (HashMap<String, St
             }
         }
     }
-    (brute(sessions, needle.as_bytes(), mode), How::Scanned)
+    (brute(sessions, &scan_needle(query), mode), How::Scanned)
+}
+
+/// The query as the scan looks for it in a raw transcript line.
+///
+/// Folded the way `find_ci` compares, ASCII only -- lowercased in full, a
+/// word with a non-ASCII capital could not match even typed exactly as it
+/// was written -- and escaped the way JSON writes it, since the scan reads
+/// the JSON and not the text: a `"` or `\` in the query is `\"` or `\\` on
+/// disk, and without this `say "hello` or `C:\Users` never matched.
+fn scan_needle(query: &str) -> Vec<u8> {
+    let q = query.trim().to_ascii_lowercase();
+    let quoted = serde_json::to_string(&q).unwrap_or_default();
+    quoted
+        .get(1..quoted.len().saturating_sub(1))
+        .unwrap_or("")
+        .as_bytes()
+        .to_vec()
 }
 
 #[cfg(test)]
@@ -403,6 +436,47 @@ mod tests {
     const PLAIN_USER: &str = r#"{"parentUuid":"a","isSidechain":false,"message":{"role":"user","content":[{"type":"text","text":"fix the NVENC build"}]},"type":"user","uuid":"b"}"#;
     // `attachment` records are where the memory index actually lands.
     const ATTACHMENT: &str = r#"{"parentUuid":"a","attachment":{"x":1},"rendered":"NVENC and friends","type":"attachment"}"#;
+
+    /// One transcript on disk, and whether the scan finds `query` in it.
+    fn scan_finds(lines: &[&str], query: &str, mode: Mode) -> Option<String> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        search_file(&path, &scan_needle(query), mode)
+    }
+
+    fn user_said(text: &str) -> String {
+        let text = serde_json::to_string(text).unwrap();
+        format!(
+            r#"{{"parentUuid":"a","message":{{"role":"user","content":[{{"type":"text","text":{text}}}]}},"type":"user"}}"#
+        )
+    }
+
+    #[test]
+    fn a_word_typed_as_it_was_written_is_found_whatever_its_script() {
+        let line = user_said("встреча в Москве завтра");
+        assert!(scan_finds(&[&line], "Москве", Mode::Everything).is_some());
+        let e = excerpt("встреча в Москве завтра", "Москве");
+        assert!(e.contains("Москве"), "{e:?}");
+    }
+
+    #[test]
+    fn a_word_from_the_middle_of_a_japanese_sentence_is_found() {
+        let line = user_said(&format!(
+            "{}テキスト{}",
+            "日本語のながい".repeat(8),
+            "ですね".repeat(8)
+        ));
+        let hit = scan_finds(&[&line], "テキスト", Mode::Everything).expect("taken for base64");
+        assert!(!hit.contains('\u{fffd}'), "{hit:?}");
+    }
+
+    #[test]
+    fn a_quote_or_a_backslash_in_the_query_can_match() {
+        let line = user_said(r#"then say "hello there" from C:\Users\me"#);
+        assert!(scan_finds(&[&line], r#"say "hello"#, Mode::Everything).is_some());
+        assert!(scan_finds(&[&line], r"C:\Users", Mode::Everything).is_some());
+    }
 
     #[test]
     fn fts_expressions_cannot_be_broken_by_input() {
