@@ -707,8 +707,10 @@ Only `meta.json` cannot be regenerated, so it is written via a temp file and
 rename and kept deliberately small and readable. A save writes only the
 sessions that run changed, over the file as it is at that moment and under
 `meta.json.lock`, so two browsers open at once keep each other's marks. One
-that cannot be parsed is moved aside to `meta.json.unreadable-<time>` rather
-than read as empty and saved over. `workspace.json` is written the same way;
+that is not JSON at all is moved aside to `meta.json.unreadable-<time>` rather
+than read as empty and saved over; a value of the wrong type in one that is
+costs only that value, and the file as found is copied to
+`meta.json.as-found-<time>` first. `workspace.json` is written the same way;
 losing it costs you one reopen offer and nothing else.
 
 ## Retention warning

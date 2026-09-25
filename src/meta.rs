@@ -113,8 +113,26 @@ impl Meta {
     fn load_telling(p: &std::path::Path) -> (Meta, Option<String>) {
         let mut said = None;
         let mut m: Meta = match std::fs::read(p) {
-            Ok(b) => match serde_json::from_slice(&b) {
-                Ok(m) => m,
+            Ok(b) => match salvage(&b) {
+                Ok((m, 0)) => m,
+                Ok((m, bad)) => {
+                    // Read an entry at a time, so one wrong value costs only
+                    // itself: a number among the tags used to set the whole
+                    // file aside and hide every mark in it. The original is
+                    // kept all the same, since the next save writes what
+                    // could be read.
+                    let copy = p.with_extension(format!(
+                        "json.as-found-{}",
+                        chrono::Utc::now().timestamp()
+                    ));
+                    let _ = std::fs::copy(p, &copy);
+                    said = Some(format!(
+                        "{bad} value(s) in {} were the wrong type and were left out — the file as it was is kept as {}",
+                        p.display(),
+                        copy.display()
+                    ));
+                    m
+                }
                 Err(e) => {
                     // A hand edit with a stray comma, or a sync caught
                     // halfway. It used to be read as empty without a word,
@@ -184,7 +202,8 @@ impl Meta {
         let _lock = lock(p)?;
         let on_disk = std::fs::read(p)
             .ok()
-            .and_then(|b| serde_json::from_slice::<Meta>(&b).ok());
+            .and_then(|b| salvage(&b).ok())
+            .map(|(m, _)| m);
         if let Some(mut disk) = on_disk {
             disk.clean();
             for (id, change) in std::mem::take(&mut self.changed) {
@@ -317,6 +336,61 @@ impl Meta {
         v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         v
     }
+}
+
+/// Everything in a meta.json that can be used, and how many values could
+/// not be. Only a file that is not JSON, or not shaped like one of these at
+/// all, is an error.
+fn salvage(b: &[u8]) -> std::result::Result<(Meta, usize), serde_json::Error> {
+    use serde::de::Error;
+    let v: serde_json::Value = serde_json::from_slice(b)?;
+    let top = v
+        .as_object()
+        .ok_or_else(|| serde_json::Error::custom("not an object"))?;
+    let mut m = Meta::default();
+    let mut bad = 0;
+    let Some(sessions) = top.get("sessions") else {
+        return Ok((m, 0));
+    };
+    let sessions = sessions
+        .as_object()
+        .ok_or_else(|| serde_json::Error::custom("`sessions` is not an object"))?;
+    for (id, raw) in sessions {
+        if let Ok(e) = serde_json::from_value::<Entry>(raw.clone()) {
+            m.sessions.insert(id.clone(), e);
+            continue;
+        }
+        // Field by field, keeping what has the right type.
+        let mut e = Entry::default();
+        let field = |k: &str| raw.get(k);
+        match field("favorite") {
+            Some(serde_json::Value::Bool(f)) => e.favorite = *f,
+            None => {}
+            Some(_) => bad += 1,
+        }
+        match field("note") {
+            Some(serde_json::Value::String(n)) => e.note = n.clone(),
+            None => {}
+            Some(_) => bad += 1,
+        }
+        match field("tags") {
+            Some(serde_json::Value::Array(ts)) => {
+                for t in ts {
+                    match t.as_str() {
+                        Some(t) => e.tags.push(t.to_string()),
+                        None => bad += 1,
+                    }
+                }
+            }
+            None => {}
+            Some(_) => bad += 1,
+        }
+        if !raw.is_object() {
+            bad += 1;
+        }
+        m.sessions.insert(id.clone(), e);
+    }
+    Ok((m, bad))
 }
 
 /// Hold the file's lock until the returned handle is dropped.
@@ -472,6 +546,30 @@ mod tests {
         assert!(m.sessions.is_empty());
         let said = said.expect("nothing said");
         assert!(said.contains("unreadable"), "{said}");
+    }
+
+    #[test]
+    fn one_value_of_the_wrong_type_costs_only_itself() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("meta.json");
+        std::fs::write(
+            &p,
+            r#"{"sessions":{"a":{"favorite":true,"tags":["ok",5]},"b":{"tags":["fine"]},"c":{"favorite":"yes","note":"kept"}}}"#,
+        )
+        .unwrap();
+        let (m, said) = Meta::load_telling(&p);
+        assert!(m
+            .get("a")
+            .is_some_and(|e| e.favorite && e.tags == vec!["ok"]));
+        assert_eq!(m.get("b").unwrap().tags, vec!["fine"]);
+        assert_eq!(m.get("c").unwrap().note, "kept");
+        assert!(said.unwrap().contains("2 value(s)"));
+        assert!(p.exists(), "the file was set aside");
+        let kept = std::fs::read_dir(d.path())
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().contains("as-found"));
+        assert!(kept, "the original was not kept");
     }
 
     #[test]

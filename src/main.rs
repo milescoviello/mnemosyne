@@ -709,12 +709,14 @@ fn main() -> Result<()> {
     }
 
     // ---------------- interactive ----------------
-    let mut app = App::new(
-        sessions,
-        meta::Meta::load(),
-        live::live_map(),
-        restore_model,
-    );
+    // What happened to a favourites file that could not be read goes where
+    // it will be seen: printed now, it was behind the browser at once.
+    let (marks, said) = meta::Meta::load_quietly();
+    let mut app = App::new(sessions, marks, live::live_map(), restore_model);
+    if let Some(said) = said {
+        app.status = said.clone();
+        app.notes.push(said);
+    }
     // What wsx said last time, to draw the first frame with; it is asked
     // again behind the list, and on every rescan. Waiting for its answer
     // before drawing anything was sixty milliseconds -- three quarters of a
