@@ -83,8 +83,6 @@ pub const TABLET_SMALL: [&str; 14] = [
     " ggggggggggg ggggggfggggggggggggggggg  fgggggggggggggggggg ",
 ];
 
-/// The name in the Latin alphabet, for anywhere the Greek would not do.
-pub const WORD: &str = "mnemosyne";
 /// The name as the tablet spells it.
 pub const GREEK: &str = "ΜΝΗΜΟΣΥΝΗ";
 
@@ -343,21 +341,6 @@ fn darken(c: Rgb, amount: f64) -> Rgb {
 /// Dim toward the background, for anything meant to recede.
 pub fn sink(c: Rgb, amount: f64) -> Rgb {
     lerp(c, (14, 11, 8), amount.clamp(0.0, 1.0))
-}
-
-// ------------------------------------------------------------------ ripples
-
-// Kept to water-like marks: '⌄' and '‿' read as teeth at this density.
-const WAVES: &[char] = &['-', '∼', '~', '≈'];
-
-/// A single cell of water: the glyph, and how high the surface stands there.
-pub fn ripple_at(x: usize, phase: f64, x0: f64) -> (char, f64) {
-    let t = ((x as f64 * 0.55 + phase + x0).sin() * 0.65
-        + (x as f64 * 0.17 - phase * 0.7 + x0).sin() * 0.35)
-        .clamp(-1.0, 1.0);
-    let n = ((t + 1.0) / 2.0 * (WAVES.len() - 1) as f64).round() as usize;
-    let i = 0.25 + ((t + 1.0) / 2.0) * 0.75;
-    (WAVES[n.min(WAVES.len() - 1)], i)
 }
 
 /// Letters for the compact reveal to settle out of: the rest of the
