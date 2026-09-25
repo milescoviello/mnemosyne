@@ -168,7 +168,11 @@ NAMED = {"DOWN": "\x1b[B", "UP": "\x1b[A", "RIGHT": "\x1b[C", "LEFT": "\x1b[D",
 def capture(argv, keys, rows, cols, settle, after):
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-    env = dict(os.environ, TERM="xterm-256color", COLORTERM="truecolor")
+    # Never the updater: it installs over the running binary, which here is
+    # the build under test, and a screenshot once came out of a release
+    # downloaded halfway through the run.
+    env = dict(os.environ, TERM="xterm-256color", COLORTERM="truecolor",
+               MNEMOSYNE_NO_UPDATE="1")
     p = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave, close_fds=True, env=env)
     os.close(slave)
     sc = Screen(rows, cols)
