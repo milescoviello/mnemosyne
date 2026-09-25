@@ -43,9 +43,13 @@ impl Mode {
     }
 }
 
-/// ASCII case-insensitive substring search. `needle` must already be lowercase.
-/// Candidate positions come from memchr on both cases of the first byte, which
-/// keeps this close to a plain memmem while avoiding lowercasing the haystack.
+/// ASCII case-insensitive substring search, leftmost match first. `needle`
+/// must already be lowercase.
+///
+/// Candidates come from memchr on both cases of one byte of the needle,
+/// which keeps this close to a plain memmem without lowercasing the
+/// haystack. The byte is the needle's rarest, not its first: anchored on
+/// the first, `checkpatch` stopped at every `c` in 2.8GB of transcripts.
 pub(crate) fn find_ci(hay: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() {
         return Some(0);
@@ -53,23 +57,44 @@ pub(crate) fn find_ci(hay: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.len() > hay.len() {
         return None;
     }
-    let lo = needle[0];
+    let k = rarest(needle);
+    let lo = needle[k];
     let up = lo.to_ascii_uppercase();
-    let mut start = 0usize;
-    let limit = hay.len() - needle.len() + 1;
-    while start < limit {
+    // where the anchor byte can sit for a match to fit
+    let (mut from, end) = (k, hay.len() - needle.len() + k + 1);
+    while from < end {
         let rel = if lo == up {
-            memchr::memchr(lo, &hay[start..limit])?
+            memchr::memchr(lo, &hay[from..end])?
         } else {
-            memchr::memchr2(lo, up, &hay[start..limit])?
+            memchr::memchr2(lo, up, &hay[from..end])?
         };
-        let at = start + rel;
+        let at = from + rel - k;
         if hay[at..at + needle.len()].eq_ignore_ascii_case(needle) {
             return Some(at);
         }
-        start = at + 1;
+        from += rel + 1;
     }
     None
+}
+
+/// The position of the byte in `needle` least likely to turn up by chance
+/// in a transcript: English letters by how rarely they are used, anything
+/// outside ASCII rarer still, and spaces and JSON's punctuation -- on every
+/// line -- the least useful of all.
+fn rarest(needle: &[u8]) -> usize {
+    const COMMON_FIRST: &[u8] = b"etaoinshrdlcumwfgypbvkjxqz";
+    let rarity = |b: u8| -> i32 {
+        match b {
+            b' ' | b'"' | b':' | b',' | b'{' | b'}' | b'\\' => 0,
+            b'a'..=b'z' => 10 + COMMON_FIRST.iter().position(|c| *c == b).unwrap_or(0) as i32,
+            b'0'..=b'9' => 30,
+            0x80.. => 40,
+            _ => 20,
+        }
+    };
+    (0..needle.len())
+        .max_by_key(|&i| (rarity(needle[i]), std::cmp::Reverse(i)))
+        .unwrap_or(0)
 }
 
 /// Turn a raw JSON line into something readable around the hit.
@@ -199,25 +224,36 @@ fn in_key(line: &[u8], at: usize, len: usize) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
 }
 
+/// One line as the scan searches it: as written, and lowercased so the
+/// needle can be found with a plain SIMD memmem. That is twice as fast as a
+/// case-insensitive search, which stops at every place the needle might
+/// start. Lowercasing ASCII moves no byte, so a position in one is the same
+/// position in the other.
+struct Line<'a> {
+    raw: &'a [u8],
+    low: &'a [u8],
+}
+
 /// First occurrence of `needle` that is real conversation, not injected context.
-fn content_hit(line: &[u8], needle: &[u8]) -> Option<usize> {
+fn content_hit(l: &Line, needle: &memmem::Finder) -> Option<usize> {
+    let line = l.raw;
+    let first = needle.find(l.low)?;
     if !is_conversation(line) {
         return None;
     }
-    let first = find_ci(line, needle)?;
+    let len = needle.needle().len();
     let spans = injected_spans(line);
     let bad = |at: usize| {
         spans.iter().any(|(a, b)| at >= *a && at < *b)
             || looks_like_blob(line, at)
-            || in_key(line, at, needle.len())
+            || in_key(line, at, len)
     };
     if !bad(first) {
         return Some(first);
     }
     let mut at = first;
     loop {
-        let next_rel = find_ci(&line[at + 1..], needle)?;
-        at = at + 1 + next_rel;
+        at = at + 1 + needle.find(&l.low[at + 1..])?;
         if !bad(at) {
             return Some(at);
         }
@@ -225,7 +261,10 @@ fn content_hit(line: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// Does this line record a tool actually touching `needle` as a path?
-fn file_hit(line: &[u8], needle: &[u8]) -> Option<usize> {
+///
+/// Only the values are lowercased, not the line: the keys are found with a
+/// plain memmem over it as written, and a path is short.
+fn file_hit(line: &[u8], needle: &memmem::Finder) -> Option<usize> {
     for key in [
         &b"\"file_path\":\""[..],
         &b"\"notebook_path\":\""[..],
@@ -235,8 +274,10 @@ fn file_hit(line: &[u8], needle: &[u8]) -> Option<usize> {
         while let Some(rel) = memmem::find(&line[from..], key) {
             let vs = from + rel + key.len();
             if let Some(end) = memchr::memchr(b'"', &line[vs..]) {
-                let val = &line[vs..vs + end];
-                if find_ci(val, needle).is_some() {
+                if needle
+                    .find(&line[vs..vs + end].to_ascii_lowercase())
+                    .is_some()
+                {
                     return Some(vs);
                 }
                 from = vs + end;
@@ -248,7 +289,7 @@ fn file_hit(line: &[u8], needle: &[u8]) -> Option<usize> {
     None
 }
 
-fn tool_hit(line: &[u8], needle: &[u8]) -> Option<usize> {
+fn tool_hit(line: &[u8], needle: &memmem::Finder) -> Option<usize> {
     // tool_use blocks look like {"type":"tool_use","id":...,"name":"Edit",...}
     let mut from = 0;
     let key = &b"\"name\":\""[..];
@@ -259,8 +300,10 @@ fn tool_hit(line: &[u8], needle: &[u8]) -> Option<usize> {
     while let Some(rel) = memmem::find(&line[from..], key) {
         let vs = from + rel + key.len();
         if let Some(end) = memchr::memchr(b'"', &line[vs..]) {
-            let val = &line[vs..vs + end];
-            if find_ci(val, needle).is_some() {
+            if needle
+                .find(&line[vs..vs + end].to_ascii_lowercase())
+                .is_some()
+            {
                 return Some(vs);
             }
             from = vs + end;
@@ -356,11 +399,12 @@ pub fn excerpt(text: &str, needle: &str) -> String {
 }
 
 /// Scan one file, returning the first readable hit.
-fn search_file(path: &std::path::Path, needle: &[u8], mode: Mode) -> Option<String> {
+fn search_file(path: &std::path::Path, needle: &memmem::Finder, mode: Mode) -> Option<String> {
     use std::io::{BufRead, BufReader};
     let f = std::fs::File::open(path).ok()?;
     let mut rdr = BufReader::with_capacity(1 << 18, f);
     let mut buf: Vec<u8> = Vec::with_capacity(1 << 14);
+    let mut low: Vec<u8> = Vec::with_capacity(1 << 14);
     loop {
         buf.clear();
         let n = rdr.read_until(b'\n', &mut buf).ok()?;
@@ -369,7 +413,17 @@ fn search_file(path: &std::path::Path, needle: &[u8], mode: Mode) -> Option<Stri
         }
         let line = &buf[..n];
         let hit = match mode {
-            Mode::Content | Mode::Everything => content_hit(line, needle),
+            Mode::Content | Mode::Everything => {
+                low.clear();
+                low.extend(line.iter().map(u8::to_ascii_lowercase));
+                content_hit(
+                    &Line {
+                        raw: line,
+                        low: &low,
+                    },
+                    needle,
+                )
+            }
             Mode::File => file_hit(line, needle),
             Mode::Tool => tool_hit(line, needle),
         };
@@ -378,16 +432,18 @@ fn search_file(path: &std::path::Path, needle: &[u8], mode: Mode) -> Option<Stri
         }
         if buf.capacity() > (1 << 20) {
             buf = Vec::with_capacity(1 << 14);
+            low = Vec::with_capacity(1 << 14);
         }
     }
 }
 
 /// Search every session in parallel. Returns path -> snippet for hits only.
 fn brute(sessions: &[Session], needle: &[u8], mode: Mode) -> HashMap<String, String> {
+    let finder = memmem::Finder::new(needle);
     sessions
         .par_iter()
         .filter_map(|s| {
-            search_file(&s.path, needle, mode)
+            search_file(&s.path, &finder, mode)
                 .map(|snip| (s.path.to_string_lossy().to_string(), snip))
         })
         .collect()
@@ -496,6 +552,25 @@ fn scan_needle(query: &str) -> Vec<u8> {
 mod tests {
     use super::*;
 
+    /// A hit run on one line, the way the scan runs it.
+    fn content(line: &[u8], needle: &[u8]) -> Option<usize> {
+        let low = line.to_ascii_lowercase();
+        content_hit(
+            &Line {
+                raw: line,
+                low: &low,
+            },
+            &memmem::Finder::new(needle),
+        )
+    }
+    fn hit(
+        f: fn(&[u8], &memmem::Finder) -> Option<usize>,
+        line: &[u8],
+        needle: &[u8],
+    ) -> Option<usize> {
+        f(line, &memmem::Finder::new(needle))
+    }
+
     // A user turn carrying an injected memory block, exactly as Claude Code
     // writes it: the reminder is inside the message content.
     const WITH_REMINDER: &str = concat!(
@@ -512,7 +587,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.jsonl");
         std::fs::write(&path, lines.join("\n") + "\n").unwrap();
-        search_file(&path, &scan_needle(query), mode)
+        search_file(&path, &memmem::Finder::new(&scan_needle(query)), mode)
     }
 
     fn user_said(text: &str) -> String {
@@ -539,6 +614,35 @@ mod tests {
         ));
         let hit = scan_finds(&[&line], "テキスト", Mode::Everything).expect("taken for base64");
         assert!(!hit.contains('\u{fffd}'), "{hit:?}");
+    }
+
+    #[test]
+    fn a_rare_anchor_still_finds_the_leftmost_match() {
+        let hay = b"xx CheckPatch and checkpatch, then CHECKPATCH";
+        assert_eq!(find_ci(hay, b"checkpatch"), Some(3));
+        assert_eq!(find_ci(b"check patch", b"checkpatch"), None);
+        assert_eq!(find_ci(b"kkkkk", b"kk"), Some(0));
+        assert_eq!(find_ci(b"ab", b"abc"), None);
+        assert_eq!(find_ci(b"zzz qz", b"qz"), Some(4));
+        assert_eq!(
+            find_ci("日本語テキスト".as_bytes(), "テキスト".as_bytes()),
+            Some(9)
+        );
+        // every position, against the obvious search
+        let text = b"The quick brown fox jumps over the lazy dog; THE END";
+        for n in 1..6 {
+            for i in 0..text.len() - n {
+                let needle = text[i..i + n].to_ascii_lowercase();
+                let want =
+                    (0..=text.len() - n).find(|&j| text[j..j + n].eq_ignore_ascii_case(&needle));
+                assert_eq!(
+                    find_ci(text, &needle),
+                    want,
+                    "{:?}",
+                    String::from_utf8_lossy(&needle)
+                );
+            }
+        }
     }
 
     #[test]
@@ -713,11 +817,11 @@ mod tests {
         // The word only appears inside a <system-reminder>, so this session
         // did not actually discuss it. Matching here is what made a query
         // return every session that had ever run.
-        assert_eq!(content_hit(WITH_REMINDER.as_bytes(), b"nvenc"), None);
+        assert_eq!(content(WITH_REMINDER.as_bytes(), b"nvenc"), None);
         // but text outside the reminder in the same line still matches
-        assert!(content_hit(WITH_REMINDER.as_bytes(), b"disk").is_some());
+        assert!(content(WITH_REMINDER.as_bytes(), b"disk").is_some());
         // and a plain mention matches normally
-        assert!(content_hit(PLAIN_USER.as_bytes(), b"nvenc").is_some());
+        assert!(content(PLAIN_USER.as_bytes(), b"nvenc").is_some());
     }
 
     fn wrap(text: &str) -> String {
@@ -733,7 +837,7 @@ mod tests {
         // does not, which is the tell.
         let pad = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5YWJjZGVm".repeat(4);
         let blob = wrap(&format!("{pad}nvenc{pad}"));
-        assert_eq!(content_hit(blob.as_bytes(), b"nvenc"), None);
+        assert_eq!(content(blob.as_bytes(), b"nvenc"), None);
     }
 
     #[test]
@@ -743,24 +847,24 @@ mod tests {
         // in a few dozen characters is rare, and rejecting it would risk
         // discarding real prose.
         let short = wrap("QUJDnvencREVG");
-        assert!(content_hit(short.as_bytes(), b"nvenc").is_some());
+        assert!(content(short.as_bytes(), b"nvenc").is_some());
     }
 
     #[test]
     fn file_search_matches_tool_paths_not_mentions() {
         let edit = br#"{"message":{"role":"assistant","content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/etc/portage/make.conf"}}]}}"#;
-        assert!(file_hit(edit, b"make.conf").is_some());
+        assert!(hit(file_hit, edit, b"make.conf").is_some());
         // a mere mention in prose is not a file the session touched
         let chat = br#"{"message":{"role":"user","content":[{"type":"text","text":"what is in make.conf"}]}}"#;
-        assert_eq!(file_hit(chat, b"make.conf"), None);
+        assert_eq!(hit(file_hit, chat, b"make.conf"), None);
     }
 
     #[test]
     fn tool_search_needs_a_tool_use_block() {
         let used = br#"{"message":{"role":"assistant","content":[{"type":"tool_use","name":"WebSearch","input":{}}]}}"#;
-        assert!(tool_hit(used, b"websearch").is_some());
+        assert!(hit(tool_hit, used, b"websearch").is_some());
         let named_only =
             br#"{"message":{"role":"user","content":[{"type":"text","text":"use WebSearch"}]}}"#;
-        assert_eq!(tool_hit(named_only, b"websearch"), None);
+        assert_eq!(hit(tool_hit, named_only, b"websearch"), None);
     }
 }
