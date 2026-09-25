@@ -884,7 +884,7 @@ impl App {
     /// was still on -- a tag filter narrowing it to one, say. This names
     /// what is still filtering, so the message matches the list under it.
     pub fn view_note(&self) -> String {
-        let shown = self.item_count();
+        let shown = self.session_count();
         let mut on: Vec<String> = Vec::new();
         if !self.fuzzy.trim().is_empty() {
             on.push(format!("/{}", self.fuzzy.trim()));
@@ -914,7 +914,7 @@ impl App {
     /// After a reindex: what the index holds, and what of it is on screen.
     pub fn reindex_message(&self) -> String {
         let total = self.all.iter().filter(|s| !s.is_subagent).count();
-        let shown = self.item_count();
+        let shown = self.session_count();
         if shown == total {
             format!("reindexed — {total} sessions")
         } else {
@@ -947,6 +947,15 @@ impl App {
 
     pub fn item_count(&self) -> usize {
         self.view.iter().filter(|r| r.selectable()).count()
+    }
+
+    /// Sessions on screen: rows you could resume, not counting the
+    /// subagents shown under them, which are not sessions of their own.
+    pub fn session_count(&self) -> usize {
+        self.view
+            .iter()
+            .filter(|r| matches!(r, Row::Item(_)))
+            .count()
     }
 
     pub fn preview(&mut self, want: usize) -> Vec<Turn> {
@@ -1779,7 +1788,6 @@ impl App {
             }
         }
         if let Some(r) = newest {
-            let n = r.hits.len();
             // If the answer was inside a subagent, show it rather than hiding
             // the match behind a collapsed parent.
             let mut reveal: HashSet<String> = HashSet::new();
@@ -1795,13 +1803,26 @@ impl App {
                 self.show_subagents = true;
                 self.expanded.extend(reveal);
             }
+            // Sessions, as the list counts them: a match in a subagent is
+            // its parent's. Counted as files it was every subagent that
+            // matched as well, and "30 of 26 shown" over a list with no
+            // other filter on.
+            let n = self
+                .all
+                .iter()
+                .filter(|s| {
+                    !s.is_subagent
+                        && (r.hits.contains_key(s.path.to_string_lossy().as_ref())
+                            || self.deep_parent_hits.contains(&s.id))
+                })
+                .count();
             self.deep_hits = Some(r.hits);
             self.deep_busy = false;
             self.rebuild();
             // Count the list, not the search. With a tag filter or a date
             // range also on, the two differ, and saying "3 match" over a
             // list of one leaves you unable to tell which number is wrong.
-            let shown = self.item_count();
+            let shown = self.session_count();
             self.status = if shown == n {
                 format!(
                     "{shown} session(s) match “{}” in {}",
@@ -2953,6 +2974,30 @@ mod logic_tests {
         a.absorb_deep();
         assert!(a.deep_hits.is_none(), "c cleared it and it came back");
         assert!(!a.deep_busy);
+    }
+
+    #[test]
+    fn a_search_counts_sessions_not_the_subagents_that_matched() {
+        let mut a = app();
+        a.deep = "zpool".into();
+        a.deep_generation += 1;
+        let mut hits = HashMap::new();
+        for p in [
+            "/p/agent-a1.jsonl",
+            "/p/agent-a2.jsonl",
+            "/p/bbbbbbbb-2.jsonl",
+        ] {
+            hits.insert(p.to_string(), "…zpool…".to_string());
+        }
+        a.deep_tx
+            .send(DeepResult {
+                generation: a.deep_generation,
+                hits,
+            })
+            .unwrap();
+        a.absorb_deep();
+        assert!(a.status.starts_with("2 session(s) match"), "{:?}", a.status);
+        assert_eq!(a.session_count(), 2);
     }
 
     #[test]

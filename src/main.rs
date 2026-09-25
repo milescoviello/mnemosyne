@@ -501,22 +501,40 @@ fn main() -> Result<()> {
             })
             .collect();
         rows.sort_by_key(|s| std::cmp::Reverse(s.mtime));
+        // A parent listed for its subagent's match says why with that
+        // match: its own column was empty, where every hit is meant to say.
+        let mut through_child: std::collections::HashMap<&str, &str> =
+            std::collections::HashMap::new();
+        for s in pool.iter().filter(|s| s.is_subagent) {
+            if let (Some(p), Some(snip)) = (&s.parent, hits.get(s.path.to_string_lossy().as_ref()))
+            {
+                if !snip.is_empty() {
+                    through_child.entry(p.as_str()).or_insert(snip.as_str());
+                }
+            }
+        }
         for s in &rows {
+            let own = hits
+                .get(&s.path.to_string_lossy().to_string())
+                .map(|x| x.as_str())
+                .filter(|x| !x.is_empty());
             println!(
                 "{:>4}\t{}\t{}\t{}\t{}",
                 model::reltime(s.mtime),
                 model::short_cwd(&s.cwd),
                 s.title(),
                 s.id,
-                hits.get(&s.path.to_string_lossy().to_string())
-                    .map(|x| x.as_str())
+                own.or_else(|| through_child.get(s.id.as_str()).copied())
                     .unwrap_or("")
             );
         }
+        // Out of what could have been listed: the subagents are in the pool
+        // searched, but are listed only with --subagents.
+        let listable = pool.iter().filter(|s| show_subs || !s.is_subagent).count();
         eprintln!(
             "{} of {} sessions matched \"{}\" ({}, {}) in {:.3}s",
             rows.len(),
-            pool.len(),
+            listable,
             q,
             mode.label(),
             if how == search::How::Indexed {

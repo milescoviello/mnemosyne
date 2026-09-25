@@ -629,7 +629,7 @@ fn draw_wordmark(f: &mut Frame, app: &App, area: Rect) {
     // priority 0 is kept longest
     segs.push((
         0,
-        plain(format!("{} sessions", app.item_count()), th().text),
+        plain(format!("{} sessions", app.session_count()), th().text),
     ));
     if app.corpus_tokens > 0 {
         segs.push((
