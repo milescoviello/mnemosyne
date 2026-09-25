@@ -780,6 +780,12 @@ fn main() -> Result<()> {
 
     enable_raw_mode()?;
     stderr().execute(EnterAlternateScreen)?;
+    // Put back on the way out, however the way out goes. The panic hook
+    // only runs where a panic starts: one on a rayon worker -- a scan -- is
+    // carried to this thread by `resume_unwind`, which skips the hook, so
+    // `R` hitting a transcript that crashed the scanner left the terminal
+    // in raw mode on the alternate screen, with no word about why.
+    let restore = Restore;
     // Ask the terminal to tell shift and ctrl apart, so ctrl+shift+t can be
     // its own key rather than arriving as ctrl+t. Terminals that do not
     // understand the request ignore it, and inside tmux it additionally
@@ -868,16 +874,7 @@ fn main() -> Result<()> {
     app.load_reopen();
 
     let res = run(&mut term, &mut app, &updated, &mut indexing);
-    let _ = execute!(term.backend_mut(), event::PopKeyboardEnhancementFlags);
-    disable_raw_mode()?;
-    let _ = execute!(term.backend_mut(), DisableMouseCapture);
-    execute!(term.backend_mut(), LeaveAlternateScreen)?;
-    term.show_cursor()?;
-    if let Ok(held) = BACKGROUND_PANICS.lock() {
-        for m in held.iter() {
-            eprintln!("mnemosyne: a background task failed: {m}");
-        }
-    }
+    drop(restore);
     res?;
 
     // What was handed over counts as open: it will be running moments from
@@ -937,6 +934,29 @@ fn main() -> Result<()> {
 /// Panics on threads behind the browser, said once the browser has closed.
 static BACKGROUND_PANICS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
+/// The terminal as the browser found it, put back when this is dropped --
+/// at the end of the browser, or by any unwinding past it.
+struct Restore;
+
+impl Drop for Restore {
+    fn drop(&mut self) {
+        let mut err = stderr();
+        let _ = execute!(err, event::PopKeyboardEnhancementFlags);
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            err,
+            DisableMouseCapture,
+            LeaveAlternateScreen,
+            crossterm::cursor::Show
+        );
+        if let Ok(held) = BACKGROUND_PANICS.lock() {
+            for m in held.iter() {
+                eprintln!("mnemosyne: a background task failed: {m}");
+            }
+        }
+    }
+}
+
 /// The rescan running behind the list, if there is one.
 type Indexing = Option<std::thread::JoinHandle<Result<Vec<model::Session>>>>;
 
@@ -968,6 +988,14 @@ fn run<B: ratatui::backend::Backend>(
             Ok("background") if !injected => {
                 injected = true;
                 std::thread::spawn(|| panic!("deliberate background panic"));
+            }
+            // A panic on a rayon worker, carried here by resume_unwind:
+            // what a scanner panic during `R` does.
+            Ok("rayon") => {
+                use rayon::prelude::*;
+                (0..2)
+                    .into_par_iter()
+                    .for_each(|_| panic!("deliberate rayon panic"));
             }
             Ok("background") | Err(_) => {}
             Ok(_) => panic!("deliberate panic for the terminal-restore test"),

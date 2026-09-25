@@ -181,6 +181,14 @@ def main():
     check("a panic still says what happened", "deliberate panic" in screen,
           repr(screen[-200:]))
 
+    # A panic on a rayon worker reaches the main thread by resume_unwind,
+    # which never calls the hook: what a scanner panic during `R` does.
+    _, screen, code = run(binary, home, [], timeout=30,
+                          extra_env={"MNEMOSYNE_PANIC_TEST": "rayon"})
+    check("a panic in a scan exits, rather than hanging", code == 101, f"exit {code}")
+    check("and leaves the alternate screen", "\x1b[?1049l" in screen, "not found")
+    check("and says what happened", "deliberate rayon panic" in screen, repr(screen[-200:]))
+
     # ...but only a panic on the thread that owns the terminal. One behind
     # the browser, in the rescan or the update check, used to put the
     # terminal back while the browser carried on drawing.
