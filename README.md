@@ -679,7 +679,10 @@ There is no literal "never". Already-deleted transcripts are unrecoverable.
 
 ## Tokens
 
-Transcripts record their own token usage, so `mn` reads it. The header
+Transcripts record their own token usage, so `mn` reads it. A response is
+written as a line per content block, and every one of those lines repeats
+the whole response's usage, so each response is counted once, by its id --
+counted per line, the totals came out nearly twice what was used. The header
 carries the machine-wide total, there is a **TOKENS** column at wide
 terminals that `s` will sort by, and each session's own count sits in the
 rail:

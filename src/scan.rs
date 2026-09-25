@@ -434,10 +434,21 @@ fn process_line(s: &mut Session, line: &[u8], text: &mut Option<&mut String>) {
     } else if is_asst {
         s.assistant_msgs += 1;
         if memmem::find(f, b"\"usage\"").is_some() {
-            s.in_tokens += raw_num(f, "input_tokens").unwrap_or(0);
-            s.out_tokens += raw_num(f, "output_tokens").unwrap_or(0);
-            s.cache_read += raw_num(f, "cache_read_input_tokens").unwrap_or(0);
-            s.cache_write += raw_num(f, "cache_creation_input_tokens").unwrap_or(0);
+            // Claude Code writes one response as a line per content block --
+            // thinking, text, each tool call -- and every line carries the
+            // whole response's usage. Summed per line, it was counted once
+            // per block: 30,172 usage records here for 16,136 responses, and
+            // every total nearly doubled. The first `"id"` of the line is the
+            // response's; its blocks are written together, so the one before
+            // is all there is to compare with.
+            let id = raw_str(f, "id").unwrap_or_default();
+            if id.is_empty() || id != s.last_msg_id {
+                s.in_tokens += raw_num(f, "input_tokens").unwrap_or(0);
+                s.out_tokens += raw_num(f, "output_tokens").unwrap_or(0);
+                s.cache_read += raw_num(f, "cache_read_input_tokens").unwrap_or(0);
+                s.cache_write += raw_num(f, "cache_creation_input_tokens").unwrap_or(0);
+                s.last_msg_id = id;
+            }
         }
         if let Some(m) = raw_str(f, "model") {
             // `<synthetic>` marks locally-generated turns; `inherit` and
@@ -736,6 +747,7 @@ mod tests {
 #[cfg(test)]
 mod harvest_tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn token_usage_is_summed() {
@@ -766,6 +778,52 @@ mod harvest_tests {
             let mut text = String::new();
             process_line(&mut s, line, &mut Some(&mut text));
         }
+    }
+
+    /// One content block of the response `id`, as Claude Code writes it.
+    fn block(id: &str, content: &str) -> String {
+        format!(
+            r#"{{"parentUuid":"x","message":{{"model":"claude-opus-5","id":"{id}","type":"message","role":"assistant","content":[{content}],"usage":{{"input_tokens":3,"cache_creation_input_tokens":20,"cache_read_input_tokens":4000,"output_tokens":100}}}},"type":"assistant"}}"#
+        )
+    }
+
+    #[test]
+    fn a_response_written_a_block_per_line_is_counted_once() {
+        let mut s = Session::default();
+        let mut sink: Option<&mut String> = None;
+        for l in [
+            block("msg_1", r#"{"type":"thinking","thinking":"hmm"}"#),
+            block("msg_1", r#"{"type":"text","text":"let me look"}"#),
+            block(
+                "msg_1",
+                r#"{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}"#,
+            ),
+            block("msg_2", r#"{"type":"text","text":"done"}"#),
+        ] {
+            process_line(&mut s, l.as_bytes(), &mut sink);
+        }
+        assert_eq!(s.assistant_msgs, 4, "each line is still a turn");
+        assert_eq!(s.out_tokens, 200, "two responses, not four");
+        assert_eq!(s.in_tokens, 6);
+        assert_eq!(s.cache_read, 8000);
+        assert_eq!(s.cache_write, 40);
+    }
+
+    #[test]
+    fn a_response_split_across_two_scans_is_counted_once() {
+        // The scan can stop between one response's blocks, and pick up the
+        // rest next time from where it stopped.
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("s.jsonl");
+        let mut f = std::fs::File::create(&p).unwrap();
+        writeln!(f, "{}", block("msg_1", r#"{"type":"text","text":"a"}"#)).unwrap();
+        drop(f);
+        let first = scan(&p, false, None, None).unwrap();
+        let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+        writeln!(f, "{}", block("msg_1", r#"{"type":"text","text":"b"}"#)).unwrap();
+        drop(f);
+        let second = scan(&p, false, None, Some(&first)).unwrap();
+        assert_eq!(second.out_tokens, 100);
     }
 
     #[test]

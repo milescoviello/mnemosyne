@@ -38,6 +38,10 @@ pub struct Session {
     pub out_tokens: u64,
     pub cache_read: u64,
     pub cache_write: u64,
+    /// The API response whose usage was counted last. One response is
+    /// written as a line per content block, each carrying all of its usage,
+    /// so the lines after the first are the same numbers again.
+    pub last_msg_id: String,
 
     /// How many bytes of this file the indexer has already consumed.
     /// Transcripts are append-only, so on the next run we read only the tail

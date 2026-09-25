@@ -38,7 +38,8 @@ pub fn db_path() -> PathBuf {
 ///   5  token usage is summed per session
 ///   6  prose stored as a plain `"content"` string is harvested too
 ///   7  rebuild text that an incremental rescan had doubled or deleted
-pub const SCANNER_VERSION: u32 = 7;
+///   8  a response's usage is counted once, not once per content block
+pub const SCANNER_VERSION: u32 = 8;
 
 /// Every column the loader expects. Compared against what the database
 /// actually has, so drift is detected rather than assumed away.
@@ -69,7 +70,36 @@ const EXPECTED_COLUMNS: &[&str] = &[
     "is_subagent",
     "parent",
     "agent_id",
+    "last_msg_id",
 ];
+
+/// Columns added after the table was first made, and how to add them.
+///
+/// A table missing one gets it added rather than being dropped. Dropping it
+/// would be correct -- everything here can be rebuilt -- but it leaves the
+/// first run after an update with nothing to show while it re-reads every
+/// transcript, where the rows it has are still worth showing in the
+/// meantime. Whatever made the column necessary bumps `SCANNER_VERSION`
+/// too, so the rows are rescanned underneath and the default never lasts.
+const ADDED_COLUMNS: &[(&str, &str)] = &[("last_msg_id", "TEXT NOT NULL DEFAULT ''")];
+
+fn add_missing_columns(conn: &Connection) {
+    let Ok(mut st) = conn.prepare("PRAGMA table_info(sessions)") else {
+        return;
+    };
+    let have: std::collections::HashSet<String> = match st.query_map([], |r| r.get(1)) {
+        Ok(rows) => rows.flatten().collect(),
+        Err(_) => return,
+    };
+    if have.is_empty() {
+        return; // no table yet: it is created whole
+    }
+    for (col, ddl) in ADDED_COLUMNS {
+        if !have.contains(*col) {
+            let _ = conn.execute_batch(&format!("ALTER TABLE sessions ADD COLUMN {col} {ddl}"));
+        }
+    }
+}
 
 /// FTS5 columns are not indexed for equality, so `WHERE path = ?` scans the
 /// whole table. Deleting a row that way cost 41 of the 43 seconds a full
@@ -191,6 +221,7 @@ impl Index {
         // the first run after an update had nothing to show and sat on a
         // splash for twelve seconds re-reading 2.5GB. Keep them, show them,
         // and let the rescan replace them underneath.
+        add_missing_columns(&conn);
         let schema_ok = schema_current(&conn);
         let stale = stored != Some(SCANNER_VERSION);
         let mut reset = !schema_ok;
@@ -228,7 +259,8 @@ impl Index {
                 scanned_len     INTEGER NOT NULL DEFAULT 0,
                 is_subagent     INTEGER NOT NULL DEFAULT 0,
                 parent          TEXT,
-                agent_id        TEXT NOT NULL DEFAULT ''
+                agent_id        TEXT NOT NULL DEFAULT '',
+                last_msg_id     TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_mtime  ON sessions(mtime DESC);
             CREATE INDEX IF NOT EXISTS idx_parent ON sessions(parent);
@@ -275,7 +307,7 @@ impl Index {
             "SELECT path,id,project_dir,cwd,git_branch,ai_title,first_prompt,last_prompt,
                     model,permission_mode,version,size,mtime,first_ts,last_ts,entries,
                     user_msgs,assistant_msgs,scanned_len,is_subagent,parent,agent_id,
-                    in_tokens,out_tokens,cache_read,cache_write
+                    in_tokens,out_tokens,cache_read,cache_write,last_msg_id
              FROM sessions",
         )?;
         let rows = st.query_map([], |r| {
@@ -307,6 +339,7 @@ impl Index {
                 out_tokens: r.get::<_, i64>(23)? as u64,
                 cache_read: r.get::<_, i64>(24)? as u64,
                 cache_write: r.get::<_, i64>(25)? as u64,
+                last_msg_id: r.get(26)?,
                 ..Default::default()
             })
         })?;
@@ -445,15 +478,16 @@ impl Index {
                 "INSERT INTO sessions (path,id,project_dir,cwd,git_branch,ai_title,first_prompt,
                     last_prompt,model,permission_mode,version,size,mtime,first_ts,last_ts,entries,
                     user_msgs,assistant_msgs,scanned_len,is_subagent,parent,agent_id,
-                    in_tokens,out_tokens,cache_read,cache_write)
+                    in_tokens,out_tokens,cache_read,cache_write,last_msg_id)
                  VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,
-                         ?21,?22,?23,?24,?25,?26)
+                         ?21,?22,?23,?24,?25,?26,?27)
                  ON CONFLICT(path) DO UPDATE SET
                     id=?2,project_dir=?3,cwd=?4,git_branch=?5,ai_title=?6,first_prompt=?7,
                     last_prompt=?8,model=?9,permission_mode=?10,version=?11,size=?12,mtime=?13,
                     first_ts=?14,last_ts=?15,entries=?16,user_msgs=?17,assistant_msgs=?18,
                     scanned_len=?19,is_subagent=?20,parent=?21,agent_id=?22,
-                    in_tokens=?23,out_tokens=?24,cache_read=?25,cache_write=?26",
+                    in_tokens=?23,out_tokens=?24,cache_read=?25,cache_write=?26,
+                    last_msg_id=?27",
             )?;
             for s in sessions {
                 st.execute(params![
@@ -483,6 +517,7 @@ impl Index {
                     s.out_tokens as i64,
                     s.cache_read as i64,
                     s.cache_write as i64,
+                    s.last_msg_id,
                 ])?;
             }
         }
@@ -686,6 +721,7 @@ mod tests {
             mtime: 99,
             entries: 7,
             scanned_len: 1234,
+            last_msg_id: "msg_1".into(),
             ..Default::default()
         }
     }
@@ -702,6 +738,32 @@ mod tests {
         assert_eq!(got.ai_title, "hello");
         assert_eq!(got.permission_mode, "default");
         assert_eq!(got.scanned_len, 1234);
+        assert_eq!(got.last_msg_id, "msg_1");
+    }
+
+    #[test]
+    fn a_table_from_before_a_column_was_added_keeps_its_rows() {
+        // Added in place, not dropped: the rows are still worth showing
+        // while the rescan the scanner bump forces replaces them.
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("i.db");
+        {
+            let mut idx = Index::open_at(&db).unwrap();
+            idx.store(&[sample("/a.jsonl", "hello")]).unwrap();
+            idx.conn
+                .execute_batch(
+                    "ALTER TABLE sessions DROP COLUMN last_msg_id;
+                     UPDATE meta SET value='7' WHERE key='scanner_version';",
+                )
+                .unwrap();
+        }
+        let idx = Index::open_at(&db).unwrap();
+        assert!(idx.stale, "the rows are an older scanner's");
+        let loaded = idx.load().unwrap();
+        assert_eq!(
+            loaded["/a.jsonl"].ai_title, "hello",
+            "the rows were dropped"
+        );
     }
 
     #[test]
