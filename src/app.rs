@@ -330,7 +330,9 @@ pub struct App {
     /// a terminal on the desktop of whoever runs the suite.
     pub ask_wsx: bool,
 
-    preview_cache: HashMap<String, Vec<Turn>>,
+    /// Keyed on the size as well as the path, so a session that has grown
+    /// since is read again rather than shown as it was the first time.
+    preview_cache: HashMap<(String, u64), Vec<Turn>>,
     matcher: Matcher,
     deep_tx: Sender<DeepResult>,
     pub deep_rx: Receiver<DeepResult>,
@@ -892,7 +894,10 @@ impl App {
         let Some(i) = self.current_idx() else {
             return Vec::new();
         };
-        let key = self.all[i].path.to_string_lossy().to_string();
+        let key = (
+            self.all[i].path.to_string_lossy().to_string(),
+            self.all[i].size,
+        );
         if let Some(v) = self.preview_cache.get(&key) {
             return v.clone();
         }
@@ -3140,6 +3145,40 @@ mod logic_tests {
         a.do_action(Action::Favorite);
         a.do_action(Action::Resume);
         a.preview(3);
+    }
+
+    #[test]
+    fn the_preview_follows_a_session_that_grew() {
+        // Remembered by path alone, the rail showed a live session as it was
+        // the first time the cursor landed on it, however far it had got
+        // since and however many rescans had seen it.
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("live.jsonl");
+        let said = |role: &str, t: &str| {
+            format!(
+                r#"{{"parentUuid":"p","message":{{"role":"{role}","content":[{{"type":"text","text":"{t}"}}]}},"type":"{role}"}}"#
+            ) + "\n"
+        };
+        std::fs::write(&path, said("user", "first question")).unwrap();
+        let mut a = app();
+        let i = a.current_idx().unwrap();
+        a.all[i].path = path.clone();
+        a.all[i].size = std::fs::metadata(&path).unwrap().len();
+        assert_eq!(a.preview(8).len(), 1);
+
+        let mut more = std::fs::read_to_string(&path).unwrap();
+        more.push_str(&said("assistant", "an answer"));
+        more.push_str(&said("user", "second question"));
+        std::fs::write(&path, more).unwrap();
+        // what a rescan tells it
+        a.all[i].size = std::fs::metadata(&path).unwrap().len();
+        let turns = a.preview(8);
+        assert_eq!(
+            turns.len(),
+            3,
+            "{:?}",
+            turns.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
     }
 
     #[test]
