@@ -2179,6 +2179,9 @@ impl App {
                         self.deep.clear();
                         self.deep_hits = None;
                         self.deep_parent_hits.clear();
+                        // As clearing the box does: a search still running
+                        // would otherwise land on the list you backed out of.
+                        self.deep_generation += 1;
                         self.deep_busy = false;
                         self.input_mode = InputMode::Normal;
                         self.rebuild();
@@ -2676,6 +2679,34 @@ mod logic_tests {
         a.absorb_deep();
         assert!(a.deep_hits.is_none(), "c cleared it and it came back");
         assert!(!a.deep_busy);
+    }
+
+    #[test]
+    fn backing_out_of_the_search_box_abandons_a_running_search() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut a = app();
+        a.deep = "zpool".into();
+        // what start_deep does, without the thread
+        a.deep_generation += 1;
+        a.deep_busy = true;
+        let stale = a.deep_generation;
+        a.on_key(KeyEvent::from(KeyCode::Char('F')));
+        a.on_key(KeyEvent::from(KeyCode::Esc));
+
+        let mut hits = HashMap::new();
+        hits.insert("/p/aaaaaaaa-1.jsonl".to_string(), "…".to_string());
+        a.deep_tx
+            .send(DeepResult {
+                generation: stale,
+                hits,
+            })
+            .unwrap();
+        a.absorb_deep();
+        assert!(
+            a.deep_hits.is_none(),
+            "Esc cleared the box and the search came back: {:?}",
+            a.status
+        );
     }
 
     #[test]
