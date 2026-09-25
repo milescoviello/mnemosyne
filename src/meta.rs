@@ -49,16 +49,50 @@ pub fn meta_path() -> PathBuf {
 
 impl Meta {
     pub fn load() -> Meta {
-        let mut m: Meta = match std::fs::read(meta_path()) {
-            Ok(b) => serde_json::from_slice(&b).unwrap_or_default(),
+        Meta::load_at(&meta_path())
+    }
+
+    pub fn load_at(p: &std::path::Path) -> Meta {
+        let mut m: Meta = match std::fs::read(p) {
+            Ok(b) => match serde_json::from_slice(&b) {
+                Ok(m) => m,
+                Err(e) => {
+                    // A hand edit with a stray comma, or a sync caught
+                    // halfway. It used to be read as empty without a word,
+                    // saved over at the next favourite, and three edits
+                    // later rotated out of every backup too. It goes where
+                    // the rotation never reaches, and says where.
+                    let aside = p.with_extension(format!(
+                        "json.unreadable-{}",
+                        chrono::Utc::now().timestamp()
+                    ));
+                    let _ = std::fs::rename(p, &aside);
+                    eprintln!(
+                        "mnemosyne: {} could not be read ({e}) — it is kept as {}",
+                        p.display(),
+                        aside.display()
+                    );
+                    Meta::default()
+                }
+            },
             Err(_) => Meta::default(),
         };
         // Clean on the way in, not only on the way out. This file is edited
         // by hand and synced between machines, and everything in it is
-        // drawn to a terminal -- an escape sequence in a note is a file
-        // deciding what your screen does.
+        // drawn to a terminal -- an escape sequence in a note or a tag is a
+        // file deciding what your screen does. Tags are also only ever
+        // matched in their normal form, so a hand-typed `HomeLab` could be
+        // neither removed nor renamed.
         for e in m.sessions.values_mut() {
             e.note = clean_note(&e.note);
+            e.tags = e
+                .tags
+                .iter()
+                .map(|t| normalize_tag(t))
+                .filter(|t| !t.is_empty())
+                .collect();
+            e.tags.sort();
+            e.tags.dedup();
         }
         m
     }
@@ -70,10 +104,16 @@ impl Meta {
     /// truncating it, and the rotation covers the other way of losing data —
     /// a write that succeeds but contains the wrong thing.
     pub fn save(&self) -> Result<()> {
-        let p = meta_path();
+        self.save_at(&meta_path())
+    }
+
+    pub fn save_at(&self, p: &std::path::Path) -> Result<()> {
         std::fs::create_dir_all(p.parent().unwrap())?;
-        rotate_backups(&p);
-        let tmp = p.with_extension("json.tmp");
+        rotate_backups(p);
+        // Ours alone. Two instances saving at once shared one temp name, so
+        // one could truncate the file the other was halfway through writing
+        // and then rename it into place.
+        let tmp = p.with_extension(format!("json.tmp.{}", std::process::id()));
         {
             let mut f = std::fs::File::create(&tmp)?;
             f.write_all(&serde_json::to_vec_pretty(self)?)?;
@@ -239,6 +279,43 @@ mod tests {
             normalize_tag("keep/slash.dot_under-dash"),
             "keep/slash.dot_under-dash"
         );
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_kept_rather_than_saved_over() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("meta.json");
+        let precious = br#"{"sessions":{"precious-1":{"favorite":true},}}"#;
+        std::fs::write(&p, precious).unwrap();
+
+        let mut m = Meta::load_at(&p);
+        assert!(m.sessions.is_empty());
+        // four edits: enough to rotate it out of every backup
+        for id in ["a", "b", "c", "d"] {
+            m.toggle_favorite(id);
+            m.save_at(&p).unwrap();
+        }
+        let kept = std::fs::read_dir(d.path())
+            .unwrap()
+            .flatten()
+            .any(|e| std::fs::read(e.path()).is_ok_and(|b| b == precious));
+        assert!(kept, "the unreadable original is gone");
+    }
+
+    #[test]
+    fn tags_from_a_hand_edit_are_normalised_on_load() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("meta.json");
+        std::fs::write(
+            &p,
+            r#"{"sessions":{"a":{"tags":["HomeLab","eft","  ","x\u001b]0;y\u0007z","homelab"]}}}"#,
+        )
+        .unwrap();
+        let mut m = Meta::load_at(&p);
+        assert_eq!(m.get("a").unwrap().tags, vec!["eft", "homelab", "x0yz"]);
+        // and so it can be taken off again
+        m.remove_tag("a", "HomeLab");
+        assert_eq!(m.get("a").unwrap().tags, vec!["eft", "x0yz"]);
     }
 
     #[test]
