@@ -153,6 +153,11 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress, must_wait: bool) ->
         let rev = (ms / reveal_ms).min(1.0);
         let complete = rev >= 1.0;
 
+        // The last frame is held for a moment after it is drawn, so it is
+        // drawn at rest. On a warm start it caught the glint just coming on
+        // and held it there, a smear down the first letter.
+        let ending = (finished || !must_wait) && elapsed >= floor && complete;
+
         // The fresh gold is the light while it runs along the path; after
         // that, a glint every so often.
         let light = if !complete {
@@ -160,6 +165,8 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress, must_wait: bool) ->
                 traced: rev,
                 glint: None,
             }
+        } else if ending {
+            art::Light::STILL
         } else {
             let t = ((ms - reveal_ms) / SWEEP_MS).fract() / CROSSING;
             art::Light {
@@ -263,7 +270,7 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress, must_wait: bool) ->
             }
         }
 
-        if (finished || !must_wait) && elapsed >= floor && complete {
+        if ending {
             std::thread::sleep(Duration::from_millis(160));
             break;
         }
