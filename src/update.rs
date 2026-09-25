@@ -78,21 +78,46 @@ fn touch_stamp_at(stamp: &Path) {
     let _ = std::fs::write(stamp, chrono::Utc::now().to_rfc3339());
 }
 
-/// `0.2.0` -> `[0, 2, 0]`, ignoring a leading `v` and anything after a dash.
-fn parts(v: &str) -> Vec<u64> {
-    v.trim()
-        .trim_start_matches('v')
-        .split('-')
-        .next()
-        .unwrap_or("")
-        .split('.')
-        .map(|p| p.parse().unwrap_or(0))
-        .collect()
+/// `0.2.0-rc.1` -> `([0, 2, 0], "rc.1")`, ignoring a leading `v`.
+fn parts(v: &str) -> (Vec<u64>, &str) {
+    let v = v.trim().trim_start_matches('v');
+    let (release, pre) = v.split_once('-').unwrap_or((v, ""));
+    let nums = release.split('.').map(|p| p.parse().unwrap_or(0)).collect();
+    (nums, pre)
+}
+
+/// How two pre-release labels order, the way semver has it: dot by dot,
+/// numbers as numbers, a number before a word, and fewer parts first.
+fn pre_order(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let (mut x, mut y) = (a.split('.'), b.split('.'));
+    loop {
+        let (p, q) = match (x.next(), y.next()) {
+            (None, None) => return Ordering::Equal,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(p), Some(q)) => (p, q),
+        };
+        let o = match (p.parse::<u64>(), q.parse::<u64>()) {
+            (Ok(m), Ok(n)) => m.cmp(&n),
+            (Ok(_), Err(_)) => Ordering::Less,
+            (Err(_), Ok(_)) => Ordering::Greater,
+            (Err(_), Err(_)) => p.cmp(q),
+        };
+        if o != Ordering::Equal {
+            return o;
+        }
+    }
 }
 
 /// Is `candidate` a later version than `have`?
+///
+/// A pre-release comes before the release it leads up to. Everything after
+/// the dash used to be dropped, so `0.6.0-rc.1` counted as 0.6.0 itself: a
+/// machine that took the candidate never saw the release, and rc.2 was not
+/// newer than rc.1.
 pub fn is_newer(candidate: &str, have: &str) -> bool {
-    let (a, b) = (parts(candidate), parts(have));
+    let ((a, apre), (b, bpre)) = (parts(candidate), parts(have));
     for i in 0..a.len().max(b.len()) {
         let (x, y) = (
             a.get(i).copied().unwrap_or(0),
@@ -102,7 +127,13 @@ pub fn is_newer(candidate: &str, have: &str) -> bool {
             return x > y;
         }
     }
-    false
+    match (apre.is_empty(), bpre.is_empty()) {
+        (true, true) => false,
+        // the release beats its own candidates, never the other way
+        (true, false) => true,
+        (false, true) => false,
+        (false, false) => pre_order(apre, bpre).is_gt(),
+    }
 }
 
 fn curl(args: &[&str]) -> Result<Vec<u8>> {
@@ -436,6 +467,22 @@ mod tests {
         assert!(!is_newer("", "0.4.8"));
         // a tag we cannot parse must never look like an upgrade
         assert!(!is_newer("nightly", "0.2.0"));
+    }
+
+    #[test]
+    fn a_pre_release_comes_before_its_release() {
+        assert!(
+            is_newer("v0.6.0", "0.6.0-rc.1"),
+            "the release after its candidate"
+        );
+        assert!(!is_newer("v0.6.0-rc.1", "0.6.0"));
+        assert!(is_newer("v0.6.0-rc.2", "0.6.0-rc.1"));
+        assert!(is_newer("v0.6.0-rc.10", "0.6.0-rc.9"), "numbers as numbers");
+        assert!(is_newer("v0.6.0-rc.1", "0.6.0-beta.3"));
+        assert!(is_newer("v0.6.0-rc.1.1", "0.6.0-rc.1"));
+        assert!(!is_newer("v0.6.0-rc.1", "0.6.0-rc.1"));
+        // still newer than the release before it
+        assert!(is_newer("v0.6.0-rc.1", "0.5.0"));
     }
 
     /// A stamp of our own, so the suite never reads or writes the real one.

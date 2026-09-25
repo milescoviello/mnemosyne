@@ -74,3 +74,7 @@ jobs:
             *.tar.gz
             *.tar.gz.sha256
           generate_release_notes: true
+          # A tag with a dash is a candidate. Published as an ordinary
+          # release it became "latest", which every updater and installer
+          # takes, and so every machine ran the candidate.
+          prerelease: ${{ contains(github.ref_name, '-') }}
