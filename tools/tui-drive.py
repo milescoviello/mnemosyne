@@ -56,13 +56,17 @@ class Screen:
             ch = s[i]
             if ch == "\x1b":
                 # an incomplete escape at the end of a read: keep it for later
-                if re.fullmatch(r"\x1b\[?[0-9;?]*", s[i:]):
+                if re.fullmatch(r"\x1b\[?[<=>?]?[0-9;?]*", s[i:]):
                     self.pending = s[i:]
                     return
                 if s[i:i + 2] == "\x1b]" and not re.search(r"(\x07|\x1b\\)", s[i:]):
                     self.pending = s[i:]
                     return
-                m = re.match(r"\x1b\[([0-9;?]*)([a-zA-Z])", s[i:])
+                # CSI may carry a private prefix: `\x1b[>1u` pushes the
+                # keyboard flags, and without the prefix it was drawn as text
+                m = re.match(r"\x1b\[([<=>?]?[0-9;?]*)([a-zA-Z])", s[i:])
+                if m and m.group(1)[:1] in ("<", "=", ">"):
+                    i += m.end(); continue
                 if m:
                     p, fn = m.group(1), m.group(2)
                     nums = [int(x) for x in p.split(";") if x.isdigit()]
