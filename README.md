@@ -328,13 +328,13 @@ It is covering real work — the index builds on a background thread while this
 runs. With nothing cached yet there is no list to show until that finishes, so
 it lasts until indexing does, and at least about 1.5s; `ctrl+c` leaves at any
 point. With a cache there is a list to show at once, and it is shown at once —
-about twenty milliseconds from `mn` to the list here — while the rescan
+about thirty milliseconds from `mn` to the list here — while the rescan
 carries on behind it. `[splash] warm = true` plays a short version on those
 starts too. Once there is nothing left to wait for, any key skips, and that
-keypress is swallowed so it cannot act on the session under the cursor. When there is genuine work left the bar reports
-it; on a warm index the bar fills with the reveal and the counts below state
-the real totals. The bar never steps backwards when the source changes under
-it.
+keypress is swallowed so it cannot act on the session under the cursor. When
+there is genuine work left the bar reports it; on a warm index the bar fills
+with the reveal and the counts below state the real totals. The bar never
+steps backwards when the source changes under it.
 
 Turn it off with `--no-splash` or `MNEMOSYNE_NO_SPLASH=1`. `?` shows the same
 tablet, at rest, over the key reference when there is room for it.
@@ -655,11 +655,12 @@ to 17, `permission mode` from 6 to 13.
 **What the index cannot tokenise is looked for as written.** The index
 splits text on anything that is not a letter or a digit, and does not split
 Chinese, Japanese or Thai at all. So `c++` was a prefix search for "c" that
-matched nearly every session, and a Japanese word from the middle of a
-sentence matched nothing. A query whose words start or end in a symbol, or
-that is written in one of those scripts, is instead found by reading the
-indexed prose for it literally: about a tenth of the corpus, so `c++` answers
-in a quarter of a second here, with its 54 real matches.
+matched nearly every session, `__init__` one for "init", and a Japanese word
+from the middle of a sentence matched nothing. A query whose words start or
+end in a symbol other than punctuation, or that is written in one of those
+scripts, is instead found by reading the indexed prose for it literally:
+about a tenth of the corpus, so `c++` answers in a quarter of a second here,
+with its 54 real matches.
 
 **The index and the scan agree.** They did not: the scan skipped `isMeta`
 lines and the index harvested them, so the same query answered differently
@@ -709,7 +710,7 @@ sessions that run changed, over the file as it is at that moment and under
 `meta.json.lock`, so two browsers open at once keep each other's marks. One
 that is not JSON at all is moved aside to `meta.json.unreadable-<time>` rather
 than read as empty and saved over; a value of the wrong type in one that is
-costs only that value, and the file as found is copied to
+costs only that value, and the file as found is copied, once, to
 `meta.json.as-found-<time>` first. `workspace.json` is written the same way;
 losing it costs you one reopen offer and nothing else.
 
@@ -819,7 +820,7 @@ worth keeping as a fallback if the binary is ever missing:
 ## Development
 
 ```sh
-cargo test          # 400 tests, no network and no fixtures on disk
+cargo test          # 445 tests, no network and no fixtures on disk
 cargo clippy --all-targets -- -D warnings
 tools/shell-selftest.sh           # the wrappers under bash, zsh and fish, 195 checks
 tools/install-selftest.sh         # install.sh into empty homes, then `mn` in each shell
