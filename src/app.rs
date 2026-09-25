@@ -1998,6 +1998,16 @@ impl App {
             }
             return;
         }
+        // A prompt acts on the row it was opened over, and the keyboard
+        // cannot leave that row while it is open. The wheel and a click
+        // could, so a note, a tag or a tmux name went to wherever they left
+        // the cursor when you pressed enter.
+        if matches!(
+            self.input_mode,
+            InputMode::TagAdd | InputMode::TagFilter | InputMode::Note | InputMode::TmuxName
+        ) {
+            return;
+        }
 
         match m.kind {
             MouseEventKind::ScrollUp => self.move_by(-3),
@@ -4530,5 +4540,40 @@ mod mouse_tests {
         a.on_mouse(at(MouseEventKind::ScrollDown, 60, 6));
         assert_eq!(a.cursor, cursor, "the list must not move");
         assert!(a.viewer_scroll > 0);
+    }
+
+    #[test]
+    fn a_note_goes_on_the_row_it_was_opened_for_whatever_the_mouse_does() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut a = app();
+        laid_out(&mut a);
+        let was = a.current().unwrap().id.clone();
+        a.on_key(KeyEvent::from(KeyCode::Char('N')));
+        for c in "mine".chars() {
+            a.on_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        a.on_mouse(at(MouseEventKind::ScrollDown, 60, 6));
+        a.on_mouse(click(60, row_y(&a, 4)));
+        a.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(a.meta.get(&was).map(|e| e.note.as_str()), Some("mine"));
+        assert_eq!(
+            a.all.iter().filter(|s| !s.note.is_empty()).count(),
+            1,
+            "the note went somewhere else as well"
+        );
+    }
+
+    #[test]
+    fn a_tmux_name_prompt_resumes_the_row_it_was_opened_for() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut a = app();
+        laid_out(&mut a);
+        let was = a.current().unwrap().id.clone();
+        a.on_key(KeyEvent::from(KeyCode::Char('W')));
+        assert_eq!(a.input_mode, InputMode::TmuxName);
+        a.on_mouse(at(MouseEventKind::ScrollDown, 60, 6));
+        a.on_key(KeyEvent::from(KeyCode::Enter));
+        let (_, targets) = a.to_open.first().expect("opened");
+        assert_eq!(targets[0].id, was);
     }
 }
