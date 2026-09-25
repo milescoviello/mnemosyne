@@ -111,7 +111,11 @@ class Screen:
 def run(argv, keys, rows=40, cols=160, settle=1.4, step=0.35):
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-    env = dict(os.environ, TERM="xterm-256color", COLORTERM="truecolor")
+    # Never the updater: it installs over the running binary, which here is
+    # the build under test, and a screenshot once came out of a release
+    # downloaded halfway through the run.
+    env = dict(os.environ, TERM="xterm-256color", COLORTERM="truecolor",
+               MNEMOSYNE_NO_UPDATE="1")
     p = subprocess.Popen(argv, stdin=slave, stdout=slave, stderr=slave,
                          close_fds=True, env=env)
     os.close(slave)
