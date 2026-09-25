@@ -1608,6 +1608,32 @@ impl App {
             self.status = "nothing selected".into();
             return;
         }
+        // The plan is tab-separated, and a folder can have a tab or a newline
+        // in its name, which no line of it can carry. Refused here, where it
+        // can be said: a window claimed to be opening while nothing was
+        // sent, and the explanation went to stderr, over the browser.
+        let unplannable = |t: &ResumeTarget| {
+            [&t.cwd, &t.id, &t.model, &t.perms, &t.title]
+                .iter()
+                .any(|f| f.contains(['\t', '\n', '\x1f']))
+        };
+        let refused: Vec<String> = targets
+            .iter()
+            .filter(|t| unplannable(t))
+            .map(|t| t.title.clone())
+            .collect();
+        if !refused.is_empty() {
+            targets.retain(|t| !unplannable(t));
+            let said = format!(
+                "cannot open {}: a tab or newline in its folder's name cannot reach the shell",
+                refused.join(", ")
+            );
+            self.status = said.clone();
+            if targets.is_empty() {
+                return;
+            }
+            self.notes.push(said);
+        }
         let picked = !self.picks().is_empty();
         // Several at once cannot all land here, so they become windows, and
         // one already running -- by wsx or anyone else -- is left out of them
@@ -4566,6 +4592,17 @@ mod logic_tests {
             .collect();
         a.absorb_rescan(fresh);
         assert!(a.selected.is_empty(), "the header still counts it");
+    }
+
+    #[test]
+    fn a_folder_the_plan_cannot_carry_is_refused_not_claimed() {
+        let mut a = app();
+        let i = a.all.iter().position(|s| s.id == "bbbbbbbb-2").unwrap();
+        a.all[i].cwd = "/home/u/odd\tfolder".into();
+        on(&mut a, "bbbbbbbb-2");
+        a.do_action(Action::NewWindow);
+        assert!(a.to_open.is_empty(), "sent a line the shell cannot read");
+        assert!(a.status.contains("cannot open"), "{:?}", a.status);
     }
 
     #[test]
