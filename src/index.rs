@@ -133,14 +133,21 @@ fn say_unusable(why: &str) -> bool {
     true
 }
 
-/// Whether opening the cache failed because the file is not a sound
-/// database -- the one failure that deleting it fixes.
-fn is_corrupt(e: &anyhow::Error) -> bool {
+/// Whether opening the cache failed because of the file itself -- not a
+/// sound database, or one this user cannot write -- which deleting it and
+/// starting again fixes. Not because another instance is busy with it:
+/// deleting it then loses everything that instance goes on to write.
+fn worth_replacing(e: &anyhow::Error) -> bool {
     e.chain().any(|c| {
         matches!(
             c.downcast_ref::<rusqlite::Error>()
                 .and_then(|e| e.sqlite_error_code()),
-            Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+            Some(
+                rusqlite::ErrorCode::DatabaseCorrupt
+                    | rusqlite::ErrorCode::NotADatabase
+                    | rusqlite::ErrorCode::ReadOnly
+                    | rusqlite::ErrorCode::CannotOpen
+            )
         )
     })
 }
@@ -195,15 +202,32 @@ impl Index {
     /// slower but entirely usable.
     pub fn open() -> Result<Index> {
         let _ = std::fs::create_dir_all(state_dir());
-        let path = db_path();
-        match Index::open_at(&path) {
+        Index::open_path(&db_path())
+    }
+
+    fn open_path(path: &std::path::Path) -> Result<Index> {
+        let path = path.to_path_buf();
+        // A cache that opens but cannot be written -- left owned by root
+        // after one `sudo mn` -- is as good as bad: it cannot take the new
+        // columns an update brings, nor anything learned since.
+        let opened = Index::open_at(&path).and_then(|i| {
+            if i.conn.is_readonly(rusqlite::DatabaseName::Main)? {
+                return Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_READONLY),
+                    None,
+                )
+                .into());
+            }
+            Ok(i)
+        });
+        match opened {
             Ok(i) => Ok(i),
             // Only a file that is itself bad is deleted. Anything else --
             // above all another instance holding the write lock past the
             // busy timeout -- says nothing against the file, and deleting it
             // from under that instance threw away everything it went on to
             // write, while its commits kept reporting success.
-            Err(first) if !is_corrupt(&first) => {
+            Err(first) if !worth_replacing(&first) => {
                 say_unusable(&first.to_string());
                 Index::open_memory()
             }
@@ -952,7 +976,7 @@ mod tests {
         let db = d.path().join("i.db");
         std::fs::write(&db, b"this is not a database, it is a sentence").unwrap();
         let bad = Index::open_at(&db).err().expect("garbage opened");
-        assert!(is_corrupt(&bad), "{bad}");
+        assert!(worth_replacing(&bad), "{bad}");
 
         // Another instance holding the lock is no reason to delete it.
         let busy: anyhow::Error = rusqlite::Error::SqliteFailure(
@@ -960,7 +984,25 @@ mod tests {
             None,
         )
         .into();
-        assert!(!is_corrupt(&busy));
+        assert!(!worth_replacing(&busy));
+    }
+
+    #[test]
+    fn a_cache_this_user_cannot_write_is_replaced() {
+        // Owned by root after one `sudo mn`: it opened, could never take the
+        // columns an update adds, and every run fell back to memory.
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("i.db");
+        {
+            let mut idx = Index::open_at(&db).unwrap();
+            idx.store(&[sample("/a.jsonl", "hello")]).unwrap();
+        }
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let mut idx = Index::open_path(&db).unwrap();
+        assert!(!idx.ephemeral, "fell back to memory");
+        idx.store(&[sample("/b.jsonl", "written")])
+            .expect("still read-only");
     }
 
     #[test]
