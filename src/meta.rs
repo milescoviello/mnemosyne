@@ -32,10 +32,50 @@ fn is_false(b: &bool) -> bool {
 pub struct Meta {
     #[serde(default)]
     pub sessions: BTreeMap<String, Entry>,
-    /// The sessions this run has changed, which are all a save writes over
-    /// what is on disk. Never stored.
+    /// What this run has done, session by session, which is all a save does
+    /// to the file. Never stored.
     #[serde(skip)]
-    changed: std::collections::BTreeSet<String>,
+    changed: BTreeMap<String, Change>,
+}
+
+/// What one run did to one session's marks.
+///
+/// Kept as what was done rather than as the entry it left behind, so a save
+/// can do the same to the entry as it is on disk by then. Writing back the
+/// whole entry lost whatever another browser had done to the same session:
+/// a tag added in one, a star in the other, and the tag was gone.
+#[derive(Default)]
+struct Change {
+    favorite: Option<bool>,
+    note: Option<String>,
+    added: std::collections::BTreeSet<String>,
+    removed: std::collections::BTreeSet<String>,
+}
+
+impl Change {
+    fn add(&mut self, tag: &str) {
+        self.removed.remove(tag);
+        self.added.insert(tag.to_string());
+    }
+    fn remove(&mut self, tag: &str) {
+        self.added.remove(tag);
+        self.removed.insert(tag.to_string());
+    }
+    fn apply(self, e: &mut Entry) {
+        if let Some(f) = self.favorite {
+            e.favorite = f;
+        }
+        if let Some(n) = self.note {
+            e.note = n;
+        }
+        e.tags.retain(|t| !self.removed.contains(t));
+        for t in self.added {
+            if !e.tags.contains(&t) {
+                e.tags.push(t);
+            }
+        }
+        e.tags.sort();
+    }
 }
 
 /// Counts of what the overlay marks, split from what it no longer reaches.
@@ -132,11 +172,9 @@ impl Meta {
             .and_then(|b| serde_json::from_slice::<Meta>(&b).ok());
         if let Some(mut disk) = on_disk {
             disk.clean();
-            for id in std::mem::take(&mut self.changed) {
-                match self.sessions.get(&id) {
-                    Some(e) => disk.sessions.insert(id, e.clone()),
-                    None => disk.sessions.remove(&id),
-                };
+            for (id, change) in std::mem::take(&mut self.changed) {
+                change.apply(disk.sessions.entry(id.clone()).or_default());
+                disk.gc(&id);
             }
             self.sessions = disk.sessions;
         }
@@ -183,10 +221,10 @@ impl Meta {
     }
 
     pub fn toggle_favorite(&mut self, id: &str) -> bool {
-        self.changed.insert(id.to_string());
         let e = self.sessions.entry(id.to_string()).or_default();
         e.favorite = !e.favorite;
         let now = e.favorite;
+        self.changed.entry(id.to_string()).or_default().favorite = Some(now);
         self.gc(id);
         now
     }
@@ -196,7 +234,7 @@ impl Meta {
         if tag.is_empty() {
             return;
         }
-        self.changed.insert(id.to_string());
+        self.changed.entry(id.to_string()).or_default().add(&tag);
         let e = self.sessions.entry(id.to_string()).or_default();
         if !e.tags.iter().any(|t| t == &tag) {
             e.tags.push(tag);
@@ -205,8 +243,8 @@ impl Meta {
     }
 
     pub fn remove_tag(&mut self, id: &str, tag: &str) {
-        self.changed.insert(id.to_string());
         let tag = normalize_tag(tag);
+        self.changed.entry(id.to_string()).or_default().remove(&tag);
         if let Some(e) = self.sessions.get_mut(id) {
             e.tags.retain(|t| t != &tag);
         }
@@ -214,9 +252,9 @@ impl Meta {
     }
 
     pub fn set_note(&mut self, id: &str, note: &str) {
-        self.changed.insert(id.to_string());
         let e = self.sessions.entry(id.to_string()).or_default();
         e.note = clean_note(note);
+        self.changed.entry(id.to_string()).or_default().note = Some(e.note.clone());
         self.gc(id);
     }
 
@@ -238,7 +276,9 @@ impl Meta {
         let mut n = 0;
         for (id, e) in self.sessions.iter_mut() {
             if let Some(pos) = e.tags.iter().position(|t| *t == from) {
-                self.changed.insert(id.clone());
+                let ch = self.changed.entry(id.clone()).or_default();
+                ch.remove(&from);
+                ch.add(&to);
                 e.tags.remove(pos);
                 if !e.tags.contains(&to) {
                     e.tags.push(to.clone());
@@ -383,6 +423,29 @@ mod tests {
         );
         // and b now knows what a did
         assert!(b.get("s1").is_some());
+    }
+
+    #[test]
+    fn two_browsers_changing_one_session_keep_both_changes() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("meta.json");
+        let mut first = Meta::default();
+        first.add_tag("s1", "old");
+        first.set_note("s1", "a note");
+        first.save_at(&p).unwrap();
+
+        let mut a = Meta::load_at(&p);
+        let mut b = Meta::load_at(&p);
+        a.add_tag("s1", "from-a");
+        a.remove_tag("s1", "old");
+        a.save_at(&p).unwrap();
+        b.toggle_favorite("s1");
+        b.save_at(&p).unwrap();
+
+        let e = Meta::load_at(&p).get("s1").cloned().unwrap();
+        assert!(e.favorite, "b's star");
+        assert_eq!(e.tags, vec!["from-a"], "a's tag change");
+        assert_eq!(e.note, "a note", "the note neither touched");
     }
 
     #[test]
