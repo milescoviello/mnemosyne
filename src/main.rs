@@ -823,13 +823,7 @@ fn main() -> Result<()> {
                 }
                 return;
             }
-            let _ = disable_raw_mode();
-            let _ = execute!(
-                stderr(),
-                event::PopKeyboardEnhancementFlags,
-                DisableMouseCapture,
-                LeaveAlternateScreen
-            );
+            put_back();
             default_hook(info);
         }));
     }
@@ -902,13 +896,7 @@ fn main() -> Result<()> {
                 Ok(splash::End::Aborted)
             )
         {
-            let _ = disable_raw_mode();
-            let _ = execute!(
-                term.backend_mut(),
-                DisableMouseCapture,
-                LeaveAlternateScreen
-            );
-            let _ = term.show_cursor();
+            put_back();
             std::process::exit(128 + signalled().unwrap_or(libc::SIGINT));
         }
         if cold_start {
@@ -1028,17 +1016,30 @@ fn signalled() -> Option<i32> {
 /// at the end of the browser, or by any unwinding past it.
 struct Restore;
 
+static PUT_BACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Put the terminal back, once. After a panic the hook did it and then the
+/// unwinding dropped `Restore`, which popped the keyboard protocol a second
+/// time -- off the stack of the screen underneath, which is the shell's.
+/// ctrl+c during the opening animation did it without popping at all.
+fn put_back() {
+    if PUT_BACK.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let mut err = stderr();
+    let _ = execute!(err, event::PopKeyboardEnhancementFlags);
+    let _ = disable_raw_mode();
+    let _ = execute!(
+        err,
+        DisableMouseCapture,
+        LeaveAlternateScreen,
+        crossterm::cursor::Show
+    );
+}
+
 impl Drop for Restore {
     fn drop(&mut self) {
-        let mut err = stderr();
-        let _ = execute!(err, event::PopKeyboardEnhancementFlags);
-        let _ = disable_raw_mode();
-        let _ = execute!(
-            err,
-            DisableMouseCapture,
-            LeaveAlternateScreen,
-            crossterm::cursor::Show
-        );
+        put_back();
         if let Ok(held) = BACKGROUND_PANICS.lock() {
             for m in held.iter() {
                 eprintln!("mnemosyne: a background task failed: {m}");

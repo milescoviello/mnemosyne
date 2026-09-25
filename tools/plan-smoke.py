@@ -180,6 +180,10 @@ def main():
                       ("pops the keyboard protocol", "\x1b[<1u"),
                       ("turns mouse reporting off", "\x1b[?1006l")):
         check(f"a panic {what}", seq in screen, "not found in the output")
+    # Once: popped again as the panic unwound, it came off the stack of the
+    # screen underneath, which is the shell's.
+    check("and pops it only once", screen.count("\x1b[<1u") == 1,
+          f"{screen.count(chr(27) + '[<1u')} times")
     check("a panic still says what happened", "deliberate panic" in screen,
           repr(screen[-200:]))
 
