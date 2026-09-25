@@ -88,6 +88,19 @@ pub fn boot_id() -> String {
     }
     #[cfg(not(target_os = "linux"))]
     {
+        // macOS names each boot outright. Preferred to the boot time below,
+        // which is the clock minus the uptime, and so moves whenever the
+        // clock is stepped -- by hand, or by NTP after a wake -- and a
+        // stepped clock read as a reboot.
+        if let Ok(o) = std::process::Command::new("sysctl")
+            .args(["-n", "kern.bootsessionuuid"])
+            .output()
+        {
+            let id = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if o.status.success() && !id.is_empty() {
+                return format!("session-{id}");
+            }
+        }
         if let Ok(o) = std::process::Command::new("sysctl")
             .args(["-n", "kern.boottime"])
             .output()
@@ -100,6 +113,33 @@ pub fn boot_id() -> String {
         }
     }
     String::new()
+}
+
+/// Whether two boot identities could be the same boot.
+///
+/// Boot times a minute apart are one boot seen through a clock that was
+/// stepped. And two different kinds of identity -- after an update that
+/// reads a better one -- are no evidence of a reboot at all: taking them for
+/// one offered to reopen sessions still running, which off Linux there is no
+/// way to see, so taking the offer started a second client on each.
+fn same_boot(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let kind = |s: &str| {
+        if s.starts_with("boot-") {
+            1
+        } else if s.starts_with("session-") {
+            2
+        } else {
+            0
+        }
+    };
+    if kind(a) != kind(b) {
+        return true;
+    }
+    let secs = |s: &str| s.strip_prefix("boot-").and_then(|n| n.parse::<i64>().ok());
+    matches!((secs(a), secs(b)), (Some(x), Some(y)) if (x - y).abs() <= 60)
 }
 
 /// `btime 1758300000` out of /proc/stat.
@@ -187,7 +227,9 @@ pub fn fold(
     boot: &str,
     authoritative: bool,
 ) -> Workspace {
-    let rolled = !boot.is_empty() && !stored.current.boot.is_empty() && stored.current.boot != boot;
+    let rolled = !boot.is_empty()
+        && !stored.current.boot.is_empty()
+        && !same_boot(&stored.current.boot, boot);
     if rolled {
         // A reboot happened since the last write. The set from before it
         // becomes the offer -- unless it was empty, in which case an earlier
@@ -477,6 +519,43 @@ mod tests {
     fn an_unreadable_file_is_an_empty_workspace_not_a_crash() {
         let w: Workspace = serde_json::from_slice(b"{ this is not json").unwrap_or_default();
         assert!(w.current.sessions.is_empty() && w.previous.is_none());
+    }
+
+    #[test]
+    fn a_stepped_clock_or_a_new_kind_of_id_is_not_a_reboot() {
+        assert!(
+            same_boot("boot-1758300000", "boot-1758300042"),
+            "a stepped clock"
+        );
+        assert!(
+            !same_boot("boot-1758300000", "boot-1758390000"),
+            "a day apart is a reboot"
+        );
+        assert!(
+            same_boot("boot-1758300000", "session-ABCD"),
+            "an update, not a reboot"
+        );
+        assert!(!same_boot("session-ABCD", "session-EFGH"));
+        assert!(!same_boot("8a1b-linux", "9c2d-linux"));
+
+        let one = |id: &str| Entry {
+            id: id.into(),
+            cwd: "/tmp".into(),
+            ..Default::default()
+        };
+        let w = fold(
+            Workspace::default(),
+            vec![one("a")],
+            "boot-1758300000",
+            false,
+        );
+        let w = fold(w, vec![one("a")], "session-ABCD", false);
+        assert!(
+            w.previous.is_none(),
+            "offered to reopen what is still running"
+        );
+        let w = fold(w, vec![one("b")], "session-EFGH", false);
+        assert!(w.previous.is_some(), "a real reboot was missed");
     }
 
     #[test]

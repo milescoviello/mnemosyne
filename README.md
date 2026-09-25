@@ -366,8 +366,9 @@ matched by working directory instead, and two of those in one folder look
 like one session.
 
 The offer is only made when a reboot has actually happened, which is
-established from `/proc/sys/kernel/random/boot_id` on Linux and from
-`kern.boottime` elsewhere. On a platform where neither can be read, the offer
+established from `/proc/sys/kernel/random/boot_id` on Linux, from
+`kern.bootsessionuuid` on macOS, and from `kern.boottime` elsewhere — a boot
+time that moved by less than a minute is a clock being stepped, not a reboot. On a platform where neither can be read, the offer
 is never made on its own and `mn --reopen` is the way in.
 
 ## tmux
