@@ -237,6 +237,19 @@ fn without_deleted(p: PathBuf) -> PathBuf {
     }
 }
 
+/// Nothing to install: the one way `install_latest` stops that is not a
+/// failure, and so not worth a failing exit status.
+#[derive(Debug)]
+pub struct UpToDate(pub &'static str);
+
+impl std::fmt::Display for UpToDate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "already on {}", self.0)
+    }
+}
+
+impl std::error::Error for UpToDate {}
+
 /// Download the latest release and put it in place.
 ///
 /// Returns the version installed. The running process keeps its own image;
@@ -244,7 +257,7 @@ fn without_deleted(p: PathBuf) -> PathBuf {
 pub fn install_latest() -> Result<String> {
     let tag = latest_tag().ok_or_else(|| anyhow!("could not reach GitHub"))?;
     if !is_newer(&tag, current()) {
-        return Err(anyhow!("already on {}", current()));
+        return Err(UpToDate(current()).into());
     }
 
     let staging = Staging::new()?;

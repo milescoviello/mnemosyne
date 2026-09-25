@@ -101,7 +101,9 @@ fn plan_line(
     tmux: &str,
 ) -> Result<bool> {
     let fields = [cwd, id, model, perms, title, tmux];
-    if let Some(bad) = fields.iter().find(|f| f.contains('\t') || f.contains('\n')) {
+    // \x1f too: mn.bash splits on it, having swapped the tabs for it so that
+    // an empty field survives `read`.
+    if let Some(bad) = fields.iter().find(|f| f.contains(['\t', '\n', '\x1f'])) {
         eprintln!(
             "skipping {id}: a tab or newline in {bad:?} cannot be carried \
              by the plan the shell reads"
@@ -205,6 +207,21 @@ fn check_args(args: &[String]) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// The flags on the command line, leaving out the value of one that takes a
+/// value. Looking for a flag anywhere in the arguments found it in a value
+/// too: `--search --update` installed an update, and `--search --help`
+/// printed the help, instead of searching for those words.
+fn flags_given(args: &[String]) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        out.push(a);
+        i += if takes_value(a) { 2 } else { 1 };
+    }
+    out
+}
+
 /// The argument after `flag`, unless that is itself a flag.
 fn value_of<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
     let i = args.iter().position(|a| a == flag)?;
@@ -227,7 +244,8 @@ fn main() -> Result<()> {
     }
 
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let has = |f: &str| args.iter().any(|a| a == f);
+    let given = flags_given(&args);
+    let has = |f: &str| given.contains(&f);
 
     if has("-h") || has("--help") {
         print!("{HELP}");
@@ -247,9 +265,15 @@ fn main() -> Result<()> {
 
     if has("--update") {
         println!("current {}", update::current());
+        // An answer that it failed has to fail, as every report flag's does:
+        // `mn --update && …` carried on after a refused checksum.
         match update::install_latest() {
             Ok(v) => println!("updated to {v} — it takes effect next time you start"),
-            Err(e) => println!("not updated: {e}"),
+            Err(e) if e.is::<update::UpToDate>() => println!("{e}"),
+            Err(e) => {
+                println!("not updated: {e}");
+                std::process::exit(1);
+            }
         }
         return Ok(());
     }
@@ -260,7 +284,10 @@ fn main() -> Result<()> {
                 println!("{} is available; you have {}", tag, update::current())
             }
             Some(tag) => println!("up to date on {} (latest is {tag})", update::current()),
-            None => println!("could not reach GitHub"),
+            None => {
+                println!("could not reach GitHub");
+                std::process::exit(1);
+            }
         }
         return Ok(());
     }
@@ -290,9 +317,9 @@ fn main() -> Result<()> {
     }
 
     // The rest of the report flags have answered and returned by now.
-    let interactive = !args
+    let interactive = !given
         .iter()
-        .any(|a| REPORT_FLAGS.contains(&a.as_str()) || REPORT_VALUE_FLAGS.contains(&a.as_str()));
+        .any(|a| REPORT_FLAGS.contains(a) || REPORT_VALUE_FLAGS.contains(a));
     let use_splash =
         interactive && !has("--no-splash") && std::env::var_os("MNEMOSYNE_NO_SPLASH").is_none();
 
@@ -973,7 +1000,7 @@ fn run<B: ratatui::backend::Backend>(
 
 #[cfg(test)]
 mod arg_tests {
-    use super::check_args;
+    use super::{check_args, flags_given};
 
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(str::to_string).collect()
@@ -992,6 +1019,17 @@ mod arg_tests {
         ] {
             assert!(check_args(&args(line)).is_ok(), "rejected {line:?}");
         }
+    }
+
+    #[test]
+    fn a_search_for_something_that_looks_like_a_flag_is_a_search() {
+        // `--search --update` installed an update.
+        let a = args("--search --update --search-mode everything");
+        assert!(check_args(&a).is_ok());
+        let given = flags_given(&a);
+        assert!(given.contains(&"--search"));
+        assert!(!given.contains(&"--update"), "{given:?}");
+        assert!(!given.contains(&"everything"), "{given:?}");
     }
 
     #[test]
@@ -1139,6 +1177,13 @@ mod plan_tests {
         let (wrote, text) = line("/home/u/tab\there", "fine");
         assert!(!wrote);
         assert!(text.is_empty(), "wrote a line that cannot be parsed back");
+    }
+
+    #[test]
+    fn the_separator_mn_bash_splits_on_is_refused_too() {
+        let (wrote, text) = line("/home/u/odd\u{1f}folder", "fine");
+        assert!(!wrote);
+        assert!(text.is_empty());
     }
 
     #[test]
