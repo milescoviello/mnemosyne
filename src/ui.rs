@@ -866,10 +866,17 @@ fn draw_list(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
         n => (sub_x, sub_x + n as u16 - 1),
     };
 
+    // Only the rows on screen are built. Every one of them was, every frame
+    // -- two thousand rows, clipped, measured and styled to show forty --
+    // which was nearly all of what drawing a frame cost.
+    let height = area.height as usize;
+    let first = visible_from(app.list_state.offset(), cursor, app.view.len(), height);
     let items: Vec<ListItem> = app
         .view
         .iter()
         .enumerate()
+        .skip(first)
+        .take(height)
         .map(|(row_i, r)| match r {
             // a dotted rule, with the band's name set into it
             Row::Divider(label) => {
@@ -1099,11 +1106,33 @@ fn draw_list(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
         .block(Block::default())
         .highlight_style(Style::default().bg(th().band));
 
-    app.list_state.select(Some(app.cursor));
-    f.render_stateful_widget(list, area, &mut app.list_state);
+    let mut window = ratatui::widgets::ListState::default().with_selected(
+        app.cursor
+            .checked_sub(first)
+            .filter(|_| !app.view.is_empty()),
+    );
+    f.render_stateful_widget(list, area, &mut window);
+    app.list_state = ratatui::widgets::ListState::default()
+        .with_offset(first)
+        .with_selected(Some(app.cursor));
 
     app.hits.list = area;
-    app.hits.list_offset = app.list_state.offset();
+    app.hits.list_offset = first;
+}
+
+/// The first row on screen, scrolled the way ratatui's list scrolls its
+/// one-line rows: from where it was, just far enough to keep the selected
+/// row in view.
+fn visible_from(offset: usize, selected: usize, len: usize, height: usize) -> usize {
+    if len == 0 || height == 0 {
+        return 0;
+    }
+    let selected = selected.min(len - 1);
+    let mut first = offset.min(len - 1);
+    if selected >= first + height {
+        first = selected + 1 - height;
+    }
+    first.min(selected)
 }
 
 /// How far along a rule has faded, 0 at its start, 1 where it is gone.
@@ -2369,6 +2398,46 @@ mod render_tests {
                 seen.dedup();
                 assert_eq!(seen.len(), rows.len(), "{w}x{h}: {rows:?}");
             }
+        }
+    }
+
+    #[test]
+    fn drawing_only_what_shows_scrolls_as_the_whole_list_did() {
+        // ratatui's list, given every row, against the window worked out
+        // here, over a cursor wandering up and down and a list that shrinks.
+        use ratatui::widgets::{List, ListItem, ListState};
+        let mut seed: u64 = 7;
+        let mut next = |n: usize| {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as usize % n
+        };
+        let (mut theirs, mut ours) = (ListState::default(), 0usize);
+        let mut len = 200;
+        let mut cursor = 0usize;
+        for step in 0..600 {
+            match next(4) {
+                0 => cursor = cursor.saturating_sub(next(15)),
+                1 => cursor = (cursor + next(15)).min(len - 1),
+                2 => cursor = next(len),
+                _ => {
+                    len = 20 + next(200);
+                    cursor = cursor.min(len - 1);
+                }
+            }
+            let h = 5 + next(30) as u16;
+            let items: Vec<ListItem> = (0..len).map(|i| ListItem::new(i.to_string())).collect();
+            let mut term = Terminal::new(TestBackend::new(20, h)).unwrap();
+            theirs.select(Some(cursor));
+            term.draw(|f| f.render_stateful_widget(List::new(items), f.area(), &mut theirs))
+                .unwrap();
+            ours = visible_from(ours, cursor, len, h as usize);
+            assert_eq!(
+                ours,
+                theirs.offset(),
+                "step {step}: cursor {cursor} of {len}, height {h}"
+            );
         }
     }
 
