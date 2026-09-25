@@ -461,6 +461,10 @@ fn process_line(s: &mut Session, line: &[u8], text: &mut Option<&mut String>) {
 }
 
 /// Scan one transcript, reusing `prev` when the file only grew.
+///
+/// Without the text, so only for tests: a refresh that read on past new
+/// lines without keeping their text would never index them.
+#[cfg(test)]
 pub fn scan(
     path: &Path,
     is_subagent: bool,

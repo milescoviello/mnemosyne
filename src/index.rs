@@ -687,7 +687,7 @@ fn refresh_in(
         p.total.store(found.len(), Ordering::Relaxed);
     }
 
-    let scanned: Vec<(Session, Option<String>)> = found
+    let scanned: Vec<(Session, String)> = found
         .par_iter()
         .filter_map(|(path, is_sub, parent)| {
             let key = path.to_string_lossy().to_string();
@@ -695,31 +695,16 @@ fn refresh_in(
             // file because its size and mtime match would leave yesterday's
             // logic in place forever.
             let prev = if stale { None } else { cached.get(&key) };
-            // Only harvest text when the file actually needs reading; an
-            // untouched transcript keeps whatever is already indexed.
-            let unchanged = prev.is_some_and(|p| {
-                std::fs::metadata(path)
-                    .map(|m| {
-                        p.size == m.len()
-                            && p.mtime
-                                == m.modified()
-                                    .ok()
-                                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                                    .map(|d| d.as_secs() as i64)
-                                    .unwrap_or(0)
-                    })
-                    .unwrap_or(false)
-            });
-            let out = if unchanged {
-                scan::scan(path, *is_sub, parent.clone(), prev)
-                    .ok()
-                    .map(|s| (s, None))
-            } else {
-                let mut text = String::new();
-                scan::scan_with_text(path, *is_sub, parent.clone(), prev, &mut text)
-                    .ok()
-                    .map(|s| (s, Some(text)))
-            };
+            // Always with the text. An untouched transcript is not read at
+            // all, so this costs nothing there and leaves its text alone.
+            // Deciding "untouched" here instead, from a stat of our own,
+            // raced the scan's: a file that grew in between was read on
+            // past its new lines without keeping their text, and they were
+            // never searchable.
+            let mut text = String::new();
+            let out = scan::scan_with_text(path, *is_sub, parent.clone(), prev, &mut text)
+                .ok()
+                .map(|s| (s, text));
             if let Some(p) = &progress {
                 p.done.fetch_add(1, Ordering::Relaxed);
                 if let Some((s, _)) = &out {
@@ -732,12 +717,10 @@ fn refresh_in(
 
     let mut text_rows: Vec<(String, String)> = Vec::new();
     for (s, t) in &scanned {
-        if let Some(t) = t {
-            let key = s.path.to_string_lossy().to_string();
-            let prev = if stale { None } else { cached.get(&key) };
-            if let Some(text) = text_after_scan(&idx, prev, s, t) {
-                text_rows.push((key, text));
-            }
+        let key = s.path.to_string_lossy().to_string();
+        let prev = if stale { None } else { cached.get(&key) };
+        if let Some(text) = text_after_scan(&idx, prev, s, t) {
+            text_rows.push((key, text));
         }
     }
     let sessions: Vec<Session> = scanned.into_iter().map(|(s, _)| s).collect();
