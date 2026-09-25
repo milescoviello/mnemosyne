@@ -42,7 +42,8 @@ pub fn db_path() -> PathBuf {
 ///   9  the title given with /rename is read
 ///   10 a tool's result is left out of the text, list-shaped ones too
 ///   11 an IDE block before the first prompt no longer hides it
-pub const SCANNER_VERSION: u32 = 11;
+///   12 an escaped quote or backslash in a cwd is decoded
+pub const SCANNER_VERSION: u32 = 12;
 
 /// Every column the loader expects. Compared against what the database
 /// actually has, so drift is detected rather than assumed away.

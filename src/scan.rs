@@ -64,14 +64,36 @@ pub fn discover(include_subagents: bool) -> Vec<(PathBuf, bool, Option<String>)>
 }
 
 /// Pull a JSON string value out of raw bytes without parsing the document.
-/// Good enough for the flat, machine-written fields (cwd, gitBranch,
-/// timestamp, model, version) which never contain escapes in practice.
+/// For the flat, machine-written fields: cwd, gitBranch, timestamp, model,
+/// version.
+///
+/// Escapes are rare in those but not impossible, and a cwd is where one
+/// matters: it is where resuming goes. Cut at the first quote, a folder
+/// named `a "b" c` came back as `a \`, and one with a backslash kept both
+/// of the backslashes JSON writes -- either way, a folder that is not there.
 fn raw_str(hay: &[u8], key: &str) -> Option<String> {
     let needle = format!("\"{key}\":\"");
     let i = memmem::find(hay, needle.as_bytes())? + needle.len();
     let rest = &hay[i..];
-    let end = memchr::memchr(b'"', rest)?;
-    Some(String::from_utf8_lossy(&rest[..end]).into_owned())
+    let (mut end, mut escaped) = (0usize, false);
+    while end < rest.len() {
+        match rest[end] {
+            b'\\' => {
+                escaped = true;
+                end += 2;
+            }
+            b'"' => break,
+            _ => end += 1,
+        }
+    }
+    if end >= rest.len() {
+        return None;
+    }
+    if !escaped {
+        return Some(String::from_utf8_lossy(&rest[..end]).into_owned());
+    }
+    // the value with its quotes, decoded the way JSON means it
+    serde_json::from_slice::<String>(&hay[i - 1..i + end + 1]).ok()
 }
 
 /// Pull a JSON number out of raw bytes. The key must match exactly, so
@@ -661,6 +683,18 @@ mod tests {
             writeln!(f, "{line}").unwrap();
         }
         (dir, path)
+    }
+
+    #[test]
+    fn a_folder_with_a_quote_or_a_backslash_is_read_as_it_is_named() {
+        let b = br#"{"cwd":"/home/u/a \"b\" c","gitBranch":"main","x":1}"#;
+        assert_eq!(raw_str(b, "cwd").as_deref(), Some(r#"/home/u/a "b" c"#));
+        assert_eq!(raw_str(b, "gitBranch").as_deref(), Some("main"));
+        let b = br#"{"cwd":"/home/u/back\\slash"}"#;
+        assert_eq!(raw_str(b, "cwd").as_deref(), Some(r"/home/u/back\slash"));
+        // unterminated, as a truncated line can be
+        assert_eq!(raw_str(br#"{"cwd":"/home/u/cut"#, "cwd"), None);
+        assert_eq!(raw_str(br#"{"cwd":"/home/u/cut\"#, "cwd"), None);
     }
 
     #[test]

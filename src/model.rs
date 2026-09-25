@@ -326,7 +326,19 @@ pub fn width(s: &str) -> usize {
 }
 
 /// Clip to `w` display columns, ending in an ellipsis when it had to cut.
+///
+/// Control characters are left out on the way. They occupy no cell, and
+/// drawn, an escape is the text deciding what the terminal does. Titles are
+/// cleaned where they are read; this is for everything else put in a column
+/// -- a folder is whatever its name is, escapes and all.
 pub fn fit(s: &str, w: usize) -> String {
+    let clean: String;
+    let s = if s.contains(char::is_control) {
+        clean = s.chars().filter(|c| !c.is_control()).collect();
+        clean.as_str()
+    } else {
+        s
+    };
     if width(s) <= w {
         return s.to_string();
     }
@@ -494,6 +506,12 @@ mod tests {
                 assert_eq!(width(&out), w, "pad_fit({s:?}, {w}) = {out:?}");
             }
         }
+    }
+
+    #[test]
+    fn nothing_in_a_column_can_reach_the_terminal_as_a_control() {
+        assert_eq!(fit("/home/u/\u{1b}]0;x\u{7}dir", 40), "/home/u/]0;xdir");
+        assert_eq!(pad_fit("a\u{1b}b", 4), "ab  ");
     }
 
     #[test]
