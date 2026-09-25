@@ -298,14 +298,17 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress, must_wait: bool) ->
             lines.push(bar_line(bar_high));
             lines.push(Line::raw(""));
             lines.push(Line::from(Span::styled(
-                hint,
+                fitting_hint(hint, area.width),
                 Style::default()
                     .fg(rgb(art::sink(art::ramp(0.4), 0.55)))
                     .add_modifier(Modifier::DIM),
             )));
 
             let h = lines.len() as u16;
-            let w = if big { mark_w as u16 + 2 } else { 44 };
+            let w = box_width(
+                if big { mark_w } else { 42 },
+                fitting_hint(hint, area.width),
+            );
             let r = centered(area, w.min(area.width), h);
             f.render_widget(
                 Paragraph::new(Text::from(lines)).alignment(Alignment::Center),
@@ -334,9 +337,66 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress, must_wait: bool) ->
             std::thread::sleep(Duration::from_millis(160));
             break;
         }
-        if elapsed > Duration::from_secs(30) {
+        if gives_up(elapsed, must_wait, finished) {
             break;
         }
     }
     Ok(ended)
+}
+
+/// Whether the animation stops waiting, done or not.
+///
+/// Never while the list has nothing to show without the scan. Stopping then
+/// handed over to a join on the scan thread, with no one reading keys: the
+/// screen froze on "ctrl+c to leave" and ctrl+c did nothing until the scan
+/// was over. The refresh says when it has finished however it ends, so
+/// this cannot wait on nothing.
+fn gives_up(elapsed: Duration, must_wait: bool, finished: bool) -> bool {
+    elapsed > Duration::from_secs(30) && (!must_wait || finished)
+}
+
+/// The hint, or its short form where the long one does not fit.
+fn fitting_hint(hint: &'static str, area_w: u16) -> &'static str {
+    if crate::model::width(hint) + 2 > area_w as usize {
+        "ctrl+c to leave"
+    } else {
+        hint
+    }
+}
+
+/// Wide enough for everything in the box. It was the wordmark's width, or
+/// 44 without one: narrower than the 48-cell bar, which never looked full,
+/// and than the long hint, which lost its ending -- at 80x24, the part
+/// saying how to leave.
+fn box_width(mark_w: usize, hint: &str) -> u16 {
+    (mark_w + 2)
+        .max(BAR_W + 2)
+        .max(crate::model::width(hint) + 2) as u16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_cold_start_never_stops_waiting_on_its_own() {
+        let late = Duration::from_secs(45);
+        assert!(
+            !gives_up(late, true, false),
+            "handed over to a frozen screen"
+        );
+        assert!(gives_up(late, true, true));
+        assert!(gives_up(late, false, false));
+        assert!(!gives_up(Duration::from_secs(5), false, false));
+    }
+
+    #[test]
+    fn the_box_holds_the_bar_and_the_hint() {
+        let long = "reading every transcript — this happens once after an update · ctrl+c to leave";
+        assert!(box_width(42, long) as usize >= crate::model::width(long));
+        assert!(box_width(42, "ctrl+c to leave") as usize >= BAR_W);
+        // and on a terminal the long one does not fit, the short one
+        assert_eq!(fitting_hint(long, 60), "ctrl+c to leave");
+        assert_eq!(fitting_hint(long, 120), long);
+    }
 }
