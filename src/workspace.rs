@@ -141,10 +141,18 @@ pub fn save(w: &Workspace) -> std::io::Result<()> {
 /// can exercise it against a temporary directory instead of whatever the
 /// machine running them happens to have in its home.
 pub fn load_at(p: &std::path::Path) -> Workspace {
-    match std::fs::read(p) {
+    let mut w: Workspace = match std::fs::read(p) {
         Ok(b) => serde_json::from_slice(&b).unwrap_or_default(),
         Err(_) => Workspace::default(),
+    };
+    // The titles are drawn on the reopen banner, and this file is only ever
+    // as clean as whatever last wrote it -- a hand edit can put an escape
+    // sequence in one as easily as mn can put a title.
+    let snaps = std::iter::once(&mut w.current).chain(w.previous.as_mut());
+    for e in snaps.flat_map(|s| s.sessions.iter_mut()) {
+        e.title = crate::scan::squash(&e.title, 200);
     }
+    w
 }
 
 pub fn save_at(p: &std::path::Path, w: &Workspace) -> std::io::Result<()> {
@@ -153,7 +161,10 @@ pub fn save_at(p: &std::path::Path, w: &Workspace) -> std::io::Result<()> {
     }
     // Same temp-then-rename as the favourites file: a crash mid-write should
     // lose the update, never the file.
-    let tmp = p.with_extension("json.tmp");
+    // Named for this process: every mn writes this file, and two sharing a
+    // temp name could truncate each other's half-written copy and rename it
+    // into place, which a third then read as nothing to offer.
+    let tmp = p.with_extension(format!("json.tmp.{}", std::process::id()));
     {
         let mut f = std::fs::File::create(&tmp)?;
         let body = serde_json::to_vec_pretty(w).unwrap_or_else(|_| b"{}".to_vec());
@@ -485,5 +496,20 @@ mod tests {
         let text = serde_json::to_vec(&w).unwrap();
         let back: Workspace = serde_json::from_slice(&text).unwrap();
         assert_eq!(back.current.sessions, w.current.sessions);
+    }
+
+    #[test]
+    fn a_title_cannot_carry_an_escape_onto_the_reopen_banner() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("workspace.json");
+        std::fs::write(
+            &p,
+            r#"{"previous":{"boot":"A","sessions":[{"id":"x","cwd":"/tmp","title":"evil \u001b[2J\u001b]0;pwned\u0007 title"}]}}"#,
+        )
+        .unwrap();
+        let w = load_at(&p);
+        let title = &w.previous.unwrap().sessions[0].title;
+        assert!(!title.chars().any(|c| c.is_control()), "{title:?}");
+        assert!(title.starts_with("evil"));
     }
 }
