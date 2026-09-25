@@ -28,7 +28,12 @@ __mn_perms() {
         default) return 0 ;;
         # nothing recorded (older transcripts predate the field) — keep the old
         # cs behaviour rather than surprising anyone with prompts
-        *) printf '%s\n' --dangerously-skip-permissions ;;
+        "") printf '%s\n' --dangerously-skip-permissions ;;
+        # A mode this wrapper does not know -- one a newer Claude Code added,
+        # say. It used to fall in with "nothing recorded" and resume with
+        # every prompt switched off. Prompts on is the answer that is never
+        # a surprise.
+        *) return 0 ;;
     esac
 }
 

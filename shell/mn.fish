@@ -271,10 +271,16 @@ function __mn_perms --description 'Map a session\'s recorded permission mode to 
         case default
             # started with prompts on, so resume with prompts on
             return 0
-        case '*'
+        case ''
             # nothing recorded (older transcripts predate the field) — keep the
             # old cs behaviour rather than surprising anyone with prompts
             echo --dangerously-skip-permissions
+        case '*'
+            # A mode this wrapper does not know -- one a newer Claude Code
+            # added, say. It used to fall in with "nothing recorded" and
+            # resume with every prompt switched off. Prompts on is the answer
+            # that is never a surprise.
+            return 0
     end
 end
 

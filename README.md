@@ -465,10 +465,13 @@ the transcript, the same way the model is restored:
 | `plan`, `acceptEdits`, `auto`, `manual`, `dontAsk` | `--permission-mode <mode>` |
 | `default` | nothing — it started with prompts on, so prompts stay on |
 | *nothing recorded* | `--dangerously-skip-permissions` |
+| *anything else* | nothing — prompts on |
 
 `default` is deliberately absent from the `--permission-mode` column: it is not
 one of that flag's accepted values, and it already means "behave normally".
-The last row covers older transcripts written before the field existed.
+*Nothing recorded* covers older transcripts written before the field existed.
+A mode the wrapper does not know — one a newer Claude Code added — resumes
+with prompts on, never as a bypass.
 
 Overrides, both of which win over the recorded mode:
 

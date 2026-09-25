@@ -375,6 +375,21 @@ run_shell() {
     out=$("$runner" -c "$source_line; mn" 2>&1)
     has "$shell_name: a backslash in a title is printed as one" 'fix C:\new folder' "$out"
 
+    # --- a mode the wrapper does not know is not a bypass
+    # Only a session with nothing recorded resumes with prompts off. One in a
+    # mode the wrapper has not heard of fell in with those, and came back with
+    # every prompt switched off.
+    write_plan "here\t$tmp/work-b\t33333333-4444-5555-6666-777777777777\t\tsomeFutureMode\tnew mode\n"
+    : > "$log"
+    "$runner" -c "$source_line; mn" >/dev/null 2>&1
+    hasnt "$shell_name: an unknown mode is not resumed as a bypass" \
+        "dangerously-skip-permissions" "$(cat "$log")"
+    write_plan "here\t$tmp/work-b\t33333333-4444-5555-6666-777777777777\t\t\tno mode\n"
+    : > "$log"
+    "$runner" -c "$source_line; mn" >/dev/null 2>&1
+    has "$shell_name: but no mode recorded still is" \
+        "dangerously-skip-permissions" "$(cat "$log")"
+
     # --- claude's arguments arrive as you typed them
     # They were pasted into a command line unquoted, so in a window or under
     # tmux `--add-dir "/my projects"` arrived as two arguments -- and a `;`
