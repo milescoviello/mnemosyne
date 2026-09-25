@@ -894,10 +894,14 @@ impl App {
         let Some(i) = self.current_idx() else {
             return Vec::new();
         };
-        let key = (
-            self.all[i].path.to_string_lossy().to_string(),
-            self.all[i].size,
-        );
+        // The file's size now, so a session that grows while you watch is
+        // read again -- a stat, where reading the tail every frame would not
+        // be.
+        let path = &self.all[i].path;
+        let size = std::fs::metadata(path)
+            .map(|m| m.len())
+            .unwrap_or(self.all[i].size);
+        let key = (path.to_string_lossy().to_string(), size);
         if let Some(v) = self.preview_cache.get(&key) {
             return v.clone();
         }

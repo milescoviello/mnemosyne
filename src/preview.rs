@@ -40,9 +40,12 @@ fn extract_turns(bytes: &[u8], drop_first_partial: bool) -> Vec<Turn> {
         let Some(c) = v.get("message").and_then(|m| m.get("content")) else {
             continue;
         };
-        let text = flatten(c);
+        let text = flatten(c, role == "you");
         let text = crate::scan::squash(&text, 700);
-        if text.is_empty() || !crate::scan::is_real_user_text(&text) {
+        // Only what you sent is checked for being machinery: Claude's reply
+        // is never an injected envelope, and one that happens to open with
+        // `<` is still what it said.
+        if text.is_empty() || (role == "you" && !crate::scan::is_real_user_text(&text)) {
             continue;
         }
         turns.push(Turn { role, text });
@@ -50,7 +53,13 @@ fn extract_turns(bytes: &[u8], drop_first_partial: bool) -> Vec<Turn> {
     turns
 }
 
-fn flatten(c: &serde_json::Value) -> String {
+/// A message's content as one line of text.
+///
+/// For what you sent, each block is judged on its own. A message typed in
+/// an IDE arrives as an `<ide_opened_file>` block and then what you wrote;
+/// joined first and judged after, the whole turn looked like machinery and
+/// vanished from the rail and the viewer.
+fn flatten(c: &serde_json::Value, user: bool) -> String {
     match c {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Array(a) => {
@@ -59,7 +68,9 @@ fn flatten(c: &serde_json::Value) -> String {
                 match b.get("type").and_then(|t| t.as_str()) {
                     Some("text") => {
                         if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
-                            parts.push(t.to_string());
+                            if !user || crate::scan::is_real_user_text(t) {
+                                parts.push(t.to_string());
+                            }
                         }
                     }
                     Some("tool_use") => {
@@ -75,6 +86,16 @@ fn flatten(c: &serde_json::Value) -> String {
     }
 }
 
+/// How long the file is now, not when it was last indexed.
+///
+/// The window read is the last so many bytes. Measured from the indexed
+/// size, a session that had grown since -- a live one, or any on the first
+/// frame before the rescan lands -- showed an older end, and in the viewer
+/// the newest turns were simply missing.
+fn current_len(f: &std::fs::File, s: &Session) -> u64 {
+    f.metadata().map(|m| m.len()).unwrap_or(s.size)
+}
+
 /// Load turns for the full-screen viewer.
 ///
 /// Reads from the end rather than the start: a session here can be 400 MB and
@@ -85,7 +106,7 @@ pub fn load_turns(s: &Session, max_bytes: u64, want: usize) -> (Vec<Turn>, bool)
     let Ok(mut f) = std::fs::File::open(&s.path) else {
         return (Vec::new(), false);
     };
-    let len = s.size;
+    let len = current_len(&f, s);
     let (start, partial) = if len > max_bytes {
         (len - max_bytes, true)
     } else {
@@ -116,7 +137,7 @@ pub fn tail_turns(s: &Session, want: usize) -> Vec<Turn> {
     let Ok(mut f) = std::fs::File::open(&s.path) else {
         return Vec::new();
     };
-    let len = s.size;
+    let len = current_len(&f, s);
     let (start, partial) = if len > TAIL_BYTES {
         (len - TAIL_BYTES, true)
     } else {
@@ -141,7 +162,9 @@ pub fn tail_turns(s: &Session, want: usize) -> Vec<Turn> {
         if f.seek(SeekFrom::Start(len - bigger)).is_ok() {
             buf.clear();
             if (&mut f).take(bigger + 4096).read_to_end(&mut buf).is_ok() {
-                turns = extract_turns(&buf, true);
+                // Partial only if it starts part way in: from the top of
+                // the file, the first line is a whole one.
+                turns = extract_turns(&buf, len > bigger);
             }
         }
     }
@@ -184,6 +207,63 @@ mod tests {
         format!(
             r#"{{"parentUuid":"p","message":{{"role":"assistant","content":[{{"type":"text","text":"{text}"}}]}},"type":"assistant"}}"#
         )
+    }
+
+    #[test]
+    fn a_message_sent_from_an_ide_is_still_what_you_said() {
+        let ide = r#"{"parentUuid":"p","message":{"role":"user","content":[{"type":"text","text":"<ide_opened_file>The user opened src/main.rs</ide_opened_file>"},{"type":"text","text":"why does this fail"}]},"type":"user"}"#;
+        let (_d, s) = write_transcript(&[ide.to_string(), asst("because")]);
+        let t = tail_turns(&s, 8);
+        assert_eq!(t.len(), 2, "{t:?}");
+        assert_eq!(t[0].text, "why does this fail");
+        assert_eq!(load_turns(&s, 1 << 20, 8).0.len(), 2);
+    }
+
+    #[test]
+    fn what_was_said_since_the_last_index_is_shown() {
+        // The window is the file's last bytes, and was measured from its
+        // indexed size -- so what came after that was left off.
+        let old: Vec<String> = (0..800)
+            .map(|i| user(&format!("old question {i} {}", "x".repeat(700))))
+            .collect();
+        let (_d, s) = write_transcript(&old); // indexed at this size
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&s.path)
+            .unwrap();
+        for i in 0..12 {
+            writeln!(
+                f,
+                "{}",
+                asst(&format!("since then {i} {}", "y".repeat(700)))
+            )
+            .unwrap();
+        }
+        writeln!(f, "{}", user("the newest question")).unwrap();
+        drop(f);
+        assert_eq!(
+            tail_turns(&s, 8).last().unwrap().text,
+            "the newest question"
+        );
+        assert_eq!(
+            load_turns(&s, 256 << 10, 8).0.last().unwrap().text,
+            "the newest question"
+        );
+    }
+
+    #[test]
+    fn a_first_line_read_from_the_top_of_the_file_is_not_dropped_as_partial() {
+        // One readable turn and then a line too big for the first window:
+        // the second, bigger read starts at the top of the file, where the
+        // first line is a whole one and not a fragment to skip.
+        let blob = format!(
+            r#"{{"message":{{"role":"assistant","content":[{{"type":"tool_use","name":"Read","input":{{"x":"{}"}}}}]}},"type":"progress"}}"#,
+            "b".repeat(600 * 1024)
+        );
+        let (_d, s) = write_transcript(&[user("the only real turn"), blob]);
+        let t = tail_turns(&s, 8);
+        assert_eq!(t.len(), 1, "{t:?}");
+        assert_eq!(t[0].text, "the only real turn");
     }
 
     #[test]

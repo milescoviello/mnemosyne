@@ -387,7 +387,7 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
                 Span::raw(" ".repeat(MARGIN)),
                 Span::styled("≈ ", Style::default().fg(rgb(art::ramp(0.6)))),
                 Span::styled(
-                    fit(&title, area.width as usize - 12),
+                    fit(&title, (area.width as usize).saturating_sub(12)),
                     Style::default()
                         .fg(th().bright)
                         .add_modifier(Modifier::BOLD),
@@ -2121,6 +2121,22 @@ mod render_tests {
                 a.viewer_scroll <= a.viewer_height,
                 "{w}x{h}: scrolled past the end"
             );
+        }
+    }
+
+    #[test]
+    fn the_viewer_draws_on_a_terminal_narrower_than_its_margins() {
+        let mut a = app();
+        a.viewer = Some((
+            vec![crate::preview::Turn {
+                role: "you",
+                text: "a question".into(),
+            }],
+            false,
+        ));
+        a.input_mode = InputMode::Viewer;
+        for w in 1..=14 {
+            let _ = render(&mut a, w, 12);
         }
     }
 
