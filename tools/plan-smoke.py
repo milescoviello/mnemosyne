@@ -35,7 +35,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
 
-def run(binary, home, keys, rows=24, cols=130, timeout=40, extra_env=None):
+def run(binary, home, keys, rows=24, cols=130, timeout=40, extra_env=None, signal=None):
     """Drive the TUI, returning (stdout, what it drew, exit code).
 
     Waiting a fixed second and hoping was enough on a laptop and was not on
@@ -94,6 +94,8 @@ def run(binary, home, keys, rows=24, cols=130, timeout=40, extra_env=None):
     for k in keys:
         os.write(main_fd, k.encode())
         time.sleep(0.5)
+    if signal is not None:
+        proc.send_signal(signal)
 
     try:
         out, _ = proc.communicate(timeout=timeout)
@@ -180,6 +182,14 @@ def main():
         check(f"a panic {what}", seq in screen, "not found in the output")
     check("a panic still says what happened", "deliberate panic" in screen,
           repr(screen[-200:]))
+
+    # Killed, it still has to hand the terminal back: without a handler a
+    # SIGTERM left the shell with echo off and on the alternate screen.
+    import signal as sig
+    for s, name in ((sig.SIGTERM, "SIGTERM"), (sig.SIGHUP, "SIGHUP")):
+        _, screen, code = run(binary, home, [], timeout=30, signal=s)
+        check(f"{name} exits with its signal's status", code == 128 + s, f"exit {code}")
+        check(f"and {name} leaves the alternate screen", "\x1b[?1049l" in screen, "not found")
 
     # A panic on a rayon worker reaches the main thread by resume_unwind,
     # which never calls the hook: what a scanner panic during `R` does.

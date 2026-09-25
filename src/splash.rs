@@ -270,6 +270,10 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress, must_wait: bool) ->
             );
         })?;
 
+        // A signal leaves the way ctrl+c does, so the terminal is put back.
+        if crate::SIGNALLED.load(Ordering::SeqCst) != 0 {
+            return Ok(End::Aborted);
+        }
         if event::poll(FRAME)? {
             if let Event::Key(k) = event::read()? {
                 if k.kind == KeyEventKind::Press {

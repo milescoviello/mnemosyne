@@ -804,6 +804,7 @@ fn main() -> Result<()> {
         }));
     }
 
+    catch_signals();
     enable_raw_mode()?;
     stderr().execute(EnterAlternateScreen)?;
     // Put back on the way out, however the way out goes. The panic hook
@@ -878,7 +879,7 @@ fn main() -> Result<()> {
                 LeaveAlternateScreen
             );
             let _ = term.show_cursor();
-            std::process::exit(130);
+            std::process::exit(128 + signalled().unwrap_or(libc::SIGINT));
         }
         if cold_start {
             // With nothing cached there is no list to show without it, so
@@ -931,6 +932,11 @@ fn main() -> Result<()> {
     for n in &app.notes {
         eprintln!("{n}");
     }
+    // Killed: the terminal is back and what was open is recorded, and that
+    // is all. Nothing chosen goes to the shell.
+    if let Some(sig) = signalled() {
+        std::process::exit(128 + sig);
+    }
 
     if let Some(Outcome::Resume { targets, target }) = &app.outcome {
         // Several selections cannot share this terminal, so they become
@@ -959,6 +965,34 @@ fn main() -> Result<()> {
 
 /// Panics on threads behind the browser, said once the browser has closed.
 static BACKGROUND_PANICS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// The last terminating signal received, or 0.
+///
+/// A handler can do almost nothing safely, so it only notes the signal; the
+/// loop sees it within a frame and leaves the ordinary way, which puts the
+/// terminal back. Killed without one, the browser left the shell with echo
+/// off, on the alternate screen, with mouse reporting on.
+pub static SIGNALLED: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+extern "C" fn on_signal(sig: libc::c_int) {
+    SIGNALLED.store(sig, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn catch_signals() {
+    for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGQUIT] {
+        // SAFETY: the handler only stores to an atomic.
+        unsafe {
+            libc::signal(sig, on_signal as *const () as libc::sighandler_t);
+        }
+    }
+}
+
+fn signalled() -> Option<i32> {
+    match SIGNALLED.load(std::sync::atomic::Ordering::SeqCst) {
+        0 => None,
+        s => Some(s),
+    }
+}
 
 /// The terminal as the browser found it, put back when this is dropped --
 /// at the end of the browser, or by any unwinding past it.
@@ -996,6 +1030,9 @@ fn run<B: ratatui::backend::Backend>(
     let mut injected = false;
     let mut asking_wsx: Option<std::thread::JoinHandle<wsx::State>> = None;
     loop {
+        if signalled().is_some() {
+            return Ok(());
+        }
         term.draw(|f| ui::draw(f, app))?;
 
         if event::poll(Duration::from_millis(120))? {
