@@ -44,7 +44,7 @@ pub struct Meta {
 /// can do the same to the entry as it is on disk by then. Writing back the
 /// whole entry lost whatever another browser had done to the same session:
 /// a tag added in one, a star in the other, and the tag was gone.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Change {
     favorite: Option<bool>,
     note: Option<String>,
@@ -206,13 +206,14 @@ impl Meta {
             .map(|(m, _)| m);
         if let Some(mut disk) = on_disk {
             disk.clean();
-            for (id, change) in std::mem::take(&mut self.changed) {
-                change.apply(disk.sessions.entry(id.clone()).or_default());
-                disk.gc(&id);
+            for (id, change) in &self.changed {
+                change
+                    .clone()
+                    .apply(disk.sessions.entry(id.clone()).or_default());
+                disk.gc(id);
             }
             self.sessions = disk.sessions;
         }
-        self.changed.clear();
         rotate_backups(p);
         // Ours alone. Two instances saving at once shared one temp name, so
         // one could truncate the file the other was halfway through writing
@@ -224,6 +225,10 @@ impl Meta {
             f.sync_all()?;
         }
         std::fs::rename(tmp, p)?;
+        // Only once it is on disk. Dropped before a write that failed, the
+        // change was not there for the next save to make, which rebuilt the
+        // marks from the file without it.
+        self.changed.clear();
         Ok(())
     }
 
@@ -519,6 +524,33 @@ mod tests {
         );
         // and b now knows what a did
         assert!(b.get("s1").is_some());
+    }
+
+    #[test]
+    fn a_change_that_failed_to_save_is_saved_by_the_next_save() {
+        // The change was dropped before the write that failed, so the next
+        // save rebuilt the marks from the file and lost it -- from the list
+        // as well as the disk, though the failure had said it would last
+        // until mn closed.
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("meta.json");
+        let mut m = Meta::default();
+        m.add_tag("s0", "keep");
+        m.save_at(&p).unwrap();
+        m.toggle_favorite("s1");
+        // where the write goes cannot be written: a full disk does the same
+        let tmp = p.with_extension(format!("json.tmp.{}", std::process::id()));
+        std::fs::create_dir(&tmp).unwrap();
+        assert!(m.save_at(&p).is_err());
+        std::fs::remove_dir(&tmp).unwrap();
+        m.add_tag("s2", "x");
+        m.save_at(&p).unwrap();
+        assert!(
+            m.get("s1").is_some_and(|e| e.favorite),
+            "gone from the list"
+        );
+        let back = Meta::load_at(&p);
+        assert!(back.get("s1").is_some_and(|e| e.favorite), "never saved");
     }
 
     #[test]
