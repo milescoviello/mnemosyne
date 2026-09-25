@@ -98,7 +98,13 @@ fn iso_to_epoch(s: &str) -> i64 {
         .unwrap_or(0)
 }
 
-/// Flatten a message `content` field (string, or array of blocks) to text.
+/// Flatten a message `content` field (string, or array of blocks) to what
+/// the user wrote.
+///
+/// Each block is judged on its own. A message sent from an IDE is an
+/// `<ide_opened_file>` block and then the words, and joined before being
+/// judged the whole of it looked like an envelope: the session lost its
+/// opening prompt, and with no AI title, its title.
 fn content_text(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::String(s) => s.clone(),
@@ -107,7 +113,9 @@ fn content_text(v: &serde_json::Value) -> String {
             for b in a {
                 if b.get("type").and_then(|t| t.as_str()) == Some("text") {
                     if let Some(t) = b.get("text").and_then(|t| t.as_str()) {
-                        parts.push(t);
+                        if is_real_user_text(t) {
+                            parts.push(t);
+                        }
                     }
                 }
             }
@@ -134,6 +142,10 @@ pub fn is_real_user_text(t: &str) -> bool {
 /// deciding what your screen does.
 pub fn squash(s: &str, max: usize) -> String {
     let mut out = String::with_capacity(max.min(s.len()));
+    // Counted as it goes, the joining spaces included: counting only after
+    // each character let a space and the character after it both through,
+    // one past `max`.
+    let mut n = 0usize;
     let mut space = false;
     for c in s.chars() {
         if c.is_whitespace() {
@@ -143,12 +155,17 @@ pub fn squash(s: &str, max: usize) -> String {
         if c.is_control() {
             continue;
         }
-        if space && !out.is_empty() {
+        if space && n > 0 {
+            if n + 1 >= max {
+                break;
+            }
             out.push(' ');
+            n += 1;
         }
         space = false;
         out.push(c);
-        if out.chars().count() >= max {
+        n += 1;
+        if n >= max {
             break;
         }
     }
@@ -644,6 +661,28 @@ mod tests {
             writeln!(f, "{line}").unwrap();
         }
         (dir, path)
+    }
+
+    #[test]
+    fn a_first_prompt_sent_from_an_ide_is_still_the_first_prompt() {
+        let line = br#"{"parentUuid":null,"message":{"role":"user","content":[{"type":"text","text":"<ide_opened_file>The user opened src/main.rs</ide_opened_file>"},{"type":"text","text":"why does the build fail"}]},"type":"user"}"#;
+        let mut s = Session::default();
+        let mut sink: Option<&mut String> = None;
+        process_line(&mut s, line, &mut sink);
+        assert_eq!(s.first_prompt, "why does the build fail");
+    }
+
+    #[test]
+    fn squash_never_returns_more_than_it_was_asked_for() {
+        assert_eq!(squash("abc def", 4), "abc");
+        assert_eq!(squash("abc def", 5), "abc d");
+        assert_eq!(squash("  a   b  ", 3), "a b");
+        for max in 1..20 {
+            assert!(
+                squash("one two three four five", max).chars().count() <= max,
+                "{max}"
+            );
+        }
     }
 
     #[test]

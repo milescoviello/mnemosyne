@@ -41,7 +41,8 @@ pub fn db_path() -> PathBuf {
 ///   8  a response's usage is counted once, not once per content block
 ///   9  the title given with /rename is read
 ///   10 a tool's result is left out of the text, list-shaped ones too
-pub const SCANNER_VERSION: u32 = 10;
+///   11 an IDE block before the first prompt no longer hides it
+pub const SCANNER_VERSION: u32 = 11;
 
 /// Every column the loader expects. Compared against what the database
 /// actually has, so drift is detected rather than assumed away.
