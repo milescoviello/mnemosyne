@@ -1039,7 +1039,10 @@ impl App {
             self.status = "no subagents in this session".into();
             return;
         }
-        if !self.show_subagents {
+        // Opening one shows subagents again if `a` had hidden them. Closing
+        // one must not: it turned them back on under every other parent
+        // still marked open.
+        if open {
             self.show_subagents = true;
         }
         let id = self.all[i].id.clone();
@@ -2128,7 +2131,9 @@ impl App {
                 if self.all[i].subagent_count > 0 && !self.all[i].is_subagent {
                     let (sx0, sx1) = self.hits_sub_span();
                     if x >= sx0 && x <= sx1 {
-                        let open = self.expanded.contains(&self.all[i].id);
+                        // Open is what is on screen: marked open, but with
+                        // `a` hiding them, a click has to show them.
+                        let open = self.show_subagents && self.expanded.contains(&self.all[i].id);
                         self.toggle_expand(!open);
                         return;
                     }
@@ -4738,6 +4743,51 @@ mod mouse_tests {
             a.expanded.contains("aaaaaaaa-1"),
             "the ⌁ cell did not expand"
         );
+    }
+
+    fn subagent_rows(a: &App) -> usize {
+        a.view.iter().filter(|r| matches!(r, Row::Sub(_))).count()
+    }
+
+    #[test]
+    fn the_subagent_count_shows_them_even_after_a_hid_them() {
+        // Open, then `a` to hide every subagent. The parent was still
+        // marked open, so clicking its count closed it and showed nothing,
+        // where → would have shown them.
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut a = app();
+        laid_out(&mut a);
+        let parent = |a: &App| {
+            a.view
+                .iter()
+                .position(|r| matches!(r, Row::Item(i) if a.all[*i].id == "aaaaaaaa-1"))
+                .unwrap()
+        };
+        a.cursor = parent(&a);
+        a.on_key(KeyEvent::from(KeyCode::Right));
+        assert_eq!(subagent_rows(&a), 2);
+        a.on_key(KeyEvent::from(KeyCode::Char('a')));
+        assert_eq!(subagent_rows(&a), 0);
+
+        let row = parent(&a);
+        a.on_mouse(click(37, 3 + row as u16));
+        assert_eq!(subagent_rows(&a), 2, "{:?}", a.status);
+    }
+
+    #[test]
+    fn closing_one_parent_does_not_show_every_other_one() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut a = app();
+        a.cursor = a
+            .view
+            .iter()
+            .position(|r| matches!(r, Row::Item(i) if a.all[*i].id == "aaaaaaaa-1"))
+            .unwrap();
+        a.on_key(KeyEvent::from(KeyCode::Right));
+        a.on_key(KeyEvent::from(KeyCode::Char('a')));
+        a.on_key(KeyEvent::from(KeyCode::Left));
+        assert!(!a.show_subagents, "← turned subagents back on");
+        assert_eq!(subagent_rows(&a), 0);
     }
 
     #[test]
