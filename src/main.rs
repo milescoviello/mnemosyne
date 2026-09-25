@@ -1091,9 +1091,17 @@ fn run<B: ratatui::backend::Backend>(
         if app.want_refresh {
             app.want_refresh = false;
             let fresh = index::refresh(true)?;
-            app.meta = meta::Meta::load();
+            // Said in the status line and again once the browser has
+            // closed: printed, it went on the browser, and the next frame
+            // wiped it before anyone learned where the file went.
+            let (meta, said) = meta::Meta::load_quietly();
+            app.meta = meta;
             app.absorb_rescan(fresh);
             app.status = app.reindex_message();
+            if let Some(said) = said {
+                app.status = said.clone();
+                app.notes.push(said);
+            }
         }
 
         // keep the running/not-running markers honest without re-reading disk

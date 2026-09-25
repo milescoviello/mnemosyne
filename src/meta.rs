@@ -97,6 +97,21 @@ impl Meta {
     }
 
     pub fn load_at(p: &std::path::Path) -> Meta {
+        let (m, said) = Meta::load_telling(p);
+        if let Some(said) = said {
+            eprintln!("mnemosyne: {said}");
+        }
+        m
+    }
+
+    /// Load, and say instead of printing what happened to a file that could
+    /// not be read -- for the browser, which is drawn where it would print.
+    pub fn load_quietly() -> (Meta, Option<String>) {
+        Meta::load_telling(&meta_path())
+    }
+
+    fn load_telling(p: &std::path::Path) -> (Meta, Option<String>) {
+        let mut said = None;
         let mut m: Meta = match std::fs::read(p) {
             Ok(b) => match serde_json::from_slice(&b) {
                 Ok(m) => m,
@@ -111,18 +126,18 @@ impl Meta {
                         chrono::Utc::now().timestamp()
                     ));
                     let _ = std::fs::rename(p, &aside);
-                    eprintln!(
-                        "mnemosyne: {} could not be read ({e}) — it is kept as {}",
+                    said = Some(format!(
+                        "{} could not be read ({e}) — it is kept as {}",
                         p.display(),
                         aside.display()
-                    );
+                    ));
                     Meta::default()
                 }
             },
             Err(_) => Meta::default(),
         };
         m.clean();
-        m
+        (m, said)
     }
 
     /// Clean on the way in, not only on the way out. This file is edited by
@@ -446,6 +461,17 @@ mod tests {
         assert!(e.favorite, "b's star");
         assert_eq!(e.tags, vec!["from-a"], "a's tag change");
         assert_eq!(e.note, "a note", "the note neither touched");
+    }
+
+    #[test]
+    fn a_file_put_aside_is_said_rather_than_printed_when_asked() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("meta.json");
+        std::fs::write(&p, b"{ not json").unwrap();
+        let (m, said) = Meta::load_telling(&p);
+        assert!(m.sessions.is_empty());
+        let said = said.expect("nothing said");
+        assert!(said.contains("unreadable"), "{said}");
     }
 
     #[test]
