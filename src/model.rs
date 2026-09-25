@@ -322,7 +322,6 @@ pub fn width(s: &str) -> usize {
 
 /// Clip to `w` display columns, ending in an ellipsis when it had to cut.
 pub fn fit(s: &str, w: usize) -> String {
-    use unicode_width::UnicodeWidthChar;
     if width(s) <= w {
         return s.to_string();
     }
@@ -337,15 +336,19 @@ pub fn fit(s: &str, w: usize) -> String {
     // Leave a column for the ellipsis, and never cut a wide character in
     // half -- half of a wide character is not half a column, it is a
     // different character or a broken cell.
+    //
+    // Measured as a whole, as `width` and the terminal measure it. Adding up
+    // characters one at a time counts ⚠ and its emoji selector as one
+    // column, where the pair draws two: a clipped title with ⚠️ in it came
+    // out wider than its column, and every column after it on that row
+    // slid right.
     let mut out = String::new();
-    let mut used = 0usize;
     for c in s.chars() {
-        let cw = c.width().unwrap_or(0);
-        if used + cw > w - 1 {
+        out.push(c);
+        if width(&out) > w - 1 {
+            out.pop();
             break;
         }
-        out.push(c);
-        used += cw;
     }
     out.push('…');
     out
@@ -484,6 +487,25 @@ mod tests {
             for w in [0usize, 1, 2, 3, 6, 10, 20] {
                 let out = pad_fit(s, w);
                 assert_eq!(width(&out), w, "pad_fit({s:?}, {w}) = {out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn an_emoji_with_its_selector_is_clipped_to_the_width_it_draws() {
+        // ⚠ is one column and ⚠️ -- with U+FE0F after it -- is two.
+        for s in [
+            "ab\u{26a0}\u{fe0f}cdef",
+            &"\u{26a0}\u{fe0f} ".repeat(40),
+            "fix \u{2764}\u{fe0f} bug here",
+        ] {
+            for w in 0..12 {
+                assert!(
+                    width(&fit(s, w)) <= w,
+                    "fit({s:?}, {w}) is {}",
+                    width(&fit(s, w))
+                );
+                assert_eq!(width(&pad_fit(s, w)), w, "pad_fit({s:?}, {w})");
             }
         }
     }
