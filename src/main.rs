@@ -573,7 +573,9 @@ fn main() -> Result<()> {
     if has("--reopen") {
         let live = live::live_map();
         let mut app = App::new(sessions, meta::Meta::load(), live, restore_model);
-        app.rebuild();
+        // Which running claudes are wsx's agents -- neither recorded nor
+        // offered, since wsx puts them back -- is wsx's to say.
+        app.set_wsx(wsx::load());
         let boot = workspace::boot_id();
         // Fold first: on the first run after a reboot the set from before it
         // is still filed under "current", and rolling it over is what makes
@@ -1040,9 +1042,6 @@ fn run<B: ratatui::backend::Backend>(
         if asking_wsx.as_ref().is_some_and(|h| h.is_finished()) {
             if let Some(Ok(fresh)) = asking_wsx.take().map(|h| h.join()) {
                 app.set_wsx(fresh);
-                // which agents are wsx's depends on it too
-                app.apply_overlay();
-                app.rebuild();
             }
         }
 

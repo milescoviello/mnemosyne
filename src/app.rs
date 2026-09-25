@@ -329,6 +329,9 @@ pub struct App {
     /// the same binary can switch a running wsx to another workspace, or open
     /// a terminal on the desktop of whoever runs the suite.
     pub ask_wsx: bool,
+    /// What tmux said last, so a new answer from wsx can be read against it
+    /// without asking tmux again.
+    panes: Vec<crate::live::Pane>,
     /// wsx is worth asking again; the loop does it off the main thread.
     pub want_wsx: bool,
 
@@ -402,6 +405,7 @@ impl App {
             reopen: Vec::new(),
             wsx: crate::wsx::State::default(),
             ask_wsx: false,
+            panes: Vec::new(),
             want_wsx: false,
             preview_cache: HashMap::new(),
             matcher: Matcher::new(Config::DEFAULT),
@@ -429,6 +433,7 @@ impl App {
 
     /// `apply_overlay`, with what tmux said handed in.
     pub fn apply_overlay_with(&mut self, panes: &[crate::live::Pane]) {
+        self.panes = panes.to_vec();
         // A shared wsx workspace runs its agent in a tmux session of wsx's.
         // That claude's parent is the tmux server, not wsx, so it was taken
         // for anybody's: recorded for a reboot beside wsx putting it back,
@@ -534,6 +539,11 @@ impl App {
     pub fn set_wsx(&mut self, state: crate::wsx::State) {
         self.wsx = state;
         self.apply_wsx();
+        // Which agents are wsx's depends on what wsx said. Worked out before
+        // it had said anything, a shared workspace's agent was recorded for
+        // the reboot offer and taken for somebody's running session.
+        let panes = std::mem::take(&mut self.panes);
+        self.apply_overlay_with(&panes);
         self.rebuild();
     }
 
@@ -1184,7 +1194,9 @@ impl App {
     pub fn running_ids(&self) -> HashSet<String> {
         self.all
             .iter()
-            .filter(|s| s.live_exact || s.has_tmux)
+            // and wsx's own agents, which it puts back itself -- one it
+            // carried on with `--continue` is only ever matched by folder
+            .filter(|s| s.live_exact || s.has_tmux || s.live_in_wsx)
             .map(|s| s.id.clone())
             .collect()
     }
@@ -4479,6 +4491,36 @@ mod logic_tests {
             a.status
         );
         assert_eq!(a.to_jump, vec![shy_daffodil()]);
+    }
+
+    #[test]
+    fn wsx_answering_after_the_panes_were_read_still_makes_its_agent_wsxs() {
+        // The order at startup: tmux is read when the app is made, and what
+        // wsx said comes after. Read the other way round only, a shared
+        // workspace's agent went into the reboot record.
+        let mut a = app();
+        let tree = format!("{WSX_ROOT}/OS-DEV/shy-daffodil");
+        let mut w = a.wsx.clone();
+        a.set_wsx(crate::wsx::State::default());
+        running(&mut a, vec![claude(395298, None, &tree, false)]);
+        a.apply_overlay_with(&[crate::live::Pane {
+            session: "wsx-OS-DEV-shy-daffodil".into(),
+            pid: 395298,
+            start_command: "claude --continue".into(),
+        }]);
+        w.shared = vec!["wsx-OS-DEV-shy-daffodil".into()];
+        a.set_wsx(w);
+        let s = a.all.iter().find(|s| s.id == "gggggggg-7").unwrap();
+        assert!(s.live_in_wsx, "not wsx's once wsx had said so");
+        assert!(!a.open_sessions().iter().any(|e| e.id == "gggggggg-7"));
+    }
+
+    #[test]
+    fn the_reboot_offer_leaves_out_what_wsx_is_running() {
+        let mut a = app();
+        let tree = format!("{WSX_ROOT}/OS-DEV/shy-daffodil");
+        running(&mut a, vec![claude(2794, None, &tree, true)]);
+        assert!(a.running_ids().contains("gggggggg-7"));
     }
 
     #[test]
