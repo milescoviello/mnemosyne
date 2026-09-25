@@ -5,3 +5,4 @@
 meta.json
 index.db
 *.jsonl
+__pycache__/
