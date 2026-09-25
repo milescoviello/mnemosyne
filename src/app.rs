@@ -1219,7 +1219,7 @@ impl App {
         }
         // Already running somewhere: go there instead of asking what to call
         // a second one.
-        if let Some(s) = self.current() {
+        if let Some(s) = self.current().map(|s| self.resumed(s)) {
             if s.has_tmux && self.selected.is_empty() {
                 let name = s.tmux_session.clone();
                 self.pending_tmux = Some(target);
@@ -1451,7 +1451,10 @@ impl App {
         // already has one. Tmux is exempt: attaching to the existing session is
         // exactly the right move there, and is what "resume" should mean.
         if target == Target::Here {
-            if let Some(s) = self.current() {
+            // The session that would be resumed, not the row: a subagent is
+            // never running itself, so asking it let enter on one start a
+            // second client on the parent it resumes.
+            if let Some(s) = self.current().map(|s| self.resumed(s)) {
                 // A waiting tmux session is as strong a signal as an exact pid
                 // match: resuming here would fork a second client instead of
                 // picking up where that one left off.
@@ -3317,6 +3320,51 @@ mod logic_tests {
         a.do_action(Action::Resume);
         assert!(a.outcome.is_none());
         assert!(a.status.contains("ctrl+t"), "status was {:?}", a.status);
+    }
+
+    /// The cursor on the first of aaaaaaaa-1's subagents, shown.
+    fn on_a_subagent_of_a(a: &mut App) {
+        a.show_subagents = true;
+        a.expanded.insert("aaaaaaaa-1".into());
+        a.rebuild();
+        a.cursor = a
+            .view
+            .iter()
+            .position(|r| matches!(r, Row::Sub(_)))
+            .expect("a subagent row");
+    }
+
+    #[test]
+    fn a_subagent_of_something_running_is_refused_like_its_parent() {
+        // Enter on a subagent resumes its parent. The guard asked the
+        // subagent whether it was running, and a subagent never is, so the
+        // parent was resumed here a second time.
+        let mut a = app();
+        a.all[0].live_exact = true;
+        a.all[0].live_pid = Some(4242);
+        on_a_subagent_of_a(&mut a);
+        a.do_action(Action::Resume);
+        assert!(a.outcome.is_none(), "resumed: {:?}", a.outcome);
+        assert!(a.status.contains("4242"), "status was {:?}", a.status);
+
+        let mut a = app();
+        a.all[0].has_tmux = true;
+        a.all[0].tmux_session = "mine".into();
+        on_a_subagent_of_a(&mut a);
+        a.do_action(Action::Resume);
+        assert!(a.outcome.is_none(), "resumed: {:?}", a.outcome);
+        assert!(a.status.contains("ctrl+t"), "status was {:?}", a.status);
+    }
+
+    #[test]
+    fn a_subagent_of_something_in_tmux_goes_to_that_tmux() {
+        let mut a = app();
+        a.all[0].has_tmux = true;
+        a.all[0].tmux_session = "some-name-i-chose".into();
+        on_a_subagent_of_a(&mut a);
+        a.do_action(Action::Tmux);
+        assert_eq!(a.input_mode, InputMode::Normal, "asked for a new name");
+        assert_eq!(a.tmux_name, "some-name-i-chose");
     }
 
     #[test]
