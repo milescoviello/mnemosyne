@@ -1152,6 +1152,10 @@ impl App {
         // Same as any other window: hand them over and stay open, so the
         // list is still there when they appear.
         self.launched.extend(targets.iter().cloned());
+        // Each under its own generated name. The name typed for the last
+        // `W` is still here, and every one of these went out under it --
+        // `eft-work-2`, `eft-work-3` -- none of them the session you named.
+        self.tmux_name.clear();
         self.to_open.push((Target::WindowTmux, targets));
         self.reopen.clear();
         if self.persist {
@@ -3524,6 +3528,29 @@ mod logic_tests {
         // comes back asking about every edit
         assert_eq!(targets[0].perms, "bypassPermissions");
         assert!(!a.quit, "they open in their own windows; the picker stays");
+    }
+
+    #[test]
+    fn the_offer_does_not_reuse_the_last_tmux_name_typed() {
+        let mut a = app();
+        press(&mut a, 'W');
+        for c in "eft work".chars() {
+            press(&mut a, c);
+        }
+        a.on_key(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Enter,
+        ));
+        assert_eq!(a.tmux_name, "eft-work");
+        a.to_open.clear(); // the loop has handed that one to the shell
+
+        offer(&mut a, &["bbbbbbbb-2", "cccccccc-3"]);
+        press(&mut a, 'r');
+        assert_eq!(a.to_open.len(), 1);
+        assert!(
+            a.tmux_name.is_empty(),
+            "reopened under the name typed for another: {:?}",
+            a.tmux_name
+        );
     }
 
     #[test]
