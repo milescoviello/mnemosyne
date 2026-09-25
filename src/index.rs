@@ -39,7 +39,8 @@ pub fn db_path() -> PathBuf {
 ///   6  prose stored as a plain `"content"` string is harvested too
 ///   7  rebuild text that an incremental rescan had doubled or deleted
 ///   8  a response's usage is counted once, not once per content block
-pub const SCANNER_VERSION: u32 = 8;
+///   9  the title given with /rename is read
+pub const SCANNER_VERSION: u32 = 9;
 
 /// Every column the loader expects. Compared against what the database
 /// actually has, so drift is detected rather than assumed away.
@@ -71,6 +72,7 @@ const EXPECTED_COLUMNS: &[&str] = &[
     "parent",
     "agent_id",
     "last_msg_id",
+    "custom_title",
 ];
 
 /// Columns added after the table was first made, and how to add them.
@@ -81,7 +83,10 @@ const EXPECTED_COLUMNS: &[&str] = &[
 /// transcript, where the rows it has are still worth showing in the
 /// meantime. Whatever made the column necessary bumps `SCANNER_VERSION`
 /// too, so the rows are rescanned underneath and the default never lasts.
-const ADDED_COLUMNS: &[(&str, &str)] = &[("last_msg_id", "TEXT NOT NULL DEFAULT ''")];
+const ADDED_COLUMNS: &[(&str, &str)] = &[
+    ("last_msg_id", "TEXT NOT NULL DEFAULT ''"),
+    ("custom_title", "TEXT NOT NULL DEFAULT ''"),
+];
 
 fn add_missing_columns(conn: &Connection) {
     let Ok(mut st) = conn.prepare("PRAGMA table_info(sessions)") else {
@@ -281,7 +286,8 @@ impl Index {
                 is_subagent     INTEGER NOT NULL DEFAULT 0,
                 parent          TEXT,
                 agent_id        TEXT NOT NULL DEFAULT '',
-                last_msg_id     TEXT NOT NULL DEFAULT ''
+                last_msg_id     TEXT NOT NULL DEFAULT '',
+                custom_title    TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_mtime  ON sessions(mtime DESC);
             CREATE INDEX IF NOT EXISTS idx_parent ON sessions(parent);
@@ -328,7 +334,7 @@ impl Index {
             "SELECT path,id,project_dir,cwd,git_branch,ai_title,first_prompt,last_prompt,
                     model,permission_mode,version,size,mtime,first_ts,last_ts,entries,
                     user_msgs,assistant_msgs,scanned_len,is_subagent,parent,agent_id,
-                    in_tokens,out_tokens,cache_read,cache_write,last_msg_id
+                    in_tokens,out_tokens,cache_read,cache_write,last_msg_id,custom_title
              FROM sessions",
         )?;
         let rows = st.query_map([], |r| {
@@ -361,6 +367,7 @@ impl Index {
                 cache_read: r.get::<_, i64>(24)? as u64,
                 cache_write: r.get::<_, i64>(25)? as u64,
                 last_msg_id: r.get(26)?,
+                custom_title: r.get(27)?,
                 ..Default::default()
             })
         })?;
@@ -583,16 +590,16 @@ fn write_sessions(tx: &rusqlite::Transaction, sessions: &[Session]) -> Result<()
         "INSERT INTO sessions (path,id,project_dir,cwd,git_branch,ai_title,first_prompt,
                 last_prompt,model,permission_mode,version,size,mtime,first_ts,last_ts,entries,
                 user_msgs,assistant_msgs,scanned_len,is_subagent,parent,agent_id,
-                in_tokens,out_tokens,cache_read,cache_write,last_msg_id)
+                in_tokens,out_tokens,cache_read,cache_write,last_msg_id,custom_title)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,
-                     ?21,?22,?23,?24,?25,?26,?27)
+                     ?21,?22,?23,?24,?25,?26,?27,?28)
              ON CONFLICT(path) DO UPDATE SET
                 id=?2,project_dir=?3,cwd=?4,git_branch=?5,ai_title=?6,first_prompt=?7,
                 last_prompt=?8,model=?9,permission_mode=?10,version=?11,size=?12,mtime=?13,
                 first_ts=?14,last_ts=?15,entries=?16,user_msgs=?17,assistant_msgs=?18,
                 scanned_len=?19,is_subagent=?20,parent=?21,agent_id=?22,
                 in_tokens=?23,out_tokens=?24,cache_read=?25,cache_write=?26,
-                last_msg_id=?27",
+                last_msg_id=?27,custom_title=?28",
     )?;
     for s in sessions {
         st.execute(params![
@@ -623,6 +630,7 @@ fn write_sessions(tx: &rusqlite::Transaction, sessions: &[Session]) -> Result<()
             s.cache_read as i64,
             s.cache_write as i64,
             s.last_msg_id,
+            s.custom_title,
         ])?;
     }
     Ok(())
@@ -783,6 +791,7 @@ mod tests {
             entries: 7,
             scanned_len: 1234,
             last_msg_id: "msg_1".into(),
+            custom_title: "named".into(),
             ..Default::default()
         }
     }
@@ -800,6 +809,7 @@ mod tests {
         assert_eq!(got.permission_mode, "default");
         assert_eq!(got.scanned_len, 1234);
         assert_eq!(got.last_msg_id, "msg_1");
+        assert_eq!(got.custom_title, "named");
     }
 
     #[test]
@@ -814,6 +824,7 @@ mod tests {
             idx.conn
                 .execute_batch(
                     "ALTER TABLE sessions DROP COLUMN last_msg_id;
+                     ALTER TABLE sessions DROP COLUMN custom_title;
                      UPDATE meta SET value='7' WHERE key='scanner_version';",
                 )
                 .unwrap();

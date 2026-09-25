@@ -16,6 +16,8 @@ pub struct Session {
     pub git_branch: String,
 
     // what it was about
+    /// What you named it with `/rename`. Outranks everything.
+    pub custom_title: String,
     pub ai_title: String,
     pub first_prompt: String,
     pub last_prompt: String,
@@ -80,10 +82,13 @@ pub struct Session {
 }
 
 impl Session {
-    /// Best human label: Claude's own generated title wins, then the opening
-    /// prompt, because a pasted mega-prompt makes a terrible list entry.
+    /// Best human label: the name you gave it, then Claude's own generated
+    /// title, then the opening prompt, because a pasted mega-prompt makes a
+    /// terrible list entry.
     pub fn title(&self) -> &str {
-        if !self.ai_title.is_empty() {
+        if !self.custom_title.is_empty() {
+            &self.custom_title
+        } else if !self.ai_title.is_empty() {
             &self.ai_title
         } else if !self.first_prompt.is_empty() {
             &self.first_prompt

@@ -355,6 +355,15 @@ fn process_line(s: &mut Session, line: &[u8], text: &mut Option<&mut String>) {
         };
         let kind = &rest[..q];
         match kind {
+            // A name given with `/rename`. Written again as the session goes
+            // on, and a later one is a rename, so the last is the one.
+            b"custom-title" => {
+                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) {
+                    if let Some(t) = v.get("customTitle").and_then(|x| x.as_str()) {
+                        s.custom_title = squash(t, 160);
+                    }
+                }
+            }
             b"ai-title" => {
                 if let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) {
                     if let Some(t) = v.get("aiTitle").and_then(|x| x.as_str()) {
@@ -624,6 +633,24 @@ mod tests {
             writeln!(f, "{line}").unwrap();
         }
         (dir, path)
+    }
+
+    #[test]
+    fn the_name_given_with_rename_is_the_title() {
+        // Claude Code's own picker shows it; the list showed the AI title
+        // it replaced. Both are written again as the session goes on.
+        let mut s = Session::default();
+        let mut sink: Option<&mut String> = None;
+        for l in [
+            r#"{"type":"ai-title","aiTitle":"Discuss project feedback and thoughts","sessionId":"s"}"#,
+            r#"{"type":"custom-title","customTitle":"Project feedback","sessionId":"s"}"#,
+            r#"{"type":"ai-title","aiTitle":"Discuss project feedback and thoughts","sessionId":"s"}"#,
+            r#"{"type":"custom-title","customTitle":"Renamed again","sessionId":"s"}"#,
+        ] {
+            process_line(&mut s, l.as_bytes(), &mut sink);
+        }
+        assert_eq!(s.title(), "Renamed again");
+        assert_eq!(s.ai_title, "Discuss project feedback and thoughts");
     }
 
     #[test]
