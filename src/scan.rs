@@ -544,11 +544,20 @@ pub fn scan_with_text(
     scan_inner(path, is_subagent, parent, prev, Some(text))
 }
 
-/// Whether a file now `size` bytes long is read on from where `prev` stopped,
-/// rather than from the start. Only the text after that point is harvested,
-/// so whoever stores it has to know which of the two happened.
-pub fn resumes(prev: &Session, size: u64) -> bool {
+/// Whether a file now `size` bytes long can be read on from where `prev`
+/// stopped, rather than from the start.
+fn resumes(prev: &Session, size: u64) -> bool {
     prev.scanned_len > 0 && prev.scanned_len <= size && prev.size <= size
+}
+
+/// Is the byte before `at` a newline, as it is where a scan stopped?
+fn ends_a_line(file: &mut File, at: u64) -> bool {
+    use std::io::Read;
+    let mut b = [0u8; 1];
+    at > 0
+        && file.seek(SeekFrom::Start(at - 1)).is_ok()
+        && file.read_exact(&mut b).is_ok()
+        && b[0] == b'\n'
 }
 
 fn scan_inner(
@@ -566,16 +575,22 @@ fn scan_inner(
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
 
-    // untouched since last index -> nothing to do
+    // untouched since last index -> nothing to do, and nothing new to say
     if let Some(p) = prev {
         if p.size == size && p.mtime == mtime {
-            return Ok(p.clone());
+            let mut s = p.clone();
+            s.resumed = true;
+            return Ok(s);
         }
     }
 
-    // append-only fast path: resume from where we stopped
+    let mut file = File::open(path)?;
+    // append-only fast path: resume from where we stopped -- if that is
+    // still the end of a line. A file rewritten at the same size or longer
+    // was read on from its old offset, mid-line, and came out a session of
+    // fragments with no first prompt.
     let resume_from = match prev {
-        Some(p) if resumes(p, size) => p.scanned_len,
+        Some(p) if resumes(p, size) && ends_a_line(&mut file, p.scanned_len) => p.scanned_len,
         _ => 0,
     };
 
@@ -612,10 +627,7 @@ fn scan_inner(
         }
     };
 
-    let mut file = File::open(path)?;
-    if resume_from > 0 {
-        file.seek(SeekFrom::Start(resume_from))?;
-    }
+    file.seek(SeekFrom::Start(resume_from))?;
     let mut rdr = BufReader::with_capacity(1 << 18, file);
     let mut consumed = resume_from;
     let mut buf: Vec<u8> = Vec::with_capacity(1 << 14);
@@ -645,6 +657,7 @@ fn scan_inner(
     }
 
     s.scanned_len = consumed;
+    s.resumed = resume_from > 0;
     s.size = size;
     s.mtime = mtime;
     s.path = path.to_path_buf();

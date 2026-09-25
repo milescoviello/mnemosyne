@@ -49,6 +49,10 @@ pub struct Session {
     /// Transcripts are append-only, so on the next run we read only the tail
     /// past this offset instead of re-parsing the whole file.
     pub scanned_len: u64,
+    /// The scan that produced this read on from where the last one stopped,
+    /// so the text it collected is only what came after. Never stored: it
+    /// describes one scan, and whoever keeps its text has to know which.
+    pub resumed: bool,
 
     // subagent linkage: <project>/<parent-session-id>/subagents/agent-*.jsonl
     pub is_subagent: bool,

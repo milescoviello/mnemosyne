@@ -665,21 +665,16 @@ pub struct Progress {
 /// `None` to leave what is stored alone.
 ///
 /// A transcript read from scratch replaces its row outright. One read on from
-/// `prev` contributes only its new tail, which is joined to what is there --
-/// and when that tail is empty, as it is for a file that was only touched or
-/// is halfway through writing a line, what is there stays.
+/// where the last scan stopped contributes only its new tail, which is joined
+/// to what is there -- and when that tail is empty, as it is for a file that
+/// was only touched or is halfway through writing a line, what is there stays.
 ///
-/// This used to decide by comparing against the cached row rather than the
-/// `prev` the scan was actually given. After a scanner change there is no
-/// `prev` and every file is read from the start, so each one that had grown
-/// was stored as its old text followed by all of it again.
-fn text_after_scan(
-    idx: &Index,
-    prev: Option<&Session>,
-    s: &Session,
-    fresh: &str,
-) -> Option<String> {
-    if !prev.is_some_and(|p| scan::resumes(p, s.size)) {
+/// Which of the two happened is the scan's to say, in `resumed`. This used to
+/// decide by comparing against the cached row instead: after a scanner change
+/// every file is read from the start, and each one that had grown was stored
+/// as its old text followed by all of it again.
+fn text_after_scan(idx: &Index, s: &Session, fresh: &str) -> Option<String> {
+    if !s.resumed {
         return Some(fresh.to_string());
     }
     if fresh.is_empty() {
@@ -763,8 +758,7 @@ fn refresh_in(
     let mut text_rows: Vec<(String, String)> = Vec::new();
     for (s, t) in &scanned {
         let key = s.path.to_string_lossy().to_string();
-        let prev = if stale { None } else { cached.get(&key) };
-        if let Some(text) = text_after_scan(&idx, prev, s, t) {
+        if let Some(text) = text_after_scan(&idx, s, t) {
             text_rows.push((key, text));
         }
     }
@@ -1292,7 +1286,7 @@ mod pipeline_tests {
         let mut text = String::new();
         let s = crate::scan::scan_with_text(path, false, None, prev, &mut text).unwrap();
         let key = s.path.to_string_lossy().to_string();
-        if let Some(t) = text_after_scan(idx, prev, &s, &text) {
+        if let Some(t) = text_after_scan(idx, &s, &text) {
             idx.store_text(&[(key, t)]).unwrap();
         }
         idx.store(std::slice::from_ref(&s)).unwrap();
@@ -1410,6 +1404,31 @@ mod pipeline_tests {
         drop(f);
         rescan(&mut idx, &path, Some(&s2));
         assert!(finds(&idx, "zebra") && finds(&idx, "quokka"));
+    }
+
+    #[test]
+    fn a_transcript_rewritten_longer_is_read_again_from_the_start() {
+        // Same size or longer, so it looked like it had only grown -- and
+        // was read on from the old offset, in the middle of a line.
+        let (_d, mut idx, path, s1) = first_scan(&[said("user", "zebra came first")]);
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                said("user", "an entirely different quokka"),
+                said("assistant", "and a reply")
+            ),
+        )
+        .unwrap();
+        let s2 = rescan(&mut idx, &path, Some(&s1));
+        assert!(!s2.resumed);
+        assert_eq!(s2.user_msgs, 1, "counted from the middle: {s2:?}");
+        assert_eq!(s2.first_prompt, "an entirely different quokka");
+        let text = idx
+            .existing_text(&s2.path.to_string_lossy())
+            .unwrap()
+            .unwrap();
+        assert!(!text.contains("zebra"), "the old text was kept: {text:?}");
     }
 
     #[test]
