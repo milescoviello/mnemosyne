@@ -40,7 +40,8 @@ pub fn db_path() -> PathBuf {
 ///   7  rebuild text that an incremental rescan had doubled or deleted
 ///   8  a response's usage is counted once, not once per content block
 ///   9  the title given with /rename is read
-pub const SCANNER_VERSION: u32 = 9;
+///   10 a tool's result is left out of the text, list-shaped ones too
+pub const SCANNER_VERSION: u32 = 10;
 
 /// Every column the loader expects. Compared against what the database
 /// actually has, so drift is detected rather than assumed away.

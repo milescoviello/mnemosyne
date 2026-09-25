@@ -168,6 +168,11 @@ pub fn is_injected_meta(line: &[u8]) -> bool {
     memmem::find(line, b"\"isMeta\":true").is_some()
 }
 
+/// A line handing a tool's output back, rather than anything said.
+fn carries_tool_result(line: &[u8]) -> bool {
+    memmem::find(line, b"\"type\":\"tool_result\"").is_some()
+}
+
 /// Pull the prose out of a conversation line for the search index.
 ///
 /// Only `{"type":"text"}` content blocks are taken, which is what makes the
@@ -406,7 +411,13 @@ fn process_line(s: &mut Session, line: &[u8], text: &mut Option<&mut String>) {
     // the two have to reach the same verdict. `isMeta` is a top-level field
     // and lands wherever the writer put it -- in one real transcript it sat
     // 410 bytes from the end of a 268KB line.
-    if (is_user || is_asst) && !is_injected_meta(line) {
+    //
+    // Nor a tool's result. It comes back as a user line, and a result can be
+    // a list of `{"type":"text"}` blocks just like prose -- MCP output,
+    // page dumps, a subagent's report -- which took 1.7M characters of tool
+    // output into an index that exists to leave it out. Across 99,853 such
+    // lines here not one also carried anything the user wrote.
+    if (is_user || is_asst) && !is_injected_meta(line) && !carries_tool_result(line) {
         if let Some(sink) = text.as_deref_mut() {
             // Bounded, so one pathological session cannot eat the index.
             // Raised well clear of the largest real session (4.5MB here) and
@@ -910,6 +921,21 @@ mod harvest_tests {
         let mut out = String::new();
         harvest_text(line, &mut out);
         assert!(!out.contains("ripgrep"), "tool output leaked in: {out:?}");
+    }
+
+    #[test]
+    fn tool_output_shaped_like_prose_is_left_out_too() {
+        // MCP tools, page dumps and subagent reports come back as a list of
+        // text blocks, which the harvester took for conversation.
+        let line = br#"{"message":{"role":"user","content":[{"tool_use_id":"t1","type":"tool_result","content":[{"type":"text","text":"Ran Playwright code page dump"}]}]},"type":"user"}"#;
+        let mut s = Session::default();
+        let mut text = String::new();
+        process_line(&mut s, line, &mut Some(&mut text));
+        assert!(
+            !text.contains("Playwright"),
+            "tool output leaked in: {text:?}"
+        );
+        assert_eq!(s.user_msgs, 1, "it is still a turn");
     }
 
     #[test]
