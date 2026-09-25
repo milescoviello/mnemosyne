@@ -143,10 +143,67 @@ fn sha256_of(path: &Path) -> Option<String> {
     None
 }
 
+/// Where an update is unpacked: a directory this process made itself, only
+/// its owner can enter, and that goes away however the update ends.
+///
+/// It used to be `/tmp/mnemosyne-update-<pid>`, reused if it was already
+/// there. Anyone on the machine could make those ahead of time, with a
+/// symlink where the download would be written and a window to swap the
+/// binary between the checksum and the install. And every failure but three
+/// left it behind -- on an install the updater could not write to, a
+/// download's worth in /tmp on every start.
+struct Staging(PathBuf);
+
+impl Staging {
+    fn new() -> Result<Staging> {
+        let base = std::env::temp_dir();
+        for n in 0..64u32 {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.subsec_nanos())
+                .unwrap_or(0);
+            let p = base.join(format!(
+                "mnemosyne-update-{}-{nanos:08x}-{n}",
+                std::process::id()
+            ));
+            let mut b = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                b.mode(0o700);
+            }
+            // `create`, not `create_all`: something already there, a
+            // symlink included, is a reason to pick another name.
+            match b.create(&p) {
+                Ok(()) => return Ok(Staging(p)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(anyhow!("could not make a private directory to unpack into"))
+    }
+}
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Where this binary lives, resolving symlinks so we replace the real file.
 fn own_path() -> Result<PathBuf> {
-    let p = std::env::current_exe()?;
+    let p = without_deleted(std::env::current_exe()?);
     Ok(std::fs::canonicalize(&p).unwrap_or(p))
+}
+
+/// Linux names a binary replaced since it started `<path> (deleted)`. That
+/// is not a file anyone can resolve, so the install used to land beside the
+/// real one, in a file of that name, and report success.
+fn without_deleted(p: PathBuf) -> PathBuf {
+    match p.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(s) => PathBuf::from(s),
+        None => p,
+    }
 }
 
 /// Download the latest release and put it in place.
@@ -159,8 +216,8 @@ pub fn install_latest() -> Result<String> {
         return Err(anyhow!("already on {}", current()));
     }
 
-    let dir = std::env::temp_dir().join(format!("mnemosyne-update-{}", std::process::id()));
-    std::fs::create_dir_all(&dir)?;
+    let staging = Staging::new()?;
+    let dir = staging.0.clone();
     let tarball = dir.join(asset());
     let base = format!(
         "https://github.com/{REPO}/releases/latest/download/{}",
@@ -180,7 +237,6 @@ pub fn install_latest() -> Result<String> {
         .to_string();
     let got = sha256_of(&tarball).unwrap_or_default();
     if want.is_empty() || want != got {
-        let _ = std::fs::remove_dir_all(&dir);
         return Err(anyhow!("checksum did not match — refusing to install"));
     }
 
@@ -193,33 +249,37 @@ pub fn install_latest() -> Result<String> {
         ])
         .status()?;
     if !status.success() {
-        let _ = std::fs::remove_dir_all(&dir);
         return Err(anyhow!("could not unpack the release"));
     }
 
     let me = own_path()?;
     let new = dir.join("mnemosyne");
     if !new.is_file() {
-        let _ = std::fs::remove_dir_all(&dir);
         return Err(anyhow!("release did not contain a binary"));
     }
     // Stage beside the target so the rename stays on one filesystem, then
     // rename over it: atomic, and safe while the old one is running.
     let staged = me.with_extension("new");
-    std::fs::copy(&new, &staged)?;
-    let mut perm = std::fs::metadata(&staged)?.permissions();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        perm.set_mode(0o755);
+    let placed = (|| -> Result<()> {
+        std::fs::copy(&new, &staged)?;
+        let mut perm = std::fs::metadata(&staged)?.permissions();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perm.set_mode(0o755);
+        }
+        std::fs::set_permissions(&staged, perm)?;
+        std::fs::rename(&staged, &me)?;
+        Ok(())
+    })();
+    if placed.is_err() {
+        let _ = std::fs::remove_file(&staged);
     }
-    std::fs::set_permissions(&staged, perm)?;
-    std::fs::rename(&staged, &me)?;
+    placed?;
 
     // The shell functions ship in the tarball and can change with it.
     refresh_shell_files(&dir);
 
-    let _ = std::fs::remove_dir_all(&dir);
     touch_stamp();
     Ok(tag.trim_start_matches('v').to_string())
 }
@@ -227,15 +287,24 @@ pub fn install_latest() -> Result<String> {
 /// Update the installed shell functions, but only where one already exists —
 /// an update should not start installing things you did not have.
 fn refresh_shell_files(from: &Path) {
-    let home = std::env::var("HOME").unwrap_or_default();
+    refresh_shell_files_in(from, Path::new(&std::env::var("HOME").unwrap_or_default()));
+}
+
+fn refresh_shell_files_in(from: &Path, home: &Path) {
     for (src, dst) in [
-        ("mn.fish", format!("{home}/.config/fish/functions/mn.fish")),
-        ("mn.bash", format!("{home}/.local/share/mnemosyne/mn.bash")),
+        ("mn.fish", home.join(".config/fish/functions/mn.fish")),
+        ("mn.bash", home.join(".local/share/mnemosyne/mn.bash")),
     ] {
         let s = from.join(src);
-        let d = PathBuf::from(&dst);
-        if s.is_file() && d.is_file() {
-            let _ = std::fs::copy(&s, &d);
+        // A symlink is somebody's arrangement -- stow, chezmoi, a checkout
+        // of this repo -- and copying through it rewrote the file it points
+        // at. Left alone; a plain file is replaced whole, by rename.
+        let plain = std::fs::symlink_metadata(&dst).is_ok_and(|m| m.file_type().is_file());
+        if s.is_file() && plain {
+            let tmp = dst.with_extension(format!("new.{}", std::process::id()));
+            if std::fs::copy(&s, &tmp).is_err() || std::fs::rename(&tmp, &dst).is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
         }
     }
 }
@@ -294,6 +363,56 @@ pub fn auto_full(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_update_unpacks_somewhere_private_that_does_not_outlive_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let s = Staging::new().unwrap();
+        let p = s.0.clone();
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "{mode:o}");
+        let other = Staging::new().unwrap();
+        assert_ne!(other.0, p, "two updates shared a directory");
+        drop(s);
+        assert!(!p.exists(), "left behind");
+    }
+
+    #[test]
+    fn a_binary_replaced_while_running_is_installed_under_its_own_name() {
+        assert_eq!(
+            without_deleted(PathBuf::from("/home/u/.local/bin/mnemosyne (deleted)")),
+            PathBuf::from("/home/u/.local/bin/mnemosyne")
+        );
+        assert_eq!(
+            without_deleted(PathBuf::from("/usr/bin/mnemosyne")),
+            PathBuf::from("/usr/bin/mnemosyne")
+        );
+    }
+
+    #[test]
+    fn an_update_never_writes_through_a_symlinked_shell_file() {
+        let d = tempfile::tempdir().unwrap();
+        let (home, from) = (d.path().join("home"), d.path().join("release"));
+        let fish_dir = home.join(".config/fish/functions");
+        let bash_dir = home.join(".local/share/mnemosyne");
+        std::fs::create_dir_all(&fish_dir).unwrap();
+        std::fs::create_dir_all(&bash_dir).unwrap();
+        std::fs::create_dir_all(&from).unwrap();
+        // a dotfiles checkout, linked into place
+        let mine = d.path().join("dotfiles-mn.fish");
+        std::fs::write(&mine, "my own mn.fish").unwrap();
+        std::os::unix::fs::symlink(&mine, fish_dir.join("mn.fish")).unwrap();
+        std::fs::write(bash_dir.join("mn.bash"), "old mn.bash").unwrap();
+        std::fs::write(from.join("mn.fish"), "released mn.fish").unwrap();
+        std::fs::write(from.join("mn.bash"), "released mn.bash").unwrap();
+
+        refresh_shell_files_in(&from, &home);
+        assert_eq!(std::fs::read_to_string(&mine).unwrap(), "my own mn.fish");
+        assert_eq!(
+            std::fs::read_to_string(bash_dir.join("mn.bash")).unwrap(),
+            "released mn.bash"
+        );
+    }
 
     #[test]
     fn version_ordering() {
