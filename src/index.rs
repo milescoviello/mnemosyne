@@ -457,16 +457,28 @@ impl Index {
     /// had been read, so it was never read again, and never searchable.
     pub fn persist(&mut self, sessions: &[Session], text: &[(String, TextUpdate)]) -> Result<()> {
         let tx = self.begin()?;
-        let refused = write_text(&tx, text)?;
-        // A session whose new text another refresh stored first is left as
-        // that one stored it: its row too, or it would claim to have read
-        // further than the text says.
-        write_sessions(
-            &tx,
-            sessions
-                .iter()
-                .filter(|s| !refused.contains(s.path.to_string_lossy().as_ref())),
-        )?;
+        write_text(&tx, text)?;
+        // A session read on from a place another refresh has since moved
+        // past is left as that one stored it: its text, which `write_text`
+        // refuses, and its row, whether or not it had text to add. Written
+        // with nothing new -- read while a line was half written -- the row
+        // put back the place the other had read on from, and the next
+        // refresh read that stretch again and indexed it twice.
+        let mut read_to = tx.prepare("SELECT scanned_len FROM sessions WHERE path = ?1")?;
+        let mut current = Vec::with_capacity(sessions.len());
+        for s in sessions {
+            if let Some(from) = s.resumed_from {
+                let at: Option<i64> = read_to
+                    .query_row([s.path.to_string_lossy()], |r| r.get(0))
+                    .ok();
+                if at != Some(from as i64) {
+                    continue;
+                }
+            }
+            current.push(s);
+        }
+        drop(read_to);
+        write_sessions(&tx, current)?;
         tx.commit()?;
         Ok(())
     }
@@ -666,17 +678,12 @@ pub enum TextUpdate {
     Append { from: u64, tail: String },
 }
 
-/// Write the text, returning the paths whose `Append` another refresh had
-/// already done.
-fn write_text(
-    tx: &rusqlite::Transaction,
-    rows: &[(String, TextUpdate)],
-) -> Result<std::collections::HashSet<String>> {
+/// Write the text, but not an `Append` another refresh has already done.
+fn write_text(tx: &rusqlite::Transaction, rows: &[(String, TextUpdate)]) -> Result<()> {
     let mut read_to = tx.prepare("SELECT scanned_len FROM sessions WHERE path = ?1")?;
     let mut stored = tx.prepare(
         "SELECT b.text FROM body b JOIN body_ref r ON b.rowid = r.rid WHERE r.path = ?1",
     )?;
-    let mut refused = std::collections::HashSet::new();
     // Delete by rowid, never by path: `path` is UNINDEXED, so
     // `WHERE path = ?` reads the entire table. Doing that once per
     // transcript was 41 of the 43 seconds a full re-index took.
@@ -691,7 +698,6 @@ fn write_text(
             TextUpdate::Append { from, tail } => {
                 let at: Option<i64> = read_to.query_row([path], |r| r.get(0)).ok();
                 if at != Some(*from as i64) {
-                    refused.insert(path.clone());
                     continue;
                 }
                 match stored.query_row([path], |r| r.get::<_, String>(0)) {
@@ -709,7 +715,7 @@ fn write_text(
             reref.execute(params![path, tx.last_insert_rowid()])?;
         }
     }
-    Ok(refused)
+    Ok(())
 }
 
 fn write_sessions<'a>(
@@ -1512,6 +1518,42 @@ mod pipeline_tests {
         let text = idx.existing_text(&key).unwrap().unwrap();
         assert_eq!(text.matches("quokka").count(), 1, "{text:?}");
         assert_eq!(text.matches("zebra").count(), 1, "{text:?}");
+    }
+
+    #[test]
+    fn a_refresh_with_nothing_new_to_add_does_not_undo_one_that_had() {
+        // The slower of two refreshes read while Claude was halfway through
+        // a line, so it had no text to add -- and wrote its row anyway,
+        // putting back the place the faster one had read on from. The
+        // next refresh read that stretch again, and indexed it twice.
+        let (_d, mut idx, path, s1) = first_scan(&[said("user", "zebra came first")]);
+        let line = said("user", "quokka came later");
+        let (half, rest) = line.split_at(20);
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        write!(f, "{half}").unwrap();
+        f.flush().unwrap();
+        let mut tb = String::new();
+        let b = crate::scan::scan_with_text(&path, false, None, Some(&s1), &mut tb).unwrap();
+        assert!(tb.is_empty(), "the slower one saw half a line");
+        writeln!(f, "{rest}").unwrap();
+        drop(f);
+        let mut ta = String::new();
+        let a = crate::scan::scan_with_text(&path, false, None, Some(&s1), &mut ta).unwrap();
+        let key = a.path.to_string_lossy().to_string();
+        for (s, t) in [(a, ta), (b, tb)] {
+            let rows: Vec<(String, TextUpdate)> = text_after_scan(&s, t)
+                .map(|u| (key.clone(), u))
+                .into_iter()
+                .collect();
+            idx.persist(std::slice::from_ref(&s), &rows).unwrap();
+        }
+        let prev = idx.load().unwrap()[&key].clone();
+        rescan(&mut idx, &path, Some(&prev));
+        let text = idx.existing_text(&key).unwrap().unwrap();
+        assert_eq!(text.matches("quokka").count(), 1, "{text:?}");
     }
 
     fn first_scan(lines: &[String]) -> (tempfile::TempDir, Index, std::path::PathBuf, Session) {
