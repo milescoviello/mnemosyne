@@ -12,24 +12,25 @@ use serde::{Deserialize, Serialize};
 pub const EXAMPLE: &str = r##"# mnemosyne configuration.
 # Delete any line to go back to its default.
 
-# The water ramp, deep to pale. Every gradient in the interface samples it:
-# the depth gutter, the wordmark, the progress bar. Two or more stops.
-ramp = ["#0e2042", "#154884", "#1a7aa8", "#26b2b0", "#6ce2d6", "#e2f8f6"]
+# The gold ramp, tarnished to fresh. Every gradient in the interface samples
+# it: the age of each session, the tablet on the opening screen, the progress
+# bar. Two or more stops.
+ramp = ["#2b2117", "#5f4524", "#9a7438", "#d4a94f", "#efcf7a", "#fbefc4"]
 
 # Fixed colours. Any of "#rrggbb", or a name: black red green yellow blue
 # magenta cyan white, gray, and the bright- variants.
-accent = "cyan"
-chrome = "gray"        # borders, labels, anything structural
-favorite = "yellow"
-live = "green"
-tag = "magenta"
-text = "gray"          # session titles
-bright = "white"       # the row you are on
-gone = "#965454"       # a directory that no longer exists
+accent = "#86b08e"     # a wsx workspace that is still there
+chrome = "#7d7263"     # labels, hints, anything structural
+favorite = "#f5c542"
+live = "#86b08e"       # running now
+tag = "#8aa2e6"        # tags, notes, and what you said
+text = "#cbc2b0"       # session titles
+bright = "#f5efe3"     # the row you are on
+gone = "#d0654b"       # a directory that no longer exists
 
 # Row background for the selected line, and for overlay panels.
-band = "#162a3a"
-panel = "#09111c"
+band = "#2b2215"
+panel = "#120e0a"
 
 [splash]
 enabled = true

@@ -752,10 +752,10 @@ used. `mnemosyne --write-config` drops a commented one at
 `~/.claude/mnemosyne/config.toml`:
 
 ```toml
-# The water ramp, deep to pale. Every gradient samples it.
-ramp = ["#0e2042", "#154884", "#1a7aa8", "#26b2b0", "#6ce2d6", "#e2f8f6"]
-accent = "cyan"
-favorite = "yellow"
+# The gold ramp, tarnished to fresh. Every gradient samples it.
+ramp = ["#2b2117", "#5f4524", "#9a7438", "#d4a94f", "#efcf7a", "#fbefc4"]
+favorite = "#f5c542"
+tag = "#8aa2e6"
 
 [splash]
 enabled = true

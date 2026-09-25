@@ -84,14 +84,15 @@ pub fn mark_for(width: usize) -> Option<Mark> {
 
 type Rgb = (u8, u8, u8);
 
-/// Deep water to pale foam. Read left to right across the wordmark.
+/// Tarnished to fresh. Read as age everywhere a session's age is drawn: the
+/// newest are bright leaf, the oldest have gone to bronze.
 const RAMP: &[Rgb] = &[
-    (14, 32, 66),    // abyss
-    (21, 72, 132),   // deep
-    (26, 122, 168),  // mid
-    (38, 178, 176),  // shallow
-    (108, 226, 214), // crest
-    (226, 248, 246), // foam
+    (43, 33, 23),    // soot
+    (95, 69, 36),    // bronze
+    (154, 116, 56),  // tarnish
+    (212, 169, 79),  // gold
+    (239, 207, 122), // leaf
+    (251, 239, 196), // electrum
 ];
 
 fn lerp(a: Rgb, b: Rgb, t: f64) -> Rgb {
@@ -131,14 +132,15 @@ pub fn ramp(p: f64) -> Rgb {
     lerp(ramp[i], ramp[i + 1], x - i as f64)
 }
 
-/// Brighten toward white by `amount` (0..=1), for the travelling shimmer.
+/// Brighten toward a warm white by `amount` (0..=1), for the travelling
+/// shimmer.
 pub fn lift(c: Rgb, amount: f64) -> Rgb {
-    lerp(c, (255, 255, 255), amount.clamp(0.0, 1.0))
+    lerp(c, (255, 252, 240), amount.clamp(0.0, 1.0))
 }
 
-/// Dim toward the background, for unrevealed noise.
+/// Dim toward the background, for anything meant to recede.
 pub fn sink(c: Rgb, amount: f64) -> Rgb {
-    lerp(c, (8, 12, 20), amount.clamp(0.0, 1.0))
+    lerp(c, (14, 11, 8), amount.clamp(0.0, 1.0))
 }
 
 /// Colour for column `x` of `width`, with a shimmer band centred at `band`
@@ -199,3 +201,22 @@ pub const WAVES_FALLBACK: &[char] = &['≈', '~', '∼', '#', '%', '*', '?', '0'
 
 /// Eighth-width blocks, so the progress bar can move in sub-cell steps.
 pub const PARTIALS: &[char] = &['▏', '▎', '▍', '▌', '▋', '▊', '▉'];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_example_config_ships_the_default_ramp() {
+        // It says deleting a line brings back the default, which is only
+        // true while the two agree.
+        let c: crate::config::Config = toml::from_str(crate::config::EXAMPLE).unwrap();
+        let stops: Vec<Rgb> = c
+            .ramp
+            .unwrap()
+            .iter()
+            .filter_map(|s| crate::config::parse_color(s))
+            .collect();
+        assert_eq!(stops, RAMP);
+    }
+}
