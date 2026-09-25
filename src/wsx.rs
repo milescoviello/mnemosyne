@@ -370,17 +370,27 @@ pub fn load() -> State {
 fn load_with(wsx: &[&str]) -> State {
     let mut state = State::here();
     let deadline = Instant::now() + DEADLINE;
-    let (Ok(workspaces), Ok(repos)) = (
-        run(wsx, &["workspace", "list"], deadline, Keep::Stdout),
-        run(wsx, &["repo", "list"], deadline, Keep::Stdout),
-    ) else {
+    // All three at once. Each is about twenty milliseconds of wsx starting
+    // up, and this is asked at startup and on every rescan: one after
+    // another they were the sum, together they are the slowest.
+    let ask = |args: &'static [&'static str]| move || run(wsx, args, deadline, Keep::Stdout);
+    let (workspaces, repos, shared) = std::thread::scope(|t| {
+        let w = t.spawn(ask(&["workspace", "list"]));
+        let r = t.spawn(ask(&["repo", "list"]));
+        let s = t.spawn(ask(&["shared", "list"]));
+        let join = |h: std::thread::ScopedJoinHandle<'_, Result<String, String>>| {
+            h.join().unwrap_or_else(|_| Err("it panicked".into()))
+        };
+        (join(w), join(r), join(s))
+    });
+    let (Ok(workspaces), Ok(repos)) = (workspaces, repos) else {
         return state;
     };
     state.available = true;
     state.workspaces = parse_workspace_list(&workspaces);
     state.repos = repos;
     // A wsx without the command has no shared workspaces to report.
-    if let Ok(shared) = run(wsx, &["shared", "list"], deadline, Keep::Stdout) {
+    if let Ok(shared) = shared {
         state.shared = parse_shared_list(&shared);
     }
     state
@@ -816,6 +826,20 @@ echo 'no such command' >&2; exit 1"#,
         assert!(
             t.elapsed() < Duration::from_secs(2),
             "waited {:?} for something that was given 100ms",
+            t.elapsed()
+        );
+    }
+
+    #[test]
+    fn wsx_is_asked_its_three_questions_at_once() {
+        // Each answer takes as long as wsx takes to start; asked in turn,
+        // startup paid for all three.
+        let t = Instant::now();
+        let state = load_with(&["sh", "-c", "sleep 0.15", "sh"]);
+        assert!(state.available);
+        assert!(
+            t.elapsed() < Duration::from_millis(350),
+            "{:?}: asked one after another",
             t.elapsed()
         );
     }
