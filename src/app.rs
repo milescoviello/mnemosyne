@@ -1495,6 +1495,33 @@ impl App {
         self.rebuild();
     }
 
+    /// Where enter on the row under the cursor goes, when that is wsx
+    /// rather than this terminal. The footer asks as well, so that what it
+    /// offers is what enter does.
+    ///
+    /// wsx running the conversation outright comes before the guard against
+    /// a second client, which would otherwise read an agent wsx resumed by id
+    /// as somebody's process and refuse it. Anything else already running --
+    /// in tmux, in a window opened just now, or as a claude wsx did not start
+    /// -- is the guard's to refuse.
+    pub fn enter_jumps(&self) -> Option<crate::wsx::Jump> {
+        if !self.picks().is_empty() {
+            return None;
+        }
+        let s = self.current().map(|s| self.resumed(s))?;
+        let Some(Claim::Agent(j)) = self.wsx_claim(s) else {
+            return None;
+        };
+        if s.live_in_wsx {
+            return Some(j);
+        }
+        let just_opened = self.launched.iter().any(|t| t.id == s.id);
+        if s.live_exact || s.has_tmux || just_opened {
+            return None;
+        }
+        Some(j)
+    }
+
     fn resume(&mut self, target: Target) {
         let mut targets = self.targets();
         if targets.is_empty() {
@@ -1550,24 +1577,12 @@ impl App {
                 self.notes.push(note);
             }
         }
-        let claim = if target == Target::Here && !picked {
-            self.current()
-                .map(|s| self.resumed(s))
-                .and_then(|s| self.wsx_claim(s))
-        } else {
-            None
-        };
-        // wsx running it outright comes before the guard below, which would
-        // otherwise read an agent wsx resumed by id as somebody's process and
-        // refuse it.
-        let wsx_runs_it = self
-            .current()
-            .map(|s| self.resumed(s))
-            .is_some_and(|s| s.live_in_wsx);
-        if let (Some(Claim::Agent(j)), true) = (&claim, wsx_runs_it) {
-            self.status = format!("switching to {} in wsx…", j.label());
-            self.to_jump.push(j.clone());
-            return;
+        if target == Target::Here {
+            if let Some(j) = self.enter_jumps() {
+                self.status = format!("switching to {} in wsx…", j.label());
+                self.to_jump.push(j);
+                return;
+            }
         }
         // Guard against silently starting a second client on a transcript that
         // already has one. Tmux is exempt: attaching to the existing session is
@@ -1602,21 +1617,17 @@ impl App {
                     return;
                 }
             }
-            // Nothing running it, but the workspace is live, and wsx will
-            // put its agent back on a conversation of its choosing.
-            match claim {
-                Some(Claim::Agent(j)) => {
-                    self.status = format!("switching to {} in wsx…", j.label());
-                    self.to_jump.push(j);
-                    return;
-                }
-                Some(Claim::Not { label, why }) => {
-                    self.status = format!(
-                        "{label} is live in wsx on {why} session — ctrl+n opens this one anyway"
-                    );
-                    return;
-                }
-                None => {}
+            // Nothing running it, but the workspace is live, and a jump
+            // would show wsx's agent on some other conversation.
+            let claim = self
+                .current()
+                .map(|s| self.resumed(s))
+                .and_then(|s| self.wsx_claim(s));
+            if let (Some(Claim::Not { label, why }), false) = (claim, picked) {
+                self.status = format!(
+                    "{label} is live in wsx on {why} session — ctrl+n opens this one anyway"
+                );
+                return;
             }
         }
         // A window of its own does not need this one: hand it to the shell
@@ -4074,6 +4085,68 @@ mod logic_tests {
         a.all.push(session(id, "another look at it", cwd, age_days));
         a.apply_overlay();
         a.rebuild();
+    }
+
+    #[test]
+    fn what_the_footer_offers_is_what_enter_does() {
+        // The hint asks `enter_jumps` and enter acts on it. Checked across
+        // every kind of row, so the two cannot drift: an offer to switch
+        // that resumes here, or a resume that switches, is worse than no
+        // hint at all.
+        fn tree() -> String {
+            format!("{WSX_ROOT}/OS-DEV/shy-daffodil")
+        }
+        /// Something done to the fixture before the row is tried.
+        type Setup = fn(&mut App);
+        let setups: [(&str, Setup); 5] = [
+            ("as the fixture has it", |_| {}),
+            ("wsx running it by id", |a| {
+                running(a, vec![claude(14939, Some("gggggggg-7"), &tree(), true)])
+            }),
+            ("someone else running it", |a| {
+                running(a, vec![claude(4242, Some("gggggggg-7"), &tree(), false)])
+            }),
+            ("an older conversation beside it", |a| {
+                add_session(a, "iiiiiiii-9", &tree(), 6)
+            }),
+            ("wsx not there", |a| {
+                a.set_wsx(crate::wsx::State {
+                    root: Some(WSX_ROOT.into()),
+                    ..Default::default()
+                })
+            }),
+        ];
+        let mut switched = 0;
+        for (what, setup) in &setups {
+            let ids: Vec<String> = {
+                let mut a = app();
+                setup(&mut a);
+                a.all
+                    .iter()
+                    .filter(|s| !s.is_subagent)
+                    .map(|s| s.id.clone())
+                    .collect()
+            };
+            for id in ids {
+                let mut a = app();
+                setup(&mut a);
+                on(&mut a, &id);
+                let offered = a.enter_jumps();
+                a.do_action(Action::Resume);
+                assert_eq!(
+                    offered.is_some(),
+                    !a.to_jump.is_empty(),
+                    "{what}, {id}: offered {offered:?}, enter did {:?} / {:?}",
+                    a.to_jump,
+                    a.status
+                );
+                switched += usize::from(offered.is_some());
+            }
+        }
+        assert!(
+            switched > 0,
+            "no row offered to switch, so nothing was tested"
+        );
     }
 
     #[test]

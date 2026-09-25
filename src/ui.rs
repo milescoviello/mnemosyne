@@ -443,7 +443,11 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
             k("↑↓"),
             d(" scroll   "),
             k("↵"),
-            d(" resume this one   "),
+            d(if app.enter_jumps().is_some() {
+                " switch to it in wsx   "
+            } else {
+                " resume this one   "
+            }),
             k("esc"),
             d(" back   "),
             Span::styled(
@@ -1386,9 +1390,16 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
 
     if app.status.is_empty() {
         let budget = area.width as usize;
+        // On a workspace wsx is running, enter goes there instead, and the
+        // hint says so before you press it rather than after.
+        let enter = if app.enter_jumps().is_some() {
+            " switch to wsx   "
+        } else {
+            " resume   "
+        };
         let mut hints: Vec<(&'static str, &'static str, Option<Action>)> = vec![
             ("↑↓", " move   ", None),
-            ("↵", " resume   ", Some(Action::Resume)),
+            ("↵", enter, Some(Action::Resume)),
             ("/", " filter   ", Some(Action::Filter)),
             ("F", " search   ", Some(Action::Search)),
             ("^t", " tmux   ", Some(Action::Tmux)),
@@ -2395,6 +2406,40 @@ mod render_tests {
             assert!(row.contains(want), "{w}: wanted {want:?} in {row:?}");
             assert!(!row.contains(".local"), "{w}: {row:?}");
         }
+    }
+
+    #[test]
+    fn the_footer_says_enter_switches_to_wsx_where_it_does() {
+        let mut a = app();
+        let footer = |a: &mut App, id: &str| {
+            a.focus_id(id);
+            a.status.clear();
+            render(a, 178, 30).last().cloned().unwrap()
+        };
+        // live, and nothing else running it
+        let live = footer(&mut a, "gggggggg-7");
+        assert!(live.contains("↵ switch to wsx"), "{live:?}");
+        // an ordinary folder, and an archived workspace, resume here
+        for id in ["aaaaaaaa-1", "hhhhhhhh-8"] {
+            let row = footer(&mut a, id);
+            assert!(row.contains("↵ resume"), "{id}: {row:?}");
+            assert!(!row.contains("wsx"), "{id}: {row:?}");
+        }
+        // and the conversation viewer's enter says the same
+        a.focus_id("gggggggg-7");
+        a.viewer = Some((
+            vec![crate::preview::Turn {
+                role: "you",
+                text: "a turn".into(),
+            }],
+            false,
+        ));
+        a.input_mode = InputMode::Viewer;
+        let rows = render(&mut a, 178, 30);
+        assert!(
+            rows.iter().any(|r| r.contains("↵ switch to it in wsx")),
+            "{rows:#?}"
+        );
     }
 
     /// The rail's first line, with the cursor on session `id`.

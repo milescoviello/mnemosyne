@@ -445,8 +445,9 @@ and `enter` on one never took you there: it either started a second `claude`
 beside the agent on the same conversation, or — when wsx had resumed the
 agent by id — refused it as already running. Now `enter` runs
 `wsx waybar jump` — `wsx menubar jump` on macOS — which selects the workspace
-in the wsx you have open, or opens one on it. The browser stays up, as it
-does for a window, and says where it went. Whether the wsx window is also
+in the wsx you have open, or opens one on it. On such a row the footer
+reads `↵ switch to wsx` rather than `↵ resume`, so you know before you press
+it. The browser stays up, as it does for a window, and says where it went. Whether the wsx window is also
 raised is up to wsx; today that only happens under Hyprland.
 
 What goes to wsx is a conversation one of its agents is running — a
