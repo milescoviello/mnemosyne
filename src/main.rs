@@ -1064,6 +1064,13 @@ fn run<B: ratatui::backend::Backend>(
         if signalled().is_some() {
             return Ok(());
         }
+        // wsx, asked off this thread and folded in when it answers. Asked
+        // before the first key is read, not after it: a key typed ahead of
+        // the list was handled, and only then was wsx asked anything.
+        if app.want_wsx && asking_wsx.is_none() {
+            app.want_wsx = false;
+            asking_wsx = Some(std::thread::spawn(wsx::load));
+        }
         term.draw(|f| ui::draw(f, app))?;
 
         if event::poll(Duration::from_millis(120))? {
@@ -1126,19 +1133,15 @@ fn run<B: ratatui::backend::Backend>(
             app.finish_jumps(wsx::load(), wsx::jump);
         }
 
-        // wsx, asked off this thread and folded in when it answers.
-        if app.want_wsx && asking_wsx.is_none() {
-            app.want_wsx = false;
-            asking_wsx = Some(std::thread::spawn(wsx::load));
-        }
         if asking_wsx.as_ref().is_some_and(|h| h.is_finished()) {
             if let Some(h) = asking_wsx.take() {
                 if let Ok(fresh) = h.join() {
                     app.set_wsx(fresh);
                 }
-                // however it ended: waiting on an answer that is not coming
-                // would hold enter back for good
-                app.wsx_answered = true;
+                // However it ended: waiting on an answer that is not coming
+                // would hold enter back for good. Unless it has been asked
+                // again since, and this answer is from before.
+                app.wsx_answered = !app.want_wsx;
             }
         }
 

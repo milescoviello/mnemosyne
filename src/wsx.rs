@@ -403,7 +403,12 @@ fn remember(state: &State, p: &std::path::Path) {
     let Ok(body) = serde_json::to_vec(state) else {
         return;
     };
-    let tmp = p.with_extension(format!("json.tmp.{}", std::process::id()));
+    // A name of its own for every write: a jump asks wsx on the main
+    // thread while the ask behind the list may still be going, and two
+    // writes into one temporary file could put half of each in place.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = p.with_extension(format!("json.tmp.{}.{n}", std::process::id()));
     if std::fs::write(&tmp, body).is_ok() && std::fs::rename(&tmp, p).is_err() {
         let _ = std::fs::remove_file(&tmp);
     }

@@ -1219,8 +1219,10 @@ impl App {
         // A rescan is when new workspaces' sessions turn up, and archived
         // ones' worktrees go, so it is when wsx is asked again -- behind the
         // list: asked here, the browser stopped for as long as wsx took.
+        // Until it has, what it said before is only what it said before.
         if self.ask_wsx {
             self.want_wsx = true;
+            self.wsx_answered = false;
         }
         self.recompute_totals();
         self.apply_overlay();
@@ -1704,15 +1706,15 @@ impl App {
         // already has one. Tmux is exempt: attaching to the existing session is
         // exactly the right move there, and is what "resume" should mean.
         if target == Target::Here {
-            // What wsx said last run calls a workspace made since archived.
-            // Until it answers again -- a moment -- that is not to be taken
-            // at its word: its agent could be running there.
+            // What wsx said last run calls a workspace made since archived,
+            // and with no record of it at all every workspace is only a
+            // path. Until it answers again -- a moment -- neither is to be
+            // taken at its word: its agent could be running there.
             let unsure = !self.wsx_answered
                 && self.current().map(|s| self.resumed(s)).is_some_and(|s| {
-                    matches!(
-                        s.wsx.as_ref().map(|w| &w.status),
-                        Some(crate::wsx::Status::Archived { .. })
-                    )
+                    s.wsx
+                        .as_ref()
+                        .is_some_and(|w| !matches!(w.status, crate::wsx::Status::Live { .. }))
                 });
             if unsure {
                 self.status = "asking wsx about this workspace — enter again in a moment".into();
@@ -4822,6 +4824,45 @@ mod logic_tests {
         a.wsx_answered = true;
         a.do_action(Action::Resume);
         assert!(a.outcome.is_some());
+    }
+
+    #[test]
+    fn with_no_record_of_wsx_a_workspace_waits_for_its_answer_too() {
+        // The first start with this version, or a record that could not be
+        // read: every workspace is only a path, and enter went ahead beside
+        // whatever agent wsx has running there.
+        let mut a = app();
+        a.set_wsx(crate::wsx::State {
+            root: Some(WSX_ROOT.into()),
+            ..Default::default()
+        });
+        a.wsx_answered = false;
+        on(&mut a, "gggggggg-7");
+        let s = a.all.iter().find(|s| s.id == "gggggggg-7").unwrap();
+        assert!(
+            matches!(
+                s.wsx.as_ref().map(|w| &w.status),
+                Some(crate::wsx::Status::Unknown)
+            ),
+            "{:?}",
+            s.wsx
+        );
+        a.do_action(Action::Resume);
+        assert!(a.outcome.is_none(), "resumed before wsx answered");
+        assert!(a.status.contains("asking wsx"), "{:?}", a.status);
+    }
+
+    #[test]
+    fn a_rescan_waits_for_wsx_to_answer_again() {
+        // Asked again after `R`, wsx's old answer went on being taken at
+        // its word: a workspace made since read as archived, and enter
+        // resumed it here.
+        let mut a = app();
+        a.ask_wsx = true;
+        let all = a.all.clone();
+        a.absorb_rescan(all);
+        assert!(a.want_wsx);
+        assert!(!a.wsx_answered, "the old answer still counted");
     }
 
     #[test]
