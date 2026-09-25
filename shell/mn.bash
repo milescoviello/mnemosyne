@@ -261,8 +261,10 @@ mn() {
                     res="$(__mn_tmux_ensure "$cwd" "$sid" "$mdl" "$ttl" "$tmx" -- "${extra[@]}" "${fwd[@]}" 2>>"$errf")" || continue
                     { IFS= read -r name; IFS= read -r state; } <<< "$res"
                     # Quoted: the name is whatever the chat already runs
-                    # under, and tmux allows spaces and `$(...)` in one.
-                    if term="$(__mn_term_open "$cwd" "exec tmux attach-session -t $(printf %q "=$name")")"; then
+                    # under, and tmux allows spaces and `$(...)` in one. The
+                    # `=` stays outside: zsh, which sources this too, quotes
+                    # a leading one as `\=` for its own `=cmd` expansion.
+                    if term="$(__mn_term_open "$cwd" "exec tmux attach-session -t =$(printf %q "$name")")"; then
                         notes+="$(__mn_opened "$ttl" "$term → tmux $name" "$state")"$'\n'
                     else
                         notes+="$(__mn_opened "$ttl" "tmux $name" "$state") — no terminal to show it in; ctrl+t attaches"$'\n'
