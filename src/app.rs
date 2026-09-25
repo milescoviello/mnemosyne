@@ -1820,7 +1820,12 @@ impl App {
     }
 
     fn commit_note(&mut self) {
-        let Some(i) = self.current_idx() else { return };
+        let Some(i) = self.current_idx() else {
+            // Nothing to put it on; enter still has to close the prompt.
+            self.input.clear();
+            self.input_mode = InputMode::Normal;
+            return;
+        };
         let id = self.all[i].id.clone();
         let had = !self.all[i].note.is_empty();
         self.meta.set_note(&id, &self.input);
@@ -1854,12 +1859,32 @@ impl App {
         self.rebuild();
     }
 
-    /// Tag completions for the current input prefix.
+    /// Where the tag being typed starts: after the last separator, and past
+    /// the `-` that makes the first one a removal. Tab completes only this,
+    /// so `-ef`, `rig ef` and `old>ne` complete their last word -- matched
+    /// against the whole input, they never could, and a match replaced
+    /// everything typed before it.
+    fn tag_word_start(&self) -> usize {
+        let start = self
+            .input
+            .char_indices()
+            .rev()
+            .find(|(_, c)| *c == ',' || *c == '>' || c.is_whitespace())
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        if start == 0 && self.input.starts_with('-') {
+            1
+        } else {
+            start
+        }
+    }
+
+    /// Tag completions for the word being typed.
     ///
     /// Showing only one tag also offers the automatic ones, counted from the
     /// sessions that carry them. Tagging does not: it would refuse them.
     pub fn tag_completions(&self) -> Vec<String> {
-        let pfx = crate::meta::normalize_tag(&self.input);
+        let pfx = crate::meta::normalize_tag(&self.input[self.tag_word_start()..]);
         let mut tags = self.meta.all_tags();
         if self.input_mode == InputMode::TagFilter {
             let mut auto: HashMap<String, usize> = HashMap::new();
@@ -2291,10 +2316,16 @@ impl App {
                         InputMode::TmuxName => self.commit_tmux_name(),
                         _ => {}
                     },
-                    KeyCode::Tab => {
+                    // A note or a tmux name is not a tag; tab there put one
+                    // in place of whatever you had typed.
+                    KeyCode::Tab
+                        if matches!(self.input_mode, InputMode::TagAdd | InputMode::TagFilter) =>
+                    {
                         if let Some(first) = self.tag_completions().first() {
                             if let Some(name) = first.split(' ').next() {
-                                self.input = name.to_string();
+                                let name = name.to_string();
+                                self.input.truncate(self.tag_word_start());
+                                self.input.push_str(&name);
                             }
                         }
                     }
@@ -3071,6 +3102,48 @@ mod logic_tests {
         a.input_mode = InputMode::TagAdd;
         a.input = "ws".into();
         assert!(a.tag_completions().is_empty(), "{:?}", a.tag_completions());
+    }
+
+    #[test]
+    fn tab_completes_the_tag_being_typed_not_the_whole_prompt() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut a = app();
+        for (typed, completed) in [
+            ("ef", "eft"),
+            ("-ef", "-eft"),
+            ("rig ef", "rig eft"),
+            ("rig,ef", "rig,eft"),
+            ("eft>ef", "eft>eft"),
+        ] {
+            a.input_mode = InputMode::TagAdd;
+            a.input = typed.into();
+            a.on_key(KeyEvent::from(KeyCode::Tab));
+            assert_eq!(a.input, completed, "from {typed:?}");
+        }
+    }
+
+    #[test]
+    fn tab_in_a_note_or_a_tmux_name_is_not_tag_completion() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut a = app();
+        for mode in [InputMode::Note, InputMode::TmuxName] {
+            a.input_mode = mode;
+            a.input.clear();
+            a.on_key(KeyEvent::from(KeyCode::Tab));
+            assert_eq!(a.input, "", "{mode:?} took a tag for its text");
+        }
+    }
+
+    #[test]
+    fn enter_closes_the_note_prompt_with_nothing_to_put_it_on() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut a = app();
+        a.fuzzy = "zzzz-nothing-matches".into();
+        a.rebuild();
+        a.on_key(KeyEvent::from(KeyCode::Char('N')));
+        a.on_key(KeyEvent::from(KeyCode::Char('x')));
+        a.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(a.input_mode, InputMode::Normal);
     }
 
     #[test]
