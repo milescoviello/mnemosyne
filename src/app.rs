@@ -986,17 +986,32 @@ impl App {
     // ---------------- actions ----------------
 
     fn toggle_favorite(&mut self) {
-        let Some(i) = self.current_idx() else { return };
+        let Some(row) = self.current_idx() else {
+            return;
+        };
+        // A subagent is listed under its session and resumes as it, so the
+        // star goes on the session. On the subagent itself it marked a row
+        // that neither floated, nor counted, nor stayed under `*`.
+        let i = if self.all[row].is_subagent {
+            let parent = self.all[row].parent.clone();
+            self.all
+                .iter()
+                .position(|o| !o.is_subagent && Some(&o.id) == parent.as_ref())
+                .unwrap_or(row)
+        } else {
+            row
+        };
         let id = self.all[i].id.clone();
         let now = self.meta.toggle_favorite(&id);
         if self.persist {
             let _ = self.meta.save();
         }
         self.all[i].favorite = now;
+        let whose = if i == row { "" } else { " its session" };
         self.status = if now {
-            "★ favourited".into()
+            format!("★ favourited{whose}")
         } else {
-            "unfavourited".into()
+            format!("unfavourited{whose}")
         };
         self.rebuild();
     }
@@ -3307,6 +3322,26 @@ mod logic_tests {
         a.rebuild();
         assert_eq!(a.item_count(), 1);
         assert_eq!(a.current().unwrap().title(), "ancient");
+    }
+
+    #[test]
+    fn a_star_on_a_subagent_goes_on_its_session() {
+        let mut a = app();
+        a.show_subagents = true;
+        a.expanded.insert("aaaaaaaa-1".into());
+        a.meta.toggle_favorite("aaaaaaaa-1"); // start with it unstarred
+        a.apply_overlay();
+        a.rebuild();
+        a.cursor = a
+            .view
+            .iter()
+            .position(|r| matches!(r, Row::Sub(_)))
+            .unwrap();
+        let sub = a.current().unwrap().id.clone();
+        a.do_action(Action::Favorite);
+        assert!(a.meta.get("aaaaaaaa-1").is_some_and(|e| e.favorite));
+        assert!(!a.meta.get(&sub).is_some_and(|e| e.favorite));
+        assert!(a.status.contains("its session"), "{:?}", a.status);
     }
 
     #[test]
