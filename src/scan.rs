@@ -241,7 +241,8 @@ fn harvest_values(line: &[u8], key: &[u8], out: &mut String) {
         }
         let raw = String::from_utf8_lossy(&line[start..i.min(line.len())]);
         push_unescaped(&raw, out);
-        from = i.max(start + 1);
+        // An escape at the very end steps the walk one past it.
+        from = i.max(start + 1).min(line.len());
     }
 }
 
@@ -747,6 +748,24 @@ mod harvest_tests {
         assert_eq!(s.out_tokens, 57);
         assert_eq!(s.cache_read, 41234);
         assert_eq!(s.cache_write, 2998);
+    }
+
+    #[test]
+    fn a_line_cut_off_after_a_backslash_does_not_stop_the_scan() {
+        // A value that runs to the end of the line and ends mid-escape: the
+        // walk steps past the end, and the next search began from there --
+        // a panic on every refresh, for as long as the file stayed as it was.
+        for line in [
+            &br#"{"message":{"role":"user","content":"cut off\"#[..],
+            &br#"{"message":{"role":"assistant","content":[{"type":"tool_use","input":{"command":"ls \"#[..],
+            &br#"{"message":{"role":"assistant","content":[{"type":"text","text":"half\"#[..],
+        ] {
+            let mut out = String::new();
+            harvest_text(line, &mut out);
+            let mut s = Session::default();
+            let mut text = String::new();
+            process_line(&mut s, line, &mut Some(&mut text));
+        }
     }
 
     #[test]
