@@ -551,8 +551,12 @@ fn main() -> Result<()> {
             );
         }
         // Out of what could have been listed: the subagents are in the pool
-        // searched, but are listed only with --subagents.
-        let listable = pool.iter().filter(|s| show_subs || !s.is_subagent).count();
+        // searched, but are listed only with --subagents -- or when their
+        // session is gone, and they are listed in its place.
+        let listable = pool
+            .iter()
+            .filter(|s| show_subs || !s.is_subagent || orphan(s))
+            .count();
         eprintln!(
             "{} of {} sessions matched \"{}\" ({}, {}) in {:.3}s",
             rows.len(),

@@ -933,7 +933,8 @@ impl App {
 
     /// After a reindex: what the index holds, and what of it is on screen.
     pub fn reindex_message(&self) -> String {
-        let total = self.all.iter().filter(|s| !s.is_subagent).count();
+        // A subagent whose session is gone is listed as one of its own.
+        let total = self.all.iter().filter(|s| !s.is_subagent).count() + self.orphans().len();
         let shown = self.session_count();
         if shown == total {
             format!("reindexed — {total} sessions")
@@ -3607,6 +3608,23 @@ mod logic_tests {
         a.do_action(Action::Resume);
         assert!(a.outcome.is_none(), "resumed a session that is not there");
         assert!(a.status.contains("v reads it"), "{:?}", a.status);
+    }
+
+    #[test]
+    fn a_subagent_listed_on_its_own_is_counted_among_the_sessions() {
+        // Listed as a session, but not counted as one: `R` said "8
+        // sessions, 9 shown by the current filters" with no filter on.
+        let mut a = app();
+        let mut orphan = subagent("agent-z9", "no-such-parent");
+        orphan.path = "/p/agent-z9.jsonl".into();
+        a.all.push(orphan);
+        a.rebuild();
+        let said = a.reindex_message();
+        assert!(!said.contains("shown"), "{said}");
+        assert!(
+            said.contains(&format!("{} sessions", a.session_count())),
+            "{said}"
+        );
     }
 
     #[test]
