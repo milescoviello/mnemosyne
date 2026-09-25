@@ -822,10 +822,20 @@ fn main() -> Result<()> {
         let p = index::Progress::default();
         let p2 = p.clone();
         let handle = std::thread::spawn(move || index::refresh_with_progress(true, Some(p2)));
+        // Only when there is work to cover. With the index already there the
+        // list can be drawn at once, and the animation was six hundred
+        // milliseconds of waiting on nothing -- nine tenths of every start.
+        // `[splash] warm = true` plays it anyway.
+        let animate = cold_start || cfg.splash.warm;
         // ctrl+c during the animation has to leave immediately. Joining
         // first would have blocked on the very scan the user was trying to
         // escape, on a screen that could no longer change.
-        if let Ok(splash::End::Aborted) = splash::run(&mut term, &p, cold_start) {
+        if animate
+            && matches!(
+                splash::run(&mut term, &p, cold_start),
+                Ok(splash::End::Aborted)
+            )
+        {
             let _ = disable_raw_mode();
             let _ = execute!(
                 term.backend_mut(),

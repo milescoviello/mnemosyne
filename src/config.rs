@@ -34,6 +34,9 @@ panel = "#120e0a"
 
 [splash]
 enabled = true
+# Play it on every start, not only when there is indexing to cover. Off, a
+# start with the index already built goes straight to the list.
+warm = false
 # Milliseconds the animation lingers once the index is ready. The warm value
 # applies when there was no real work to cover.
 floor_cold_ms = 1500
@@ -63,6 +66,8 @@ fn d_true() -> bool {
 pub struct Splash {
     #[serde(default = "d_true")]
     pub enabled: bool,
+    /// Play it even when there is no indexing to cover.
+    pub warm: bool,
     pub floor_cold_ms: u64,
     pub floor_warm_ms: u64,
 }
@@ -71,6 +76,7 @@ impl Default for Splash {
     fn default() -> Self {
         Splash {
             enabled: true,
+            warm: false,
             floor_cold_ms: 1500,
             floor_warm_ms: 420,
         }

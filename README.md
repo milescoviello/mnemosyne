@@ -327,10 +327,11 @@ name settles letter by letter out of the rest of the Greek alphabet instead.
 It is covering real work — the index builds on a background thread while this
 runs. With nothing cached yet there is no list to show until that finishes, so
 it lasts until indexing does, and at least about 1.5s; `ctrl+c` leaves at any
-point. With a cache there is a list to show at once, so it plays a short
-version of about half a second and the rescan carries on behind the list. Once
-there is nothing left to wait for, any key skips, and that keypress is
-swallowed so it cannot act on the session under the cursor. When there is genuine work left the bar reports
+point. With a cache there is a list to show at once, and it is shown at once —
+about twenty milliseconds from `mn` to the list here — while the rescan
+carries on behind it. `[splash] warm = true` plays a short version on those
+starts too. Once there is nothing left to wait for, any key skips, and that
+keypress is swallowed so it cannot act on the session under the cursor. When there is genuine work left the bar reports
 it; on a warm index the bar fills with the reveal and the counts below state
 the real totals. The bar never steps backwards when the source changes under
 it.
@@ -775,7 +776,8 @@ tag = "#8aa2e6"
 
 [splash]
 enabled = true
-floor_warm_ms = 420     # how long it lingers when there was no work to cover
+warm = false            # true plays it on every start, not only a cold one
+floor_warm_ms = 420     # how long it lingers then
 
 [start]
 mouse = true
