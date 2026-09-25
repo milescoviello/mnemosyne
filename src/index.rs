@@ -877,7 +877,24 @@ fn refresh_in(
     // mn`, or on a full disk -- used to fail the whole refresh, and with it
     // every command-line mode and `R` in the browser, while promising that
     // a bad cache never stops the tool.
-    if idx.persist(&sessions, &text_rows).is_ok() {
+    //
+    // Only what changed is written. Every row was, every refresh -- which is
+    // every start -- rewriting a thousand identical rows for the sake of the
+    // two that had grown. Rows from an older scanner all count as changed:
+    // their values are new, whatever their files did.
+    let changed: Vec<Session> = sessions
+        .iter()
+        .filter(|s| {
+            stale
+                || cached
+                    .get(s.path.to_string_lossy().as_ref())
+                    .is_none_or(|p| {
+                        p.size != s.size || p.mtime != s.mtime || p.scanned_len != s.scanned_len
+                    })
+        })
+        .cloned()
+        .collect();
+    if idx.persist(&changed, &text_rows).is_ok() {
         let paths: Vec<String> = found
             .iter()
             .map(|(p, _, _)| p.to_string_lossy().to_string())
@@ -886,7 +903,9 @@ fn refresh_in(
         // Everything has been re-read with the current scanner and stored,
         // so the rows may now claim its version. Not before it is stored:
         // claimed over rows the old scanner wrote, the new one never runs.
-        let _ = idx.mark_current();
+        if stale {
+            let _ = idx.mark_current();
+        }
     }
 
     Ok(sessions)
@@ -1521,6 +1540,42 @@ mod pipeline_tests {
         r.expect("it should have waited for the other writer");
         assert!(finds(&idx, "quokka"));
         drop(path);
+    }
+
+    #[test]
+    fn a_refresh_rewrites_what_an_older_scanner_wrote_and_nothing_else() {
+        let (d, idx, path, s1) = first_scan(&[said("user", "zebra came first")]);
+        let key = s1.path.to_string_lossy().to_string();
+        let db = d.path().join("i.db");
+        let title = |db: &std::path::Path| -> String {
+            Connection::open(db)
+                .unwrap()
+                .query_row("SELECT first_prompt FROM sessions", [], |r| r.get(0))
+                .unwrap()
+        };
+        drop(idx);
+        Connection::open(&db)
+            .unwrap()
+            .execute(
+                "UPDATE sessions SET first_prompt='from before' WHERE path=?1",
+                [&key],
+            )
+            .unwrap();
+
+        // untouched, and the scanner is the same: nothing to rewrite
+        let idx = Index::open_at(&db).unwrap();
+        refresh_in(idx, vec![(path.clone(), false, None)], None).unwrap();
+        assert_eq!(title(&db), "from before");
+
+        // an older scanner's rows are rewritten, file changed or not
+        Connection::open(&db)
+            .unwrap()
+            .execute("UPDATE meta SET value='1' WHERE key='scanner_version'", [])
+            .unwrap();
+        let idx = Index::open_at(&db).unwrap();
+        assert!(idx.stale);
+        refresh_in(idx, vec![(path, false, None)], None).unwrap();
+        assert_eq!(title(&db), "zebra came first");
     }
 
     #[test]
