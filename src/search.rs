@@ -168,6 +168,37 @@ fn looks_like_blob(line: &[u8], at: usize) -> bool {
         .any(|c| matches!(c, b' ' | b'\\' | b'\t' | b'>' | b',' | b'.' | b';') || *c >= 0x80)
 }
 
+/// Is a match inside one of the JSON's own keys rather than a value?
+///
+/// The keys are the transcript's scaffolding -- `parentUuid`, `role`,
+/// `timestamp` -- and every line has them, so a search for one that the
+/// index had no answer for fell back to this and matched every session.
+///
+/// Keys are short, so it looks no further than that either side: a common
+/// word in a long value would otherwise walk back to the value's start for
+/// every one of its matches.
+fn in_key(line: &[u8], at: usize, len: usize) -> bool {
+    const KEY_MAX: usize = 64;
+    let back = &line[at.saturating_sub(KEY_MAX)..at];
+    let Some(open) = back.iter().rposition(|c| *c == b'"') else {
+        return false;
+    };
+    let open = at - back.len() + open;
+    let ahead = &line[at + len..(at + len + KEY_MAX).min(line.len())];
+    let Some(rel) = memchr::memchr(b'"', ahead) else {
+        return false;
+    };
+    let close = at + len + rel;
+    // a quote with a backslash before it is prose inside a value
+    let escaped = |i: usize| i > 0 && line[i - 1] == b'\\';
+    !escaped(open)
+        && !escaped(close)
+        && line.get(close + 1) == Some(&b':')
+        && line[open + 1..close]
+            .iter()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+}
+
 /// First occurrence of `needle` that is real conversation, not injected context.
 fn content_hit(line: &[u8], needle: &[u8]) -> Option<usize> {
     if !is_conversation(line) {
@@ -175,8 +206,11 @@ fn content_hit(line: &[u8], needle: &[u8]) -> Option<usize> {
     }
     let first = find_ci(line, needle)?;
     let spans = injected_spans(line);
-    let bad =
-        |at: usize| spans.iter().any(|(a, b)| at >= *a && at < *b) || looks_like_blob(line, at);
+    let bad = |at: usize| {
+        spans.iter().any(|(a, b)| at >= *a && at < *b)
+            || looks_like_blob(line, at)
+            || in_key(line, at, needle.len())
+    };
     if !bad(first) {
         return Some(first);
     }
@@ -469,6 +503,21 @@ mod tests {
         ));
         let hit = scan_finds(&[&line], "テキスト", Mode::Everything).expect("taken for base64");
         assert!(!hit.contains('\u{fffd}'), "{hit:?}");
+    }
+
+    #[test]
+    fn the_transcript_s_own_keys_are_not_a_match() {
+        let line = user_said("who holds the admin role here");
+        for key in ["parentuuid", "parentUuid", "type"] {
+            assert!(
+                scan_finds(&[&line], key, Mode::Everything).is_none(),
+                "{key} matched a key"
+            );
+        }
+        // but the same word said in the conversation is
+        assert!(scan_finds(&[&line], "role", Mode::Everything).is_some());
+        let quoted = user_said(r#"it printed "role": "admin" twice"#);
+        assert!(scan_finds(&[&quoted], "admin", Mode::Everything).is_some());
     }
 
     #[test]
