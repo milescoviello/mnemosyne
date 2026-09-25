@@ -4,7 +4,6 @@ SVG logo in docs/.
 
     python3 tools/gen-tablet.py rust            # consts to paste into art.rs
     python3 tools/gen-tablet.py svg docs/logo.svg
-    python3 tools/gen-tablet.py mark docs/mark.svg
     python3 tools/gen-tablet.py preview out.png # authoring aid, needs Pillow
 
 The Orphic gold tablets were thin leaves of gold buried with the dead,
@@ -137,7 +136,8 @@ def ramp(p):
 
 
 def lift(c, t):
-    return tuple(round(c[k] + (255 - c[k]) * t) for k in range(3))
+    white = (255, 252, 240)
+    return tuple(round(c[k] + (white[k] - c[k]) * t) for k in range(3))
 
 
 def darken(c, t):
@@ -180,12 +180,16 @@ def hexc(c):
     return "#%02x%02x%02x" % c
 
 
-def svg(g, px=6, pad=0):
+def svg(g, px=8):
     """Pixels as rects, a unit per pixel, scaled by the viewBox."""
     H, W = len(g), len(g[0])
-    out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{-pad} {-pad} {W + 2 * pad} {H + 2 * pad}" '
-           f'width="{(W + 2 * pad) * px}" height="{(H + 2 * pad) * px}" shape-rendering="crispEdges">',
-           "<title>ΜΝΗΜΟΣΥΝΗ</title>"]
+    out = [f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" '
+           f'width="{W * px}" height="{H * px}">',
+           "<title>mnemosyne: ΜΝΗΜΟΣΥΝΗ cut into a leaf of gold</title>",
+           '<g shape-rendering="crispEdges">']
+    # one path per colour, each run of it a rectangle: a rect per pixel was
+    # three times the size
+    paths = {}
     for y in range(H):
         x = 0
         while x < W:
@@ -193,38 +197,32 @@ def svg(g, px=6, pad=0):
             if c is None:
                 x += 1
                 continue
-            # merge runs of one colour, which the cut letters mostly are
             run = 1
             while x + run < W and colour(g, x + run, y) == c:
                 run += 1
-            out.append(f'<rect x="{x}" y="{y}" width="{run}" height="1" fill="{hexc(c)}"/>')
+            paths.setdefault(c, []).append(f"M{x} {y}h{run}v1h-{run}z")
             x += run
+    for c, d in sorted(paths.items()):
+        out.append(f'<path fill="{hexc(c)}" d="{"".join(d)}"/>')
+    out.append("</g>")
+    # The terminal sets this line in its own type; here it is a monospace
+    # face stretched to the same cells, one to a character.
+    for y, row in enumerate(g):
+        if "t" in row:
+            x0 = row.index("t")
+            out.append(f'<text x="{x0}" y="{y + 1.62}" textLength="{len(LINE)}" '
+                       f'lengthAdjust="spacingAndGlyphs" font-size="1.75" '
+                       f'font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" '
+                       f'font-weight="bold" fill="{hexc(ramp(0.2))}">{LINE}</text>')
+            break
     out.append("</svg>")
     return "\n".join(out) + "\n"
-
-
-def mark():
-    """The square mark: the first letter alone on its leaf."""
-    font = BIG
-    m = font["M"]
-    W, H = len(m[0]) + 8, len(m) + 8
-    g = [["g"] * W for _ in range(H)]
-    for r, row in enumerate(m):
-        for i, ch in enumerate(row):
-            if ch == "#":
-                g[4 + r][4 + i] = "#"
-    for x, y in [(0, 0), (W - 1, 0), (0, H - 1), (W - 1, H - 1), (W - 2, 0), (W - 1, 1)]:
-        g[y][x] = " "
-    for y in range(H):
-        if g[y][W // 2 + 1] == "g":
-            g[y][W // 2 + 1] = "f"
-    return ["".join(r) for r in g]
 
 
 def preview(path, cw=12, ch=24):
     from PIL import Image, ImageDraw, ImageFont
     font = ImageFont.truetype("/usr/share/fonts/jetbrains-mono/JetBrainsMono-Bold.ttf", 20)
-    boards = [tablet(*s[1:]) for s in SIZES] + [mark()]
+    boards = [tablet(*s[1:]) for s in SIZES]
     Wmax = max(len(b[0]) for b in boards)
     Htot = sum(len(b) // 2 + 2 for b in boards)
     img = Image.new("RGB", ((Wmax + 8) * cw, (Htot + 2) * ch), (11, 15, 20))
@@ -266,8 +264,6 @@ if __name__ == "__main__":
         rust()
     elif what == "svg":
         open(sys.argv[2], "w").write(svg(tablet(*SIZES[0][1:])))
-    elif what == "mark":
-        open(sys.argv[2], "w").write(svg(mark(), px=16))
     elif what == "preview":
         preview(sys.argv[2])
     else:

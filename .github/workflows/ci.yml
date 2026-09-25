@@ -44,9 +44,12 @@ jobs:
       - name: the plan on stdout stays machine-readable
         run: python3 tools/plan-smoke.py
       # The tablet is pure geometry, with no font and no rasteriser, so the
-      # generator's output is exact and the committed data must be it.
-      - name: the tablet is what the generator makes
+      # generator's output is exact and the committed data must be it. The
+      # logo too: it is the same pixels, and must not drift from them.
+      - name: the tablet and the logo are what the generator makes
         run: |
+          python3 tools/gen-tablet.py svg /tmp/logo.svg
+          cmp docs/logo.svg /tmp/logo.svg
           python3 tools/gen-tablet.py rust > /tmp/tablet.rs
           python3 - <<'EOF'
           regen = open("/tmp/tablet.rs").read().strip()
