@@ -719,8 +719,12 @@ fn draw_colheads(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
         if w == 0 {
             return;
         }
-        if let Some(s) = sort {
-            hits.push((*x, *x + width(text.trim()) as u16, s));
+        // Where the word is, not where its padding starts: a right-aligned
+        // heading's span began in the blanks before it, and MSGS and TOKENS
+        // could not be clicked on their last letters.
+        if let (Some(s), Some(lw)) = (sort, width(text.trim()).checked_sub(1)) {
+            let x0 = *x + (width(&text) - width(text.trim_start())) as u16;
+            hits.push((x0, x0 + lw as u16, s));
         }
         *x += w as u16;
         spans.push(Span::styled(text, Style::default().fg(th().chrome)));
@@ -804,9 +808,16 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
     let width = area.width as usize;
     let cursor = app.cursor;
 
-    // where the subagent cell sits, so a click on ⌁ can expand it
-    let sub_x = area.x + (PREFIX + 4 + 2 + c.folder + 1) as u16;
-    app.sub_span = (sub_x, sub_x + c.sub as u16);
+    // Where the subagent cell sits, so a click on ⌁ can expand it: after
+    // the age, and after the folder and its space when there is a folder.
+    // The span is inclusive, so it ends on the cell's last column -- one
+    // more was the title's first letter, which toggled subagents instead
+    // of selecting. With no cell drawn there is nothing to click.
+    let sub_x = area.x + (PREFIX + 6 + if c.folder > 0 { c.folder + 1 } else { 0 }) as u16;
+    app.sub_span = match c.sub {
+        0 => (1, 0),
+        n => (sub_x, sub_x + n as u16 - 1),
+    };
 
     let items: Vec<ListItem> = app
         .view
@@ -2181,6 +2192,42 @@ mod render_tests {
             assert_eq!(cjk, plain, "{w}: MODEL moved");
             a.all[i].last_prompt = "back to plain".into();
             a.rebuild();
+        }
+    }
+
+    #[test]
+    fn what_is_clicked_is_what_was_drawn_there() {
+        let mut a = app();
+        let col = |row: &str, needle: &str| {
+            row.find(needle)
+                .map(|i| crate::model::width(&row[..i]) as u16)
+        };
+        for w in [40u16, 52, 60, 90, 130, 178] {
+            let rows = render(&mut a, w, 30);
+            // The ⌁2 cell, and only it.
+            let (sx0, sx1) = a.sub_span;
+            match rows.iter().find_map(|r| col(r, "⌁2").map(|x| (r, x))) {
+                Some((row, x)) => {
+                    assert!(sx0 <= x && x < sx1, "{w}: ⌁2 at {x}, span {sx0}..={sx1}");
+                    let title = col(row, "today's work").unwrap();
+                    assert!(sx1 < title, "{w}: the span reaches the title at {title}");
+                }
+                None => assert!(sx0 > sx1, "{w}: nothing drawn, yet {sx0}..={sx1} clicks"),
+            }
+            // Every sortable heading, to its last letter.
+            let head = &rows[a.hits.colhead_y as usize];
+            for label in ["AGE", "FOLDER", "TITLE", "MSGS", "TOKENS"] {
+                let Some(x) = col(head, label) else { continue };
+                let last = x + label.len() as u16 - 1;
+                assert!(
+                    a.hits
+                        .columns
+                        .iter()
+                        .any(|(x0, x1, _)| *x0 <= x && last <= *x1),
+                    "{w}: {label} at {x}..={last}, spans {:?}",
+                    a.hits.columns
+                );
+            }
         }
     }
 
