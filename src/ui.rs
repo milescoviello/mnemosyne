@@ -182,12 +182,19 @@ fn wrap_words(text: &str, wrap_at: usize) -> Vec<String> {
                 out.push(std::mem::take(&mut line));
                 len = 0;
             }
+            // A character goes on the next line if it would not fit on
+            // this one. Checked after adding it instead, a two-column
+            // character one column short of the edge went one past it.
             let mut chunk = String::new();
+            let mut used = 0usize;
             for ch in word.chars() {
-                chunk.push(ch);
-                if width(&chunk) >= wrap_at {
+                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if used + cw > wrap_at && !chunk.is_empty() {
                     out.push(std::mem::take(&mut chunk));
+                    used = 0;
                 }
+                chunk.push(ch);
+                used += cw;
             }
             if !chunk.is_empty() {
                 line = chunk;
@@ -2438,6 +2445,18 @@ mod render_tests {
                 theirs.offset(),
                 "step {step}: cursor {cursor} of {len}, height {h}"
             );
+        }
+    }
+
+    #[test]
+    fn a_long_run_of_wide_characters_wraps_inside_its_width() {
+        for w in 2..12 {
+            for line in wrap_words(&"日本語".repeat(20), w) {
+                assert!(width(&line) <= w, "{w}: {line:?} is {}", width(&line));
+            }
+            for line in wrap_words(&format!("a{}", "語".repeat(15)), w) {
+                assert!(width(&line) <= w, "{w}: {line:?}");
+            }
         }
     }
 
