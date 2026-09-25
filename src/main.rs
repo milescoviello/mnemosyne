@@ -174,6 +174,20 @@ fn check_args(args: &[String]) -> std::result::Result<(), String> {
     while i < args.len() {
         let a = args[i].as_str();
         if takes_value(a) {
+            // One left without its value took the next flag for it, or
+            // nothing: `--search x --search-mode` ran a content search and
+            // exited 0, where an unknown mode is refused.
+            // A query may look like anything, `--update` included; a mode
+            // never looks like a flag. `--restore` alone means five.
+            let next = args.get(i + 1);
+            let missing = match a {
+                "--restore" => false,
+                "--search-mode" => next.is_none_or(|v| v.starts_with("--")),
+                _ => next.is_none(),
+            };
+            if missing {
+                return Err(format!("{a} needs a value"));
+            }
             i += 2;
             continue;
         }
@@ -593,6 +607,9 @@ fn main() -> Result<()> {
                 opened += 1;
             }
         }
+        if opened == 0 {
+            eprintln!("nothing to restore — no recent sessions whose folder is still there and that are not running");
+        }
         return Ok(());
     }
 
@@ -673,6 +690,11 @@ fn main() -> Result<()> {
         }
         if has("--json") {
             app.set_wsx(wsx::load());
+        } else {
+            // What wsx said last, for the folder column: without it every
+            // workspace was the first two dozen characters of its state
+            // directory. Asking afresh is --json's to do.
+            app.set_wsx(wsx::remembered());
         }
         app.rebuild();
         if has("--json") {
@@ -720,9 +742,9 @@ fn main() -> Result<()> {
                 if let app::Row::Item(i) | app::Row::Sub(i) = r {
                     let s = &app.all[*i];
                     println!(
-                        "{:>4} {:<24.24} {}\t{}\t{}\t{}",
+                        "{:>4} {} {}\t{}\t{}\t{}",
                         model::reltime(s.mtime),
-                        model::short_cwd(&s.cwd),
+                        model::pad_fit(&s.folder(), 24),
                         s.title(),
                         s.path.to_string_lossy(),
                         s.id,
@@ -1230,6 +1252,18 @@ mod arg_tests {
         ] {
             assert!(check_args(&args(line)).is_ok(), "rejected {line:?}");
         }
+    }
+
+    #[test]
+    fn a_flag_left_without_its_value_is_refused() {
+        let e = check_args(&args("--search x --search-mode")).unwrap_err();
+        assert!(e.contains("--search-mode"), "{e}");
+        assert!(check_args(&args("--search-mode --search x")).is_err());
+        assert!(check_args(&args("--search")).is_err());
+        assert!(
+            check_args(&args("--restore")).is_ok(),
+            "alone it means five"
+        );
     }
 
     #[test]

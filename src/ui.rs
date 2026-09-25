@@ -1177,12 +1177,25 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
 
     let Some(s) = app.current().cloned() else {
         let mut lines = vec![rule_line(width, MARGIN), Line::raw("")];
-        lines.push(Line::from(vec![
-            Span::raw(" ".repeat(MARGIN)),
-            Span::styled("nothing matches — ", Style::default().fg(th().chrome)),
-            Span::styled("c", Style::default().fg(rgb(art::ramp(0.85)))),
-            Span::styled(" clears the filters", Style::default().fg(th().chrome)),
-        ]));
+        // With nothing to show at all, there is no filter to clear: that
+        // advice, to someone who has not used Claude Code yet, sent them
+        // pressing `c` at an empty list.
+        lines.push(Line::from(if app.all.is_empty() {
+            vec![
+                Span::raw(" ".repeat(MARGIN)),
+                Span::styled(
+                    "no sessions yet — they appear here once Claude Code has run",
+                    Style::default().fg(th().chrome),
+                ),
+            ]
+        } else {
+            vec![
+                Span::raw(" ".repeat(MARGIN)),
+                Span::styled("nothing matches — ", Style::default().fg(th().chrome)),
+                Span::styled("c", Style::default().fg(rgb(art::ramp(0.85)))),
+                Span::styled(" clears the filters", Style::default().fg(th().chrome)),
+            ]
+        }));
         f.render_widget(Paragraph::new(Text::from(lines)), area);
         return;
     };
