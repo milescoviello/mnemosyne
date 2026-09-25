@@ -35,14 +35,14 @@ instead of stretching a hard line across the terminal. They appear only when
 sorting by recency, where time order makes them mean something.
 
 The **wordmark is lit letter by letter** along the same ramp, and every piece
-of chrome — cursor `❯`, band `≈`, prompt `⌇`, selection `◆` — comes from one
+of chrome — cursor `❯`, band and prompt `≈`, selection `◆` — comes from one
 small water alphabet. No borders anywhere; structure comes from alignment.
 
 At a wide terminal a title column alone leaves a sixty-column void in every
 row, so the leftover space becomes a **LEFT OFF** column carrying the last
 thing you said. When a session has no AI title its opening prompt becomes the
 title, and that is often also the last prompt, so the duplicate is suppressed
-rather than printed twice. Below about 80 columns the column is dropped and
+rather than printed twice. Below about 126 columns the column is dropped and
 the rail carries the cue instead.
 
 ## Wide characters
@@ -310,9 +310,12 @@ frequencies, because one alone produces long uniform runs that read as teeth.
 Roughly 3,500 distinct colours are in play per frame.
 
 It is covering real work — the index builds on a background thread while this
-runs — and lasts until indexing finishes or about 1.5s has passed, whichever
-is later. Any key skips, and that keypress is swallowed so it cannot act on
-the session under the cursor. When there is genuine work left the bar reports
+runs. With nothing cached yet there is no list to show until that finishes, so
+it lasts until indexing does, and at least about 1.5s; `ctrl+c` leaves at any
+point. With a cache there is a list to show at once, so it plays a short
+version of about half a second and the rescan carries on behind the list. Once
+there is nothing left to wait for, any key skips, and that keypress is
+swallowed so it cannot act on the session under the cursor. When there is genuine work left the bar reports
 it; on a warm index the bar fills with the reveal and the counts below state
 the real totals. The bar never steps backwards when the source changes under
 it.
@@ -691,7 +694,7 @@ terminals that `s` will sort by, and each session's own count sits in the
 rail:
 
 ```
-  ⌇ mnemosyne                      331 sessions · 90.72b tokens · ●2 live · recency
+  ≈ mnemosyne                      331 sessions · 90.72b tokens · ●2 live · recency
 ```
 
 The header total is deliberately **not** filtered — it is a property of the
