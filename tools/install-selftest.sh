@@ -53,13 +53,22 @@ while [ \$# -gt 0 ]; do
     esac
     shift
 done
+# MN_STUB_NO_SUM and MN_STUB_NO_ASSET stand for a release missing one or
+# the other.
 case "\$url" in
-    *.tar.gz) cp "$tmp/asset.tar.gz" "\$out" ;;
-    *.tar.gz.sha256) cp "$tmp/asset.sha256" "\$out" ;;
+    *.tar.gz) [ -n "\${MN_STUB_NO_ASSET:-}" ] && exit 22; cp "$tmp/asset.tar.gz" "\$out" ;;
+    *.tar.gz.sha256) [ -n "\${MN_STUB_NO_SUM:-}" ] && exit 22; cp "$tmp/asset.sha256" "\$out" ;;
     *) exit 22 ;;
 esac
 EOF
 chmod +x "$tmp/stub/curl"
+# cargo, so a build that should not happen shows if it does
+cat > "$tmp/stub/cargo" <<EOF
+#!/bin/sh
+echo "cargo \$*" >> "$tmp/cargo.log"
+exit 1
+EOF
+chmod +x "$tmp/stub/cargo"
 
 # A minimal PATH, like a fresh machine's: no ~/.local/bin on it.
 base_path="$tmp/stub:/usr/local/bin:/usr/bin:/bin"
@@ -134,6 +143,49 @@ mn -V" 2>&1)
 else
     skip "fish" "fish is not installed"
 fi
+
+# ---- a release it cannot verify ---------------------------------------
+printf '\nwhat it must refuse\n'
+home="$tmp/home-nosum"
+mkdir -p "$home"
+said=$(env -i HOME="$home" SHELL=/bin/bash PATH="$base_path" TERM=dumb MN_STUB_NO_SUM=1 \
+    bash "$root/install.sh" 2>&1)
+code=$?
+if [ "$code" -ne 0 ] && [ ! -e "$home/.local/bin/mnemosyne" ]; then
+    ok "a release with no checksum is not installed"
+else
+    bad "a release with no checksum is not installed" "exit $code: $said"
+fi
+
+# ---- somewhere it cannot write ----------------------------------------
+home="$tmp/home-ro"
+mkdir -p "$home/ro"
+chmod 555 "$home/ro"
+said=$(env -i HOME="$home" SHELL=/bin/bash PATH="$base_path" TERM=dumb BINDIR="$home/ro/bin" \
+    bash "$root/install.sh" 2>&1)
+code=$?
+if [ "$code" -ne 0 ]; then ok "a BINDIR it cannot write fails"; else bad "a BINDIR it cannot write fails" "exit 0"; fi
+case "$said" in
+    *installed*) bad "and it does not say it installed anything" "$said" ;;
+    *) ok "and it does not say it installed anything" ;;
+esac
+[ -e "$home/.bashrc" ] && bad "nor wires up a binary that is not there" "$(cat "$home/.bashrc")" \
+    || ok "nor wires up a binary that is not there"
+chmod 755 "$home/ro"
+
+# ---- piped from curl, standing in some other project ------------------
+home="$tmp/home-pipe"
+mkdir -p "$home/elsewhere"
+printf '[package]\nname = "someone-else"\n' > "$home/elsewhere/Cargo.toml"
+: > "$tmp/cargo.log"
+said=$(cd "$home/elsewhere" && env -i HOME="$home" SHELL=/bin/bash PATH="$base_path" TERM=dumb \
+    MN_STUB_NO_ASSET=1 bash < "$root/install.sh" 2>&1)
+if [ -s "$tmp/cargo.log" ]; then
+    bad "piped in, it never builds the project it was run from" "$(cat "$tmp/cargo.log")"
+else
+    ok "piped in, it never builds the project it was run from"
+fi
+has "and says a clone is what it needs" "git clone" "$said"
 
 printf '\n%d checks, %d failed, %d skipped\n' "$checks" "$fails" "$skips"
 [ "$fails" -eq 0 ]

@@ -12,6 +12,9 @@ set -euo pipefail
 
 REPO="milescoviello/mnemosyne"
 bindir="${BINDIR:-$HOME/.local/bin}"
+# Where this script is: a checkout of mnemosyne when run as ./install.sh.
+# Piped from curl there is no script file -- $0 is "bash" -- and this is
+# just wherever you happened to be standing.
 here="$(cd "$(dirname "$0")" && pwd)"
 force_build=0
 [ "${1:-}" = "--build" ] && force_build=1
@@ -24,6 +27,14 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # checkout to read them out of.
 SHELLSRC="$here/shell"
 KEEP=""
+# However it ends. Removed only at the very bottom, every way out before
+# that left the download behind.
+trap '[ -n "$KEEP" ] && rm -rf "$KEEP"' EXIT
+
+# Is `here` a checkout of this project, and so something to build?
+is_checkout() {
+    [ -f "$here/Cargo.toml" ] && grep -q '^name = "mnemosyne"' "$here/Cargo.toml"
+}
 
 # Which release asset matches this machine, if any.
 asset_for_platform() {
@@ -59,23 +70,46 @@ fetch_prebuilt() {
     KEEP="$tmp"
     say "fetching the latest release for $(uname -s) $(uname -m)…"
     curl -fsSL "$url" -o "$tmp/m.tar.gz" || return 1
-    if curl -fsSL "$url.sha256" -o "$tmp/m.sha256" 2>/dev/null; then
-        want="$(awk '{print $1}' "$tmp/m.sha256")"
-        got="$(sha256_of "$tmp/m.tar.gz")"
-        if [ -n "$want" ] && [ -n "$got" ] && [ "$want" != "$got" ]; then
-            say "checksum did not match — falling back to building"
-            return 1
-        fi
+    # Verified, or not installed. A checksum that was not published, or no
+    # tool to check one with, used to skip the check and install whatever
+    # arrived -- where the updater has always refused both.
+    if ! curl -fsSL "$url.sha256" -o "$tmp/m.sha256" 2>/dev/null; then
+        say "no checksum was published for it — not installing it"
+        return 1
+    fi
+    want="$(awk '{print $1}' "$tmp/m.sha256")"
+    got="$(sha256_of "$tmp/m.tar.gz")"
+    if [ -z "$got" ]; then
+        say "there is no sha256sum or shasum to check it with — not installing it"
+        return 1
+    fi
+    if [ -z "$want" ] || [ "$want" != "$got" ]; then
+        say "checksum did not match — not installing it"
+        return 1
     fi
     tar -C "$tmp" -xzf "$tmp/m.tar.gz" || return 1
-    mkdir -p "$bindir"
-    install -m755 "$tmp/mnemosyne" "$bindir/mnemosyne"
+    # From here a failure is the destination's, which building would not
+    # get round. Called as the condition of an `if`, this function runs
+    # without `set -e`: a failed install went unnoticed, and the script
+    # said "installed" and wired up a binary that was not there.
+    if ! { mkdir -p "$bindir" && install -m755 "$tmp/mnemosyne" "$bindir/mnemosyne"; }; then
+        say "could not write $bindir/mnemosyne"
+        exit 1
+    fi
     # the tarball carries the shell functions, so a curl install has them too
     [ -f "$tmp/mn.fish" ] && SHELLSRC="$tmp"
     return 0
 }
 
 build_from_source() {
+    # Only a checkout of this project. Piped from curl, `here` is the
+    # current directory, and whatever Cargo.toml was in it got built --
+    # build scripts and all.
+    is_checkout || {
+        say "no prebuilt binary to install, and building one needs a clone:"
+        say "  git clone https://github.com/$REPO && cd mnemosyne && ./install.sh --build"
+        exit 1
+    }
     have cargo || {
         say "no prebuilt binary for $(uname -s) $(uname -m), and no cargo to build with."
         say "install rust from https://rustup.rs and re-run, or open an issue"
