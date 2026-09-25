@@ -419,7 +419,13 @@ fn rotate_backups(path: &std::path::Path) {
         return;
     };
     let newest = path.with_extension("json.1");
-    if std::fs::read(&newest).is_ok_and(|b| b == current) {
+    // Kept already if any backup holds it, not only the newest: toggling a
+    // star back and forth alternates between two states, neither the same
+    // as the one before it, and each toggle rotated real history out.
+    let kept = (1..=BACKUPS).any(|i| {
+        std::fs::read(path.with_extension(format!("json.{i}"))).is_ok_and(|b| b == current)
+    });
+    if kept {
         return;
     }
     for i in (1..BACKUPS).rev() {
@@ -570,6 +576,29 @@ mod tests {
             .flatten()
             .any(|e| e.file_name().to_string_lossy().contains("as-found"));
         assert!(kept, "the original was not kept");
+    }
+
+    #[test]
+    fn toggling_a_star_back_and_forth_keeps_the_history_behind_it() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("meta.json");
+        let mut m = Meta::default();
+        m.add_tag("s1", "first");
+        m.save_at(&p).unwrap();
+        m.add_tag("s1", "second");
+        m.save_at(&p).unwrap(); // the "first" state is now in .1
+        for _ in 0..8 {
+            m.toggle_favorite("s2");
+            m.save_at(&p).unwrap();
+        }
+        let has_first_only = (1..=BACKUPS).any(|i| {
+            std::fs::read_to_string(p.with_extension(format!("json.{i}")))
+                .is_ok_and(|t| t.contains("first") && !t.contains("second"))
+        });
+        assert!(
+            has_first_only,
+            "the state before the second tag was rotated out"
+        );
     }
 
     #[test]
