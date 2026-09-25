@@ -514,8 +514,13 @@ pub fn run(sessions: &[Session], query: &str, mode: Mode) -> (HashMap<String, St
 /// nobody would type, and matched nothing. Sentence punctuation at a word's
 /// edge is not what a question is about, so `why is it slow?` still goes to
 /// the index.
+///
+/// Only symbols that mean something in code count: `*` is the index's own
+/// prefix search, and quotes and brackets in any script -- `«»`, `“”`,
+/// `¿¡` -- are sentence punctuation. Counting those sent `pool*` and
+/// `«bonjour»` to an exact match that found nothing.
 fn beyond_tokens(query: &str) -> bool {
-    let telling = |c: char| !c.is_alphanumeric() && !".,;:!?\"'()[]{}".contains(c);
+    let telling = |c: char| "+#$%&@~/\\|<>=^`-".contains(c);
     query
         .split_whitespace()
         .any(|w| w.chars().next().is_some_and(telling) || w.chars().last().is_some_and(telling))
@@ -667,6 +672,11 @@ mod tests {
             "src/main.rs",
             "Москве",
             "e.g.",
+            "pool*",
+            "«bonjour»",
+            "“quoted”",
+            "¿qué?",
+            "etc…",
         ] {
             assert!(!beyond_tokens(q), "{q:?} skipped the index");
         }
