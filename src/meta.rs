@@ -120,12 +120,16 @@ impl Meta {
                     // itself: a number among the tags used to set the whole
                     // file aside and hide every mark in it. The original is
                     // kept all the same, since the next save writes what
-                    // could be read.
-                    let copy = p.with_extension(format!(
-                        "json.as-found-{}",
-                        chrono::Utc::now().timestamp()
-                    ));
-                    let _ = std::fs::copy(p, &copy);
+                    // could be read -- once: until that save, every load
+                    // finds the same file, and made another copy of it.
+                    let copy = kept_as(p, &b).unwrap_or_else(|| {
+                        let copy = p.with_extension(format!(
+                            "json.as-found-{}",
+                            chrono::Utc::now().timestamp()
+                        ));
+                        let _ = std::fs::copy(p, &copy);
+                        copy
+                    });
                     said = Some(format!(
                         "{bad} value(s) in {} were the wrong type and were left out — the file as it was is kept as {}",
                         p.display(),
@@ -342,6 +346,17 @@ impl Meta {
         v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         v
     }
+}
+
+/// A copy of `body` already set beside `p` by an earlier load.
+fn kept_as(p: &std::path::Path, body: &[u8]) -> Option<std::path::PathBuf> {
+    let prefix = format!("{}.as-found-", p.file_name()?.to_string_lossy());
+    std::fs::read_dir(p.parent()?)
+        .ok()?
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+        .map(|e| e.path())
+        .find(|c| std::fs::read(c).is_ok_and(|b| b == body))
 }
 
 /// Everything in a meta.json that can be used, and how many values could
@@ -609,6 +624,27 @@ mod tests {
             .flatten()
             .any(|e| e.file_name().to_string_lossy().contains("as-found"));
         assert!(kept, "the original was not kept");
+    }
+
+    #[test]
+    fn a_file_already_kept_as_it_was_is_not_kept_again() {
+        // Nothing rewrites the file until a mark is saved, so every start,
+        // every `--list` and every `R` before then made another copy.
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("meta.json");
+        let body = r#"{"sessions":{"a":{"favorite":true,"tags":["ok",5]}}}"#;
+        std::fs::write(&p, body).unwrap();
+        let earlier = d.path().join("meta.json.as-found-1700000000");
+        std::fs::write(&earlier, body).unwrap();
+        let (_, said) = Meta::load_telling(&p);
+        let copies = std::fs::read_dir(d.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains("as-found"))
+            .count();
+        assert_eq!(copies, 1, "copied again");
+        let said = said.unwrap();
+        assert!(said.contains("as-found-1700000000"), "{said}");
     }
 
     #[test]
