@@ -50,8 +50,8 @@ before the far side rather than running a hard line across the terminal.
 They appear only when sorting by recency, where time order makes them mean
 something.
 
-The name in the header is a **chip of gold** with ΜΝΗΜΟΣΥΝΗ cut into it, the
-[opening screen](#the-opening-animation)'s tablet in miniature. No borders
+The name in the header is a **chip of gold** with ΜΝΗΜΟΣΥΝΗ cut into it, in
+the gold of the [opening screen](#the-opening-animation)'s mark. No borders
 anywhere; structure comes from alignment.
 
 At a wide terminal a title column alone leaves a sixty-column void in every
@@ -295,37 +295,38 @@ leaves at any point.
 
 ## The opening animation
 
-The name is cut into a leaf of gold, letter by letter, while the index
-builds. Then a glint crosses the leaf.
+The mark is a meander, the Greek key: one path that turns in on itself, the
+way back through a maze. While the index builds, gold runs along it from the
+outer end to the centre. Then a glint crosses it.
 
 ![the opening animation](docs/splash.png)
 
-The leaf carries **ΜΝΗΜΟΣΥΝΗ** in Greek capitals and, under it, the first
-words of the gold tablet found at Hipponion, from about 400 BC: ΜΝΑΜΟΣΥΝΑΣ
-ΤΟΔΕ ΕΡΓΟΝ, "this is the work of Memory". A corner has broken off, the right
-edge is torn, and it is creased in three, because most of the real leaves
-were folded small to be carried.
+It is a symbol, not a word. The name was drawn here twice before, cut into a
+leaf of gold and then in gilded block capitals, and both were worse than no
+name at all. The name is in the header of the list the opening hands over to.
 
 It is drawn as an image, not in shades of punctuation. A terminal cell is
 about twice as tall as it is wide, so half a cell is close to a square pixel,
 and a cell can hold two colours: `▀` takes the top pixel as its foreground and
-the bottom one as its background. The letters are set by hand on that grid,
-eight pixels — four rows — tall. A rasteriser smears every diagonal at that
-size, and a hand-set pixel does not. The line under them is set in the
-terminal's own type, which stays legible in a single row.
+the bottom one as its background. Nothing is baked. The spiral is walked in
+code by arm length — three sides the full width, then two of each length, two
+shorter each time — and each cell of the path becomes a square of pixels. At
+the large size a path cell is two pixels a side, so every stroke is whole
+terminal cells, and those are drawn as their background colour rather than as
+`█`: a glyph does not always reach the top and bottom of its cell, and a column
+of them showed a hairline at every row.
 
-Only the geometry is baked, by `tools/gen-tablet.py`. The light is worked out
-per pixel, per frame: from the upper left, with a broad sheen, a hammered
-grain that never moves, each crease dark with its far side lit, and a bright
-lower lip on every groove, where it would catch the light. While the index
-builds the letters are cut left to right, still bright for a column or two
-where the point last passed, and the glint follows once they are done. All of
-it samples the same ramp as the list, so a palette set in the config
-recolours the tablet too. The logo at the top of this page comes from the
-same pixels, lit the same way at rest, so the two cannot drift apart.
+The light is worked out per pixel, per frame: bright at the head of the mark
+and deeper gold at its foot. Ahead of the gold the path is already there in
+dim bronze, so the mark is whole from the first frame and the progress is
+plain to see, and the last few cells gilded run still bright. It samples the
+same ramp as the list, so a palette set in the config regilds it. The logo at
+the top of this page is written by a test from the same mark, lit the same way
+at rest and in bronze where the page is light, so the two cannot drift apart.
 
-Three sizes are baked in, 89, 79 and 59 columns wide. Narrower than that, the
-name settles letter by letter out of the rest of the Greek alphabet instead.
+It comes in three sizes — 26 columns by 13 rows, 13 by 7, and 9 by 5 — and
+the largest is used that leaves room for the status and the bar under it. A
+terminal too small for any of them gets just those.
 
 It is covering real work — the index builds on a background thread while this
 runs. With nothing cached yet there is no list to show until that finishes, so
@@ -340,7 +341,7 @@ with the reveal and the counts below state the real totals. The bar never
 steps backwards when the source changes under it.
 
 Turn it off with `--no-splash` or `MNEMOSYNE_NO_SPLASH=1`. `?` shows the same
-tablet, at rest, over the key reference when there is room for it.
+mark, at rest, over the key reference when there is room for it.
 
 ## After a reboot
 
