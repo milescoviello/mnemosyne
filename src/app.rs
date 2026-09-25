@@ -562,10 +562,10 @@ impl App {
         self.rebuild();
     }
 
-    fn passes(&mut self, i: usize) -> bool {
+    fn passes(&mut self, i: usize, orphan: bool) -> bool {
         let now = chrono::Utc::now().timestamp();
         let s = &self.all[i];
-        if s.is_subagent {
+        if s.is_subagent && !orphan {
             return false; // shown only as children
         }
         if self.fav_only && !s.favorite {
@@ -666,9 +666,13 @@ impl App {
     pub fn rebuild(&mut self) {
         let keep_path = self.current().map(|s| s.path.to_string_lossy().to_string());
 
+        // A subagent is listed under its session -- unless that session's
+        // transcript is gone, when it has nowhere to be listed and was
+        // nowhere at all: not in the list, not under `a`, not in a search.
+        let orphans = self.orphans();
         let mut idx: Vec<usize> = Vec::new();
         for i in 0..self.all.len() {
-            if self.passes(i) {
+            if self.passes(i, orphans.contains(&i)) {
                 idx.push(i);
             }
         }
@@ -783,6 +787,22 @@ impl App {
             }
         }
         self.ensure_on_item(1);
+    }
+
+    /// Subagents whose session is not among those there are.
+    fn orphans(&self) -> HashSet<usize> {
+        let tops: HashSet<&str> = self
+            .all
+            .iter()
+            .filter(|s| !s.is_subagent)
+            .map(|s| s.id.as_str())
+            .collect();
+        (0..self.all.len())
+            .filter(|&i| {
+                let s = &self.all[i];
+                s.is_subagent && !s.parent.as_deref().is_some_and(|p| tops.contains(p))
+            })
+            .collect()
     }
 
     /// Open every parent that has children.
@@ -1644,6 +1664,16 @@ impl App {
                 return;
             }
         }
+        // A subagent resumes as its session, and this one's is gone: there is
+        // nothing to resume, only something to read.
+        if self
+            .current()
+            .is_some_and(|s| s.is_subagent && self.resumed(s).is_subagent)
+            && self.picks().is_empty()
+        {
+            self.status = "the session this subagent belongs to is gone — v reads it".into();
+            return;
+        }
         // Guard against silently starting a second client on a transcript that
         // already has one. Tmux is exempt: attaching to the existing session is
         // exactly the right move there, and is what "resume" should mean.
@@ -1807,11 +1837,11 @@ impl App {
             // its parent's. Counted as files it was every subagent that
             // matched as well, and "30 of 26 shown" over a list with no
             // other filter on.
-            let n = self
-                .all
-                .iter()
-                .filter(|s| {
-                    !s.is_subagent
+            let orphans = self.orphans();
+            let n = (0..self.all.len())
+                .filter(|i| {
+                    let s = &self.all[*i];
+                    (!s.is_subagent || orphans.contains(i))
                         && (r.hits.contains_key(s.path.to_string_lossy().as_ref())
                             || self.deep_parent_hits.contains(&s.id))
                 })
@@ -3530,6 +3560,22 @@ mod logic_tests {
         a.rebuild();
         assert_eq!(a.item_count(), 1);
         assert_eq!(a.current().unwrap().id, "cccccccc-3");
+    }
+
+    #[test]
+    fn a_subagent_whose_session_is_gone_is_listed_on_its_own() {
+        let mut a = app();
+        let mut orphan = subagent("agent-z9", "no-such-parent");
+        orphan.path = "/p/agent-z9.jsonl".into();
+        orphan.first_prompt = "an orphaned piece of work".into();
+        a.all.push(orphan);
+        a.rebuild();
+        a.fuzzy = "orphaned".into();
+        a.rebuild();
+        assert_eq!(a.session_count(), 1, "nowhere to be found");
+        a.do_action(Action::Resume);
+        assert!(a.outcome.is_none(), "resumed a session that is not there");
+        assert!(a.status.contains("v reads it"), "{:?}", a.status);
     }
 
     #[test]

@@ -491,11 +491,19 @@ fn main() -> Result<()> {
         // belong to stand in for them -- the same rule the browser uses.
         let parents = search::parents_of_hits(&pool, &hits);
         let show_subs = has("--subagents");
+        // One whose session is gone has no parent to stand in for it.
+        let tops: std::collections::HashSet<&str> = pool
+            .iter()
+            .filter(|s| !s.is_subagent)
+            .map(|s| s.id.as_str())
+            .collect();
+        let orphan = |s: &model::Session| !s.parent.as_deref().is_some_and(|p| tops.contains(p));
         let mut rows: Vec<&model::Session> = pool
             .iter()
             .filter(|s| {
                 if s.is_subagent {
-                    return show_subs && hits.contains_key(&s.path.to_string_lossy().to_string());
+                    return (show_subs || orphan(s))
+                        && hits.contains_key(&s.path.to_string_lossy().to_string());
                 }
                 hits.contains_key(&s.path.to_string_lossy().to_string()) || parents.contains(&s.id)
             })
