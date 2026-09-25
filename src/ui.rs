@@ -368,6 +368,14 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
     // Lines are pre-wrapped, so the height is exact and scrolling can stop
     // precisely at the bottom.
     let page = area.height.saturating_sub(3);
+    // Scrolling is counted in u16, so no more lines than that can be
+    // reached. Counted as they were, the height wrapped: 400 turns at
+    // sixteen columns is 93,600 lines, recorded as 28,064, and the viewer
+    // opened part way and could never reach the end. It opens at the end,
+    // so the newest are the ones to keep.
+    if lines.len() > u16::MAX as usize {
+        lines.drain(..lines.len() - u16::MAX as usize);
+    }
     app.viewer_height = lines.len() as u16;
     app.viewer_page = page;
     if app.viewer_scroll > app.viewer_height.saturating_sub(page.max(1)) {
@@ -2143,6 +2151,27 @@ mod render_tests {
         for w in 1..=14 {
             let _ = render(&mut a, w, 12);
         }
+    }
+
+    #[test]
+    fn a_viewer_too_long_to_count_still_opens_on_its_last_turn() {
+        let mut a = app();
+        a.viewer = Some((
+            (0..400)
+                .map(|i| crate::preview::Turn {
+                    role: if i % 2 == 0 { "you" } else { "claude" },
+                    text: format!("turn {i:03} ").repeat(120),
+                })
+                .collect(),
+            false,
+        ));
+        a.input_mode = InputMode::Viewer;
+        a.viewer_scroll = u16::MAX;
+        let rows = render(&mut a, 18, 20);
+        assert!(
+            rows.iter().any(|r| r.contains("399")),
+            "opened somewhere other than the end: {rows:?}"
+        );
     }
 
     #[test]

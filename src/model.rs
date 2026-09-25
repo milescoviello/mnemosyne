@@ -221,8 +221,12 @@ pub fn reltime(epoch: i64) -> String {
         format!("{}m", d / 60)
     } else if d < 129_600 {
         format!("{}h", d / 3600)
-    } else {
+    } else if d < 1000 * 86_400 {
         format!("{}d", d / 86_400)
+    } else {
+        // Years from here. "1000d" is five characters in a four-wide
+        // column, and every column after it on that row moved right.
+        format!("{}y", d / 31_557_600)
     }
 }
 
@@ -506,6 +510,16 @@ mod tests {
                 assert_eq!(width(&out), w, "pad_fit({s:?}, {w}) = {out:?}");
             }
         }
+    }
+
+    #[test]
+    fn an_age_always_fits_its_four_columns() {
+        let now = chrono::Utc::now().timestamp();
+        for days in [0i64, 1, 99, 999, 1000, 3650, 40_000] {
+            let t = reltime(now - days * 86_400);
+            assert!(t.chars().count() <= 4, "{days} days is {t:?}");
+        }
+        assert_eq!(reltime(now - 1200 * 86_400), "3y");
     }
 
     #[test]
