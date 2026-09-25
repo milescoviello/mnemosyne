@@ -350,30 +350,38 @@ impl Index {
         Ok(map)
     }
 
+    /// Start a write, holding the write lock from the outset.
+    ///
+    /// A deferred transaction reads first and asks for the lock when it
+    /// comes to write. If another instance is writing then, SQLite cannot
+    /// wait for it -- this one's reads are already out of date -- and fails
+    /// at once with "database is locked", however long the busy timeout.
+    /// Taken up front, the lock is simply waited for.
+    fn begin(&mut self) -> Result<rusqlite::Transaction<'_>> {
+        Ok(self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?)
+    }
+
     /// Replace the indexed text for a transcript.
+    #[cfg(test)]
     pub fn store_text(&mut self, rows: &[(String, String)]) -> Result<()> {
-        let tx = self.conn.transaction()?;
-        {
-            // Delete by rowid, never by path: `path` is UNINDEXED, so
-            // `WHERE path = ?` reads the entire table. Doing that once per
-            // transcript was 41 of the 43 seconds a full re-index took.
-            let mut find = tx.prepare("SELECT rid FROM body_ref WHERE path = ?1")?;
-            let mut del = tx.prepare("DELETE FROM body WHERE rowid = ?1")?;
-            let mut unref = tx.prepare("DELETE FROM body_ref WHERE path = ?1")?;
-            let mut ins = tx.prepare("INSERT INTO body (path, text) VALUES (?1, ?2)")?;
-            let mut reref =
-                tx.prepare("INSERT OR REPLACE INTO body_ref (path, rid) VALUES (?1, ?2)")?;
-            for (path, text) in rows {
-                if let Ok(rid) = find.query_row([path], |r| r.get::<_, i64>(0)) {
-                    del.execute([rid])?;
-                }
-                unref.execute([path])?;
-                if !text.is_empty() {
-                    ins.execute(params![path, text])?;
-                    reref.execute(params![path, tx.last_insert_rowid()])?;
-                }
-            }
-        }
+        let tx = self.begin()?;
+        write_text(&tx, rows)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Everything a refresh read, in one go: the sessions and their text
+    /// land together or not at all.
+    ///
+    /// Apart, a write of the text that failed was ignored while the
+    /// sessions after it were stored. Their `scanned_len` said the new text
+    /// had been read, so it was never read again, and never searchable.
+    pub fn persist(&mut self, sessions: &[Session], text: &[(String, String)]) -> Result<()> {
+        let tx = self.begin()?;
+        write_text(&tx, text)?;
+        write_sessions(&tx, sessions)?;
         tx.commit()?;
         Ok(())
     }
@@ -471,56 +479,10 @@ impl Index {
             .unwrap_or(0) as usize)
     }
 
+    #[cfg(test)]
     pub fn store(&mut self, sessions: &[Session]) -> Result<()> {
-        let tx = self.conn.transaction()?;
-        {
-            let mut st = tx.prepare(
-                "INSERT INTO sessions (path,id,project_dir,cwd,git_branch,ai_title,first_prompt,
-                    last_prompt,model,permission_mode,version,size,mtime,first_ts,last_ts,entries,
-                    user_msgs,assistant_msgs,scanned_len,is_subagent,parent,agent_id,
-                    in_tokens,out_tokens,cache_read,cache_write,last_msg_id)
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,
-                         ?21,?22,?23,?24,?25,?26,?27)
-                 ON CONFLICT(path) DO UPDATE SET
-                    id=?2,project_dir=?3,cwd=?4,git_branch=?5,ai_title=?6,first_prompt=?7,
-                    last_prompt=?8,model=?9,permission_mode=?10,version=?11,size=?12,mtime=?13,
-                    first_ts=?14,last_ts=?15,entries=?16,user_msgs=?17,assistant_msgs=?18,
-                    scanned_len=?19,is_subagent=?20,parent=?21,agent_id=?22,
-                    in_tokens=?23,out_tokens=?24,cache_read=?25,cache_write=?26,
-                    last_msg_id=?27",
-            )?;
-            for s in sessions {
-                st.execute(params![
-                    s.path.to_string_lossy(),
-                    s.id,
-                    s.project_dir,
-                    s.cwd,
-                    s.git_branch,
-                    s.ai_title,
-                    s.first_prompt,
-                    s.last_prompt,
-                    s.model,
-                    s.permission_mode,
-                    s.version,
-                    s.size as i64,
-                    s.mtime,
-                    s.first_ts,
-                    s.last_ts,
-                    s.entries as i64,
-                    s.user_msgs as i64,
-                    s.assistant_msgs as i64,
-                    s.scanned_len as i64,
-                    s.is_subagent as i64,
-                    s.parent,
-                    s.agent_id,
-                    s.in_tokens as i64,
-                    s.out_tokens as i64,
-                    s.cache_read as i64,
-                    s.cache_write as i64,
-                    s.last_msg_id,
-                ])?;
-            }
-        }
+        let tx = self.begin()?;
+        write_sessions(&tx, sessions)?;
         tx.commit()?;
         Ok(())
     }
@@ -542,7 +504,7 @@ impl Index {
             .collect();
         let n = gone.len();
         if n > 0 {
-            let tx = self.conn.transaction()?;
+            let tx = self.begin()?;
             {
                 let mut st = tx.prepare("DELETE FROM sessions WHERE path=?1")?;
                 // The indexed text has to go with it. Missing this leaked a
@@ -571,6 +533,78 @@ impl Index {
         }
         Ok(n)
     }
+}
+
+fn write_text(tx: &rusqlite::Transaction, rows: &[(String, String)]) -> Result<()> {
+    // Delete by rowid, never by path: `path` is UNINDEXED, so
+    // `WHERE path = ?` reads the entire table. Doing that once per
+    // transcript was 41 of the 43 seconds a full re-index took.
+    let mut find = tx.prepare("SELECT rid FROM body_ref WHERE path = ?1")?;
+    let mut del = tx.prepare("DELETE FROM body WHERE rowid = ?1")?;
+    let mut unref = tx.prepare("DELETE FROM body_ref WHERE path = ?1")?;
+    let mut ins = tx.prepare("INSERT INTO body (path, text) VALUES (?1, ?2)")?;
+    let mut reref = tx.prepare("INSERT OR REPLACE INTO body_ref (path, rid) VALUES (?1, ?2)")?;
+    for (path, text) in rows {
+        if let Ok(rid) = find.query_row([path], |r| r.get::<_, i64>(0)) {
+            del.execute([rid])?;
+        }
+        unref.execute([path])?;
+        if !text.is_empty() {
+            ins.execute(params![path, text])?;
+            reref.execute(params![path, tx.last_insert_rowid()])?;
+        }
+    }
+    Ok(())
+}
+
+fn write_sessions(tx: &rusqlite::Transaction, sessions: &[Session]) -> Result<()> {
+    let mut st = tx.prepare(
+        "INSERT INTO sessions (path,id,project_dir,cwd,git_branch,ai_title,first_prompt,
+                last_prompt,model,permission_mode,version,size,mtime,first_ts,last_ts,entries,
+                user_msgs,assistant_msgs,scanned_len,is_subagent,parent,agent_id,
+                in_tokens,out_tokens,cache_read,cache_write,last_msg_id)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,
+                     ?21,?22,?23,?24,?25,?26,?27)
+             ON CONFLICT(path) DO UPDATE SET
+                id=?2,project_dir=?3,cwd=?4,git_branch=?5,ai_title=?6,first_prompt=?7,
+                last_prompt=?8,model=?9,permission_mode=?10,version=?11,size=?12,mtime=?13,
+                first_ts=?14,last_ts=?15,entries=?16,user_msgs=?17,assistant_msgs=?18,
+                scanned_len=?19,is_subagent=?20,parent=?21,agent_id=?22,
+                in_tokens=?23,out_tokens=?24,cache_read=?25,cache_write=?26,
+                last_msg_id=?27",
+    )?;
+    for s in sessions {
+        st.execute(params![
+            s.path.to_string_lossy(),
+            s.id,
+            s.project_dir,
+            s.cwd,
+            s.git_branch,
+            s.ai_title,
+            s.first_prompt,
+            s.last_prompt,
+            s.model,
+            s.permission_mode,
+            s.version,
+            s.size as i64,
+            s.mtime,
+            s.first_ts,
+            s.last_ts,
+            s.entries as i64,
+            s.user_msgs as i64,
+            s.assistant_msgs as i64,
+            s.scanned_len as i64,
+            s.is_subagent as i64,
+            s.parent,
+            s.agent_id,
+            s.in_tokens as i64,
+            s.out_tokens as i64,
+            s.cache_read as i64,
+            s.cache_write as i64,
+            s.last_msg_id,
+        ])?;
+    }
+    Ok(())
 }
 
 /// Live counters so a caller can render a real progress bar while we work.
@@ -623,12 +657,32 @@ pub fn refresh_with_progress(
     include_subagents: bool,
     progress: Option<Progress>,
 ) -> Result<Vec<Session>> {
+    // However this ends, the splash waiting on it has to hear that it did.
+    // An error on the way used to leave `finished` unset, and a cold start
+    // sat out its whole time limit before showing an empty list.
+    struct Finish(Option<Progress>);
+    impl Drop for Finish {
+        fn drop(&mut self) {
+            if let Some(p) = &self.0 {
+                p.finished.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+    let _finish = Finish(progress.clone());
+    let idx = Index::open()?;
+    refresh_in(idx, scan::discover(include_subagents), progress.as_ref())
+}
+
+/// A refresh against a given index and set of transcripts.
+fn refresh_in(
+    mut idx: Index,
+    found: Vec<(PathBuf, bool, Option<String>)>,
+    progress: Option<&Progress>,
+) -> Result<Vec<Session>> {
     use std::sync::atomic::Ordering;
 
-    let mut idx = Index::open()?;
     let stale = idx.stale;
     let cached = idx.load()?;
-    let found = scan::discover(include_subagents);
     if let Some(p) = &progress {
         p.total.store(found.len(), Ordering::Relaxed);
     }
@@ -687,19 +741,22 @@ pub fn refresh_with_progress(
         }
     }
     let sessions: Vec<Session> = scanned.into_iter().map(|(s, _)| s).collect();
-    let _ = idx.store_text(&text_rows);
 
-    idx.store(&sessions)?;
-    let paths: Vec<String> = found
-        .iter()
-        .map(|(p, _, _)| p.to_string_lossy().to_string())
-        .collect();
-    let _ = idx.prune(&paths);
-    // Everything has been re-read with the current scanner, so the rows may
-    // now claim its version.
-    let _ = idx.mark_current();
-    if let Some(p) = &progress {
-        p.finished.store(true, std::sync::atomic::Ordering::Relaxed);
+    // Keeping what was read is for next time; this run has it either way.
+    // A cache that cannot be written -- left owned by root after a `sudo
+    // mn`, or on a full disk -- used to fail the whole refresh, and with it
+    // every command-line mode and `R` in the browser, while promising that
+    // a bad cache never stops the tool.
+    if idx.persist(&sessions, &text_rows).is_ok() {
+        let paths: Vec<String> = found
+            .iter()
+            .map(|(p, _, _)| p.to_string_lossy().to_string())
+            .collect();
+        let _ = idx.prune(&paths);
+        // Everything has been re-read with the current scanner and stored,
+        // so the rows may now claim its version. Not before it is stored:
+        // claimed over rows the old scanner wrote, the new one never runs.
+        let _ = idx.mark_current();
     }
 
     Ok(sessions)
@@ -1204,6 +1261,54 @@ mod pipeline_tests {
         !idx.search_text(&crate::search::fts_expr(word))
             .unwrap()
             .is_empty()
+    }
+
+    #[test]
+    fn a_write_waits_for_another_instance_instead_of_losing_its_text() {
+        // Another mn -- or `R` while the rescan behind the splash is still
+        // going -- holding the write lock. The refresh read first and asked
+        // for the lock second, so when the other committed SQLite could not
+        // hand it over, and the new text was dropped while the rows saying
+        // it had been read were stored.
+        let (_d, mut idx, path, s1) = first_scan(&[said("user", "zebra came first")]);
+        let db = _d.path().join("i.db");
+        let other = Connection::open(&db).unwrap();
+        other
+            .execute_batch(
+                "BEGIN IMMEDIATE; INSERT INTO meta (key,value) VALUES ('other','writing');",
+            )
+            .unwrap();
+        let done = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            other.execute_batch("COMMIT").unwrap();
+        });
+        let key = s1.path.to_string_lossy().to_string();
+        let r = idx.persist(&[s1], &[(key, "zebra quokka".into())]);
+        done.join().unwrap();
+        r.expect("it should have waited for the other writer");
+        assert!(finds(&idx, "quokka"));
+        drop(path);
+    }
+
+    #[test]
+    fn a_cache_that_cannot_be_written_still_refreshes() {
+        use std::os::unix::fs::PermissionsExt;
+        let (d, idx, path, _s1) = first_scan(&[said("user", "zebra came first")]);
+        drop(idx);
+        let db = d.path().join("i.db");
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(f, "{}", said("user", "quokka came later")).unwrap();
+        drop(f);
+
+        let idx = Index::open_at(&db).unwrap();
+        let got = refresh_in(idx, vec![(path, false, None)], None)
+            .expect("an unwritable cache stopped the refresh");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].user_msgs, 2, "the new line was read all the same");
     }
 
     #[test]
