@@ -1693,7 +1693,12 @@ impl App {
             if self.persist {
                 let _ = self.meta.save();
             }
-            if self.tag_filter.as_deref() == Some(crate::meta::normalize_tag(from).as_str()) {
+            // Only when something was renamed. `eft>` moved the filter to
+            // no tag at all, and renaming nothing followed the name anyway,
+            // leaving an empty list under a status saying nothing happened.
+            if n > 0
+                && self.tag_filter.as_deref() == Some(crate::meta::normalize_tag(from).as_str())
+            {
                 self.tag_filter = Some(crate::meta::normalize_tag(to));
             }
             // Say what happened. "renamed #keeper to # on 0 session(s)" is
@@ -3297,6 +3302,36 @@ mod logic_tests {
             "reads as success: {:?}",
             a.status
         );
+    }
+
+    #[test]
+    fn a_rename_that_renamed_nothing_leaves_the_tag_filter_alone() {
+        let mut a = app();
+        a.tag_filter = Some("eft".into());
+        a.rebuild();
+        let shown = a.item_count();
+        assert!(shown > 0);
+
+        type_tag(&mut a, "eft>");
+        assert_eq!(a.tag_filter.as_deref(), Some("eft"), "{:?}", a.status);
+
+        // automatic, so never stored, so nothing to rename
+        a.tag_filter = Some("wsx/os-dev".into());
+        a.rebuild();
+        type_tag(&mut a, "wsx/os-dev>osdev");
+        assert_eq!(
+            a.tag_filter.as_deref(),
+            Some("wsx/os-dev"),
+            "{:?}",
+            a.status
+        );
+
+        // and one that did rename follows the new name
+        a.tag_filter = Some("eft".into());
+        a.rebuild();
+        type_tag(&mut a, "eft>tarkov");
+        assert_eq!(a.tag_filter.as_deref(), Some("tarkov"));
+        assert_eq!(a.item_count(), shown);
     }
 
     #[test]
