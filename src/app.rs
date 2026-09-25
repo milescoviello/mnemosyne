@@ -329,6 +329,8 @@ pub struct App {
     /// the same binary can switch a running wsx to another workspace, or open
     /// a terminal on the desktop of whoever runs the suite.
     pub ask_wsx: bool,
+    /// Where marks are saved, if not the usual place -- for tests.
+    pub meta_file: Option<std::path::PathBuf>,
     /// What tmux said last, so a new answer from wsx can be read against it
     /// without asking tmux again.
     panes: Vec<crate::live::Pane>,
@@ -408,6 +410,7 @@ impl App {
             reopen: Vec::new(),
             wsx: crate::wsx::State::default(),
             ask_wsx: false,
+            meta_file: None,
             panes: Vec::new(),
             want_wsx: false,
             wsx_answered: true,
@@ -1028,9 +1031,6 @@ impl App {
         };
         let id = self.all[i].id.clone();
         let now = self.meta.toggle_favorite(&id);
-        if self.persist {
-            let _ = self.meta.save();
-        }
         self.all[i].favorite = now;
         let whose = if i == row { "" } else { " its session" };
         self.status = if now {
@@ -1038,6 +1038,7 @@ impl App {
         } else {
             format!("unfavourited{whose}")
         };
+        self.save_meta();
         self.rebuild();
     }
 
@@ -1826,9 +1827,6 @@ impl App {
                 return;
             }
             let n = self.meta.rename_tag(from, to);
-            if self.persist {
-                let _ = self.meta.save();
-            }
             // Only when something was renamed. `eft>` moved the filter to
             // no tag at all, and renaming nothing followed the name anyway,
             // leaving an empty list under a status saying nothing happened.
@@ -1853,6 +1851,9 @@ impl App {
             } else {
                 format!("renamed #{f} to #{t} on {n} session(s)")
             };
+            if n > 0 {
+                self.save_meta();
+            }
             self.input.clear();
             self.input_mode = InputMode::Normal;
             self.apply_overlay();
@@ -1934,9 +1935,7 @@ impl App {
         } else if !raw.is_empty() {
             self.status = format!("{raw:?} leaves nothing a tag can be made of");
         }
-        if self.persist {
-            let _ = self.meta.save();
-        }
+        self.save_meta();
         self.input.clear();
         self.input_mode = InputMode::Normal;
         self.apply_overlay();
@@ -1953,9 +1952,6 @@ impl App {
         let id = self.all[i].id.clone();
         let had = !self.all[i].note.is_empty();
         self.meta.set_note(&id, &self.input);
-        if self.persist {
-            let _ = self.meta.save();
-        }
         self.all[i].note = self
             .meta
             .get(&id)
@@ -1967,8 +1963,32 @@ impl App {
             (true, true) => "note removed".into(),
             (false, true) => "no note to save".into(),
         };
+        self.save_meta();
         self.input.clear();
         self.input_mode = InputMode::Normal;
+    }
+
+    /// Save the marks, and say so when that fails -- after whatever the
+    /// status line said about the change, since the change will not outlive
+    /// this run. The failure used to go unreported: "★ favourited", and the
+    /// star was gone the next time.
+    fn save_meta(&mut self) {
+        if !self.persist {
+            return;
+        }
+        let saved = match &self.meta_file {
+            Some(p) => self.meta.save_at(&p.clone()),
+            None => self.meta.save(),
+        };
+        if let Err(e) = saved {
+            let said = format!(
+                "could not save favourites, tags and notes ({e}) — this lasts until mn closes"
+            );
+            self.status = said.clone();
+            if !self.notes.contains(&said) {
+                self.notes.push(said);
+            }
+        }
     }
 
     fn commit_tag_filter(&mut self) {
@@ -3416,6 +3436,23 @@ mod logic_tests {
         assert!(a.meta.get("aaaaaaaa-1").is_some_and(|e| e.favorite));
         assert!(!a.meta.get(&sub).is_some_and(|e| e.favorite));
         assert!(a.status.contains("its session"), "{:?}", a.status);
+    }
+
+    #[test]
+    fn a_mark_that_could_not_be_saved_says_so() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let locked = d.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let mut a = app();
+        a.persist = true;
+        a.meta_file = Some(locked.join("meta.json"));
+        on(&mut a, "bbbbbbbb-2");
+        a.do_action(Action::Favorite);
+        assert!(a.status.contains("could not save"), "{:?}", a.status);
+        assert!(a.notes.iter().any(|n| n.contains("could not save")));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[test]
