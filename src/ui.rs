@@ -1,15 +1,18 @@
 //! Rendering.
 //!
-//! The look has one idea behind it: **the pool**. Mnemosyne is the spring of
-//! memory, so the list is a water surface and older sessions sink. That gives
-//! the interface its own visual language rather than a borrowed one:
+//! The look has one idea behind it: **the gold leaf**. The Orphic tablets
+//! were leaves of gold that told the dead to drink from Mnemosyne's spring
+//! and remember, so the interface is struck from one:
 //!
-//! * A depth gutter runs down the left edge, coloured on the water ramp by how
-//!   old each session is — recent ones are pale foam at the surface, old ones
-//!   fade into deep indigo. Age becomes something you see rather than read.
-//! * Date bands are drawn as ripples, not rules.
-//! * The wordmark is lit letter by letter along the same ramp.
-//! * Every glyph of chrome comes from the same small water alphabet.
+//! * An edge of gold runs down the left, coloured on the ramp by how old each
+//!   session is — fresh leaf for today, tarnished bronze for last year. Age
+//!   becomes something you see rather than read.
+//! * The name in the header is a chip of the same gold the opening screen
+//!   cuts it into.
+//! * Beside the gold, three colours that each mean one thing: lapis for your
+//!   own marks, cypress for anything alive, cinnabar for anything lost.
+//! * Rules are dotted and fade out rather than cross the screen. There are
+//!   no borders; structure comes from alignment.
 //!
 //! Everything clickable records its screen span into `app.hits` as it draws, so
 //! the mouse handler hit-tests against what was actually rendered.
@@ -84,7 +87,7 @@ fn rgb((r, g, b): (u8, u8, u8)) -> Color {
     Color::Rgb(r, g, b)
 }
 
-/// How near the surface a session sits, 1.0 = just now, 0.0 = long sunk.
+/// How fresh a session's gold is, 1.0 = just now, 0.0 = long tarnished.
 /// Logarithmic, because the interesting differences are all in the first week.
 fn depth(mtime: i64) -> f64 {
     let age = (chrono::Utc::now().timestamp() - mtime).max(0) as f64 / 86_400.0;
@@ -247,7 +250,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             Constraint::Length(1),                              // wordmark
             Constraint::Length(1),                              // air
             Constraint::Length(1),                              // column heads
-            Constraint::Min(3),                                 // the pool
+            Constraint::Min(3),                                 // the list
             Constraint::Length(rail),                           // rail
             Constraint::Length(if show_input { 2 } else { 1 }), // input / air
             Constraint::Length(1),                              // footer
@@ -270,7 +273,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_reopen(f, app, rows[1]);
     }
     draw_colheads(f, app, &cols, rows[2]);
-    draw_pool(f, app, &cols, rows[3]);
+    draw_list(f, app, &cols, rows[3]);
     if rail > 0 {
         draw_rail(f, app, rows[4], cols.preview == 0);
     }
@@ -355,11 +358,7 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
             continue;
         }
         let t = &turns[i];
-        let (label, colour) = if t.role == "you" {
-            ("you", rgb(art::ramp(0.85)))
-        } else {
-            ("claude", th().fav)
-        };
+        let (label, colour) = speaker(t.role);
         for (n, chunk) in wrap_words(&t.text, body_w).into_iter().enumerate() {
             lines.push(Line::from(vec![
                 Span::raw(" ".repeat(MARGIN)),
@@ -410,7 +409,7 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
         Paragraph::new(Text::from(vec![
             Line::from(vec![
                 Span::raw(" ".repeat(MARGIN)),
-                Span::styled("≈ ", Style::default().fg(rgb(art::ramp(0.6)))),
+                Span::styled("▸ ", Style::default().fg(rgb(art::ramp(0.6)))),
                 Span::styled(
                     fit(&title, (area.width as usize).saturating_sub(12)),
                     Style::default()
@@ -418,7 +417,7 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
                         .add_modifier(Modifier::BOLD),
                 ),
             ]),
-            ripple_line(area.width as usize, MARGIN, 1.7),
+            rule_line(area.width as usize, MARGIN),
         ]))
         .block(Block::default().style(Style::default().bg(th().panel))),
         head[0],
@@ -575,22 +574,40 @@ fn draw_reopen(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// `≈ m n e m o s y n e` — the name lit along the water ramp.
-fn draw_wordmark(f: &mut Frame, app: &App, area: Rect) {
-    let mut spans = vec![
-        Span::raw(" ".repeat(MARGIN)),
-        Span::styled("≈ ", Style::default().fg(rgb(art::ramp(0.55)))),
-    ];
-    let letters: Vec<char> = art::WORD.chars().collect();
+/// The tablet in miniature: the name cut into a chip of gold, lit from the
+/// left the way the big one is.
+fn chip() -> Vec<Span<'static>> {
+    let letters: Vec<char> = art::GREEK.chars().collect();
+    let n = letters.len() + 1;
+    let gold = |i: usize| rgb(art::ramp(0.86 - 0.22 * i as f64 / n as f64));
+    let mut spans = vec![Span::styled("▐", Style::default().fg(gold(0)))];
     for (i, ch) in letters.iter().enumerate() {
-        let p = 0.30 + (i as f64 / (letters.len() - 1) as f64) * 0.70;
         spans.push(Span::styled(
-            format!("{ch}"),
+            ch.to_string(),
             Style::default()
-                .fg(rgb(art::ramp(p)))
+                .fg(rgb(art::ramp(0.2)))
+                .bg(gold(i + 1))
                 .add_modifier(Modifier::BOLD),
         ));
     }
+    spans.push(Span::styled("▌", Style::default().fg(gold(n))));
+    spans
+}
+
+/// Who said a turn, and in what: your words in your own ink, Claude's in
+/// the gold of the record.
+fn speaker(role: &str) -> (&'static str, Color) {
+    if role == "you" {
+        ("you", th().tag)
+    } else {
+        ("claude", rgb(art::ramp(0.72)))
+    }
+}
+
+/// The name, and on the right what the list is showing.
+fn draw_wordmark(f: &mut Frame, app: &App, area: Rect) {
+    let mut spans = vec![Span::raw(" ".repeat(MARGIN))];
+    spans.extend(chip());
 
     // The right side is built as separate pieces so it can be thinned rather
     // than truncated: a narrow terminal drops whole facts, worst-first,
@@ -830,7 +847,7 @@ fn draw_colheads(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
+fn draw_list(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
     let width = area.width as usize;
     let cursor = app.cursor;
 
@@ -850,24 +867,16 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
         .iter()
         .enumerate()
         .map(|(row_i, r)| match r {
-            // a ripple across the surface, with the band name riding it
+            // a dotted rule, with the band's name set into it
             Row::Divider(label) => {
-                let text = format!("{label}  ");
+                let text = format!("{label} ");
                 let used = MARGIN + 2 + crate::model::width(&text);
                 let mut sp = vec![
                     Span::raw(" ".repeat(MARGIN)),
-                    Span::styled(
-                        "≈ ",
-                        Style::default().fg(rgb(art::sink(art::ramp(0.5), 0.3))),
-                    ),
-                    Span::styled(
-                        text,
-                        Style::default()
-                            .fg(rgb(art::ramp(0.55)))
-                            .add_modifier(Modifier::ITALIC),
-                    ),
+                    Span::styled("┄ ", Style::default().fg(rgb(rule_colour(0.0)))),
+                    Span::styled(text, Style::default().fg(rgb(art::ramp(0.62)))),
                 ];
-                sp.extend(ripple_rule(width.saturating_sub(used), 0, 0.0));
+                sp.extend(rule(width.saturating_sub(used), 0));
                 ListItem::new(Line::from(sp))
             }
             Row::Header(dir, n) => {
@@ -1093,29 +1102,32 @@ fn draw_pool(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
     app.hits.list_offset = app.list_state.offset();
 }
 
-/// A rule made of water. Only the crests print, and they thin out toward the
-/// right so the line dissolves instead of shouting across the whole screen.
-fn ripple_rule(width: usize, indent: usize, phase: f64) -> Vec<Span<'static>> {
-    let span = (width as f64 * 0.55).max(24.0);
+/// How far along a rule has faded, 0 at its start, 1 where it is gone.
+fn rule_colour(fade: f64) -> (u8, u8, u8) {
+    art::sink(art::ramp(0.42), 0.35 + fade * 0.6)
+}
+
+/// A dotted rule that fades out toward the right, so it separates without
+/// running a hard line across the whole screen.
+fn rule(width: usize, indent: usize) -> Vec<Span<'static>> {
+    let len = width.saturating_sub(indent * 2);
+    let span = (len as f64 * 0.6).max(24.0);
     let mut sp = vec![Span::raw(" ".repeat(indent))];
-    for i in 0..width.saturating_sub(indent * 2) {
-        let fade = (1.0 - i as f64 / span).clamp(0.0, 1.0);
-        let (ch, inten) = art::ripple_at(i, phase, 0.0);
-        let v = inten * fade;
-        if v < 0.42 {
-            sp.push(Span::raw(" "));
-        } else {
-            sp.push(Span::styled(
-                ch.to_string(),
-                Style::default().fg(rgb(art::sink(art::ramp(0.18 + v * 0.22), 0.45))),
-            ));
+    for i in 0..len {
+        let fade = i as f64 / span;
+        if fade >= 1.0 {
+            break;
         }
+        sp.push(Span::styled(
+            "┄",
+            Style::default().fg(rgb(rule_colour(fade))),
+        ));
     }
     sp
 }
 
-fn ripple_line(width: usize, indent: usize, phase: f64) -> Line<'static> {
-    Line::from(ripple_rule(width, indent, phase))
+fn rule_line(width: usize, indent: usize) -> Line<'static> {
+    Line::from(rule(width, indent))
 }
 
 fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
@@ -1124,13 +1136,10 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
     let width = area.width as usize;
 
     let Some(s) = app.current().cloned() else {
-        let mut lines = vec![ripple_line(width, MARGIN, 1.7), Line::raw("")];
+        let mut lines = vec![rule_line(width, MARGIN), Line::raw("")];
         lines.push(Line::from(vec![
             Span::raw(" ".repeat(MARGIN)),
-            Span::styled(
-                "still water — nothing matches. ",
-                Style::default().fg(th().chrome),
-            ),
+            Span::styled("nothing matches — ", Style::default().fg(th().chrome)),
             Span::styled("c", Style::default().fg(rgb(art::ramp(0.85)))),
             Span::styled(" clears the filters", Style::default().fg(th().chrome)),
         ]));
@@ -1138,7 +1147,7 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
         return;
     };
 
-    let mut lines: Vec<Line> = vec![ripple_line(width, MARGIN, 1.7)];
+    let mut lines: Vec<Line> = vec![rule_line(width, MARGIN)];
 
     // What wsx says about a workspace is the word on it. A live one's
     // enter goes through wsx rather than into the folder, and an archived
@@ -1232,7 +1241,7 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
         if !s.note.is_empty() {
             sp.push(Span::styled(
                 fit(&s.note, width.saturating_sub(30)),
-                Style::default().fg(th().fav).add_modifier(Modifier::ITALIC),
+                Style::default().fg(th().tag).add_modifier(Modifier::ITALIC),
             ));
         }
         lines.push(Line::from(sp));
@@ -1279,18 +1288,12 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
         if only_tools(&t.text) {
             continue;
         }
+        let (who, colour) = speaker(t.role);
         body_lines.insert(
             body_lines.len(),
             Line::from(vec![
                 Span::raw(" ".repeat(MARGIN)),
-                Span::styled(
-                    format!("{:<10}", t.role),
-                    Style::default().fg(if t.role == "you" {
-                        rgb(art::ramp(0.8))
-                    } else {
-                        th().fav
-                    }),
-                ),
+                Span::styled(format!("{who:<10}"), Style::default().fg(colour)),
                 Span::styled(fit(&t.text, body), Style::default().fg(th().text)),
             ]),
         );
@@ -1347,7 +1350,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     };
     let line = Line::from(vec![
         Span::raw(" ".repeat(MARGIN)),
-        Span::styled("≈ ", Style::default().fg(rgb(art::ramp(0.6)))),
+        Span::styled("▸ ", Style::default().fg(rgb(art::ramp(0.6)))),
         Span::styled(
             format!("{label} "),
             Style::default()
@@ -1488,7 +1491,7 @@ fn guide() -> Vec<H> {
         Say("folder column rarely tells them apart."),
         Gap,
         Head("reading the list"),
-        Mark("▌", "how long ago — bright at the surface, fading as a session sinks"),
+        Mark("▌", "how long ago — fresh gold today, tarnishing as a session ages"),
         Mark("❯", "where you are"),
         Mark("★", "favourite"),
         Mark("●", "running right now   ◌ probably running, matched only by folder"),
@@ -1874,13 +1877,20 @@ mod render_tests {
             }
             let rows = render(&mut a, w, h);
             let top = &rows[0];
-            if let Some(i) = top.find("mnemosyne") {
-                let after = &top[i + "mnemosyne".len()..];
-                assert!(
-                    after.is_empty() || after.starts_with(' '),
-                    "{w}x{h}: header ran together: {top:?}"
-                );
-            }
+            let name = format!("{}▌", art::GREEK);
+            // Wherever there is a header at all it has room for the name, so
+            // the name must be there: a test that only looks when it finds
+            // it passes on a header that lost it. A terminal a few rows high
+            // gives the header no row.
+            let Some(i) = top.find(&name) else {
+                assert!(h < 10, "{w}x{h}: no name in the header: {top:?}");
+                continue;
+            };
+            let after = &top[i + name.len()..];
+            assert!(
+                after.is_empty() || after.starts_with(' '),
+                "{w}x{h}: header ran together: {top:?}"
+            );
         }
     }
 
@@ -2584,7 +2594,7 @@ mod render_tests {
         assert!(same_prefix("hello there", "hello there", 5));
         assert!(!same_prefix("hello", "goodbye", 3));
         // multi-byte input must not panic or mis-slice
-        assert!(same_prefix("héllo wörld ≈≈", "héllo wörld ≈≈", 4));
+        assert!(same_prefix("héllo wörld ┄┄", "héllo wörld ┄┄", 4));
         assert!(!same_prefix("héllo", "hello", 3));
     }
 
@@ -2622,7 +2632,7 @@ mod glyph_tests {
     /// carries — it rendered as a box and there was no way to tell from a
     /// text capture, because the codepoint survives whether or not the font
     /// can draw it.
-    const ALLOWED: &str = "▌❯★●◌◆⌁│└≈~-─—…·“”↵→←↑↓█░▏ ";
+    const ALLOWED: &str = "▌▐▸┄❯★●◌◆⌁│└─—…·“”↵→←↑↓▏ ";
 
     fn ui_source_glyphs() -> Vec<char> {
         let src = include_str!("ui.rs");
