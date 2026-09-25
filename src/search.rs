@@ -442,9 +442,13 @@ pub fn excerpt(text: &str, needle: &str) -> String {
             .then(|| find_ci(hay, full.as_bytes()))
             .flatten()
     });
+    // A word as the index took it, without the punctuation around it:
+    // `pool*` is there as `pooling`, `«bonjour»` as `« bonjour »`.
     let at = at.or_else(|| {
         lowered
             .split_whitespace()
+            .map(|w| w.trim_matches(|c| PROSE.contains(c)))
+            .filter(|w| !w.is_empty())
             .find_map(|w| find_ci(hay, w.as_bytes()))
     });
     let Some(at) = at else {
@@ -602,17 +606,21 @@ fn lowered_in_full(query: &str) -> Option<Vec<u8>> {
 /// edge is not what a question is about, so `why is it slow?` still goes to
 /// the index.
 ///
-/// Only symbols that mean something in code count: `*` is the index's own
-/// prefix search, and quotes and brackets in any script -- `«»`, `“”`,
-/// `¿¡` -- are sentence punctuation. Counting those sent `pool*` and
-/// `«bonjour»` to an exact match that found nothing.
+/// Anything but a letter or digit counts -- `_`, `£`, `€` as much as `+`
+/// -- except what belongs to the sentence rather than the word: `*`, the
+/// index's own prefix search, and quotes and brackets in any script. Those
+/// sent `pool*` and `«bonjour»` to an exact match that found nothing.
 fn beyond_tokens(query: &str) -> bool {
-    let telling = |c: char| "+#$%&@~/\\|<>=^`-".contains(c);
+    let telling = |c: char| !c.is_alphanumeric() && !PROSE.contains(c);
     query
         .split_whitespace()
         .any(|w| w.chars().next().is_some_and(telling) || w.chars().last().is_some_and(telling))
         || query.chars().any(unspaced)
 }
+
+/// Marks at a word's edge that are the sentence's, not the word's.
+const PROSE: &str =
+    ".,;:!?\"'()[]{}*«»‹›“”„‟‘’‚‛¿¡…–—·「」『』（）［］｛｝【】〈〉《》、。，．：；！？";
 
 /// Letters of a script written without spaces between words: Chinese,
 /// Japanese, Thai, Lao, Burmese, Khmer.
@@ -767,6 +775,12 @@ mod tests {
             "テキスト",
             "设计",
             "templates in c++",
+            // unicode61 splits on `_` and drops currency signs, so these
+            // became `init*`, `id*` and `5*` and matched nearly everything
+            "__init__",
+            "_id",
+            "£5",
+            "€100",
         ] {
             assert!(beyond_tokens(q), "{q:?} went to the tokenizer");
         }
@@ -880,6 +894,19 @@ mod tests {
         let text = "x ".repeat(200) + "a burst of page-faults under load" + &" y".repeat(200);
         let e = excerpt(&text, "page fault");
         assert!(e.contains("page-fault"), "{e:?}");
+    }
+
+    #[test]
+    fn an_excerpt_lands_on_the_word_inside_the_punctuation() {
+        // `pool*` and `«bonjour»` go to the index, which finds the word;
+        // the excerpt looked for the punctuation too and showed the
+        // opening line instead.
+        let text = "x ".repeat(200) + "we tuned the pooling today" + &" y".repeat(200);
+        let e = excerpt(&text, "pool*");
+        assert!(e.contains("pooling"), "{e:?}");
+        let text = "x ".repeat(200) + "il a dit « bonjour » et puis" + &" y".repeat(200);
+        let e = excerpt(&text, "«bonjour»");
+        assert!(e.contains("bonjour"), "{e:?}");
     }
 
     #[test]
