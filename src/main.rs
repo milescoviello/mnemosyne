@@ -207,6 +207,17 @@ fn check_args(args: &[String]) -> std::result::Result<(), String> {
     Ok(())
 }
 
+/// Sessions for `--restore N` to take from, newest first.
+///
+/// The "N most recent", as the help says -- not the list's order, which
+/// floats favourites to the top, so an old favourite was reopened ahead of
+/// what you were working on an hour ago.
+fn most_recent_first(app: &App) -> Vec<&model::Session> {
+    let mut v: Vec<&model::Session> = app.all.iter().filter(|s| !s.is_subagent).collect();
+    v.sort_by_key(|s| std::cmp::Reverse(s.mtime));
+    v
+}
+
 /// The flags on the command line, leaving out the value of one that takes a
 /// value. Looking for a flag anywhere in the arguments found it in a value
 /// too: `--search --update` installed an update, and `--search --help`
@@ -320,8 +331,15 @@ fn main() -> Result<()> {
     let interactive = !given
         .iter()
         .any(|a| REPORT_FLAGS.contains(a) || REPORT_VALUE_FLAGS.contains(a));
-    let use_splash =
-        interactive && !has("--no-splash") && std::env::var_os("MNEMOSYNE_NO_SPLASH").is_none();
+    // --restore and --reopen are not reports, but they draw nothing either:
+    // no splash runs for them, so no rescan behind it, and the cache they
+    // started from was all they ever saw. A first run restored nothing and
+    // said nothing; later ones missed every session since the last browser.
+    let answers_and_exits = has("--restore") || has("--reopen");
+    let use_splash = interactive
+        && !answers_and_exits
+        && !has("--no-splash")
+        && std::env::var_os("MNEMOSYNE_NO_SPLASH").is_none();
 
     // With the splash on, the real scan happens on a thread behind the
     // animation, so the bar reports actual work instead of finishing before
@@ -504,16 +522,13 @@ fn main() -> Result<()> {
     if let Some(i) = args.iter().position(|a| a == "--restore") {
         let n: usize = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(5);
         let live = live::live_map();
-        let mut app = App::new(sessions, meta::Meta::load(), live, restore_model);
-        app.rebuild();
+        let app = App::new(sessions, meta::Meta::load(), live, restore_model);
         let mut out = std::io::stdout().lock();
         let mut opened = 0;
-        for r in &app.view {
+        for s in most_recent_first(&app) {
             if opened >= n {
                 break;
             }
-            let app::Row::Item(idx) = r else { continue };
-            let s = &app.all[*idx];
             // already up, so reopening would just duplicate the window
             if s.live_exact || s.has_tmux {
                 continue;
@@ -560,12 +575,7 @@ fn main() -> Result<()> {
         );
         let _ = workspace::save(&w);
 
-        let running: std::collections::HashSet<String> = app
-            .all
-            .iter()
-            .filter(|s| s.live_pid.is_some() || s.has_tmux)
-            .map(|s| s.id.clone())
-            .collect();
+        let running = app.running_ids();
         // A dismissed offer is included here: asking for this by name is a
         // clear enough statement of intent.
         let pending = workspace::pending(&w, &boot, true, &|id| running.contains(id));
@@ -593,7 +603,16 @@ fn main() -> Result<()> {
         let mut after = workspace::load();
         after.previous = None;
         let _ = workspace::save(&after);
-        workspace::record(pending, live::detection_supported());
+        // What is open now is what was just reopened *and* what was running
+        // already. Recording only the first, as the whole truth, forgot the
+        // rest: a second reboot before the next browser would not offer them.
+        let mut open = app.open_sessions();
+        for e in pending {
+            if !open.iter().any(|o| o.id == e.id) {
+                open.push(e);
+            }
+        }
+        workspace::record(open, live::detection_supported());
         return Ok(());
     }
 
@@ -1138,6 +1157,27 @@ mod wrapper_tests {
             assert_eq!(tagged(src, "plan"), set(&["--a", "--b-c"]), "{src}");
             assert!(tagged(src, "report").is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    use super::most_recent_first;
+
+    #[test]
+    fn restore_takes_the_newest_not_the_favourites() {
+        // aaaaaaaa-1 is the fixture's favourite and its newest; make the
+        // favourite old and check it no longer comes first.
+        let mut a = crate::app::fixtures::app();
+        let fav = a.all.iter().position(|s| s.id == "aaaaaaaa-1").unwrap();
+        a.all[fav].mtime -= 400 * 86_400;
+        let order: Vec<&str> = most_recent_first(&a)
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(order[0], "bbbbbbbb-2", "{order:?}");
+        assert_eq!(*order.last().unwrap(), "aaaaaaaa-1");
+        assert!(!order.iter().any(|id| id.starts_with("agent-")));
     }
 }
 

@@ -1126,24 +1126,39 @@ impl App {
     /// Load the offer, if a reboot left one outstanding.
     pub fn load_reopen(&mut self) {
         let w = crate::workspace::load();
-        let running: std::collections::HashSet<String> = self
-            .all
-            .iter()
-            .filter(|s| s.live_pid.is_some() || s.has_tmux)
-            .map(|s| s.id.clone())
-            .collect();
+        let running = self.running_ids();
         self.reopen = crate::workspace::pending(&w, &crate::workspace::boot_id(), false, &|id| {
             running.contains(id)
         });
+    }
+
+    /// Sessions known to be running: matched by id, or waiting in tmux.
+    ///
+    /// Not a match by folder. That is a guess, and a fresh `claude` started
+    /// after a reboot in a folder a pre-reboot session ran in took that
+    /// session for running -- it vanished from the offer, and taking the
+    /// offer lost it for good.
+    pub fn running_ids(&self) -> HashSet<String> {
+        self.all
+            .iter()
+            .filter(|s| s.live_exact || s.has_tmux)
+            .map(|s| s.id.clone())
+            .collect()
     }
 
     fn reopen_previous(&mut self) {
         if self.reopen.is_empty() {
             return;
         }
+        // The offer was worked out when the browser started. Since then one
+        // may have been opened from the list, or started somewhere else, and
+        // reopening that puts a second client on it.
+        let running = self.running_ids();
+        let busy = |id: &str| running.contains(id) || self.launched.iter().any(|t| t.id == id);
         let targets: Vec<ResumeTarget> = self
             .reopen
             .iter()
+            .filter(|e| !busy(&e.id))
             .map(|e| ResumeTarget {
                 id: e.id.clone(),
                 cwd: e.cwd.clone(),
@@ -1164,12 +1179,19 @@ impl App {
         // `W` is still here, and every one of these went out under it --
         // `eft-work-2`, `eft-work-3` -- none of them the session you named.
         self.tmux_name.clear();
-        self.to_open.push((Target::WindowTmux, targets));
+        let open_already = self.reopen.len() - targets.len();
+        self.status = match (targets.len(), open_already) {
+            (0, _) => "every one of them is open already".into(),
+            (_, 0) => "reopening them in their own windows".into(),
+            (n, k) => format!("reopening {n} in their own windows — {k} open already"),
+        };
+        if !targets.is_empty() {
+            self.to_open.push((Target::WindowTmux, targets));
+        }
         self.reopen.clear();
         if self.persist {
             crate::workspace::clear_previous();
         }
-        self.status = "reopening them in their own windows".into();
         self.rebuild();
     }
 
@@ -3645,6 +3667,41 @@ mod logic_tests {
         // comes back asking about every edit
         assert_eq!(targets[0].perms, "bypassPermissions");
         assert!(!a.quit, "they open in their own windows; the picker stays");
+    }
+
+    #[test]
+    fn taking_the_offer_skips_what_has_been_opened_since() {
+        // Worked out once, when the browser started: a session opened from
+        // the list since, or started somewhere else, was reopened again.
+        let mut a = app();
+        offer(&mut a, &["aaaaaaaa-1", "bbbbbbbb-2", "cccccccc-3"]);
+        a.cursor = a
+            .view
+            .iter()
+            .position(|r| matches!(r, Row::Item(i) if a.all[*i].id == "aaaaaaaa-1"))
+            .unwrap();
+        a.do_action(Action::NewWindow);
+        let b = a.all.iter().position(|s| s.id == "bbbbbbbb-2").unwrap();
+        a.all[b].live_exact = true;
+        a.all[b].live_pid = Some(4242);
+        a.to_open.clear();
+
+        press(&mut a, 'r');
+        let (_, targets) = a.to_open.first().expect("the offer did nothing");
+        let ids: Vec<&str> = targets.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["cccccccc-3"]);
+        assert!(a.status.contains("2 open already"), "{:?}", a.status);
+    }
+
+    #[test]
+    fn a_guess_by_folder_is_not_counted_as_running() {
+        let mut a = app();
+        let b = a.all.iter().position(|s| s.id == "bbbbbbbb-2").unwrap();
+        a.all[b].live_pid = Some(4242); // matched by folder only
+        a.all[b].live_exact = false;
+        assert!(!a.running_ids().contains("bbbbbbbb-2"));
+        a.all[b].live_exact = true;
+        assert!(a.running_ids().contains("bbbbbbbb-2"));
     }
 
     #[test]
