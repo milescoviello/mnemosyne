@@ -690,6 +690,7 @@ and are never required.
 | `~/.claude/mnemosyne/index.db` | disposable cache; delete it any time |
 | `~/.claude/mnemosyne/meta.json` | your favourites, tags and notes |
 | `~/.claude/mnemosyne/workspace.json` | which sessions were open, for reopening after a reboot |
+| `~/.claude/mnemosyne/wsx.json` | what wsx last said, to draw the first frame with while it is asked again |
 
 Notes and tags out of `meta.json` are cleaned of control characters before
 anything is drawn. That file is edited by hand and synced between machines,
@@ -816,9 +817,9 @@ worth keeping as a fallback if the binary is ever missing:
 ## Development
 
 ```sh
-cargo test          # 250 tests, no network and no fixtures on disk
+cargo test          # 400 tests, no network and no fixtures on disk
 cargo clippy --all-targets -- -D warnings
-tools/shell-selftest.sh           # the wrappers under bash, zsh and fish, 180 checks
+tools/shell-selftest.sh           # the wrappers under bash, zsh and fish, 195 checks
 tools/install-selftest.sh         # install.sh into empty homes, then `mn` in each shell
 python3 tools/gen-tablet.py rust  # regenerate the tablet baked into src/art.rs
 python3 tools/gen-tablet.py svg docs/logo.svg      # and the logo, from the same pixels
