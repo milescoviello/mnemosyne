@@ -2069,7 +2069,17 @@ impl App {
     /// sessions that carry them. Tagging does not: it would refuse them.
     pub fn tag_completions(&self) -> Vec<String> {
         let pfx = crate::meta::normalize_tag(&self.input[self.tag_word_start()..]);
-        let mut tags = self.meta.all_tags();
+        // Counted over the sessions there are, as the header counts marks.
+        // Counted over the file, a tag on transcripts long gone was offered
+        // with a count, and choosing it showed nothing.
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for s in &self.all {
+            for t in &s.tags {
+                *counts.entry(t.clone()).or_insert(0) += 1;
+            }
+        }
+        let mut tags: Vec<(String, usize)> = counts.into_iter().collect();
+        tags.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         if self.input_mode == InputMode::TagFilter {
             let mut auto: HashMap<String, usize> = HashMap::new();
             for s in self.all.iter().filter(|s| !s.is_subagent) {
@@ -3319,6 +3329,18 @@ mod logic_tests {
         a.input_mode = InputMode::TagAdd;
         a.input = "ws".into();
         assert!(a.tag_completions().is_empty(), "{:?}", a.tag_completions());
+    }
+
+    #[test]
+    fn a_tag_only_on_transcripts_that_are_gone_is_not_offered() {
+        let mut a = app();
+        a.meta.add_tag("no-such-session", "ghost");
+        a.apply_overlay();
+        a.input_mode = InputMode::TagFilter;
+        a.input = "gh".into();
+        assert!(a.tag_completions().is_empty(), "{:?}", a.tag_completions());
+        a.input = "ef".into();
+        assert_eq!(a.tag_completions(), vec!["eft (1)"]);
     }
 
     #[test]

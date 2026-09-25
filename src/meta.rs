@@ -324,7 +324,8 @@ impl Meta {
         n
     }
 
-    /// Every tag in use, with counts, most-used first. Drives completion.
+    /// Every tag in the file, with counts, most-used first.
+    #[cfg(test)]
     pub fn all_tags(&self) -> Vec<(String, usize)> {
         let mut m: BTreeMap<String, usize> = BTreeMap::new();
         for e in self.sessions.values() {
