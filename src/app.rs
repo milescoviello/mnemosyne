@@ -420,7 +420,21 @@ impl App {
 
     /// Fold favourites/tags/notes and live-process state onto the sessions.
     pub fn apply_overlay(&mut self) {
-        let tmux = crate::live::tmux_by_session_id();
+        let panes = crate::live::tmux_panes();
+        self.apply_overlay_with(&panes);
+    }
+
+    /// `apply_overlay`, with what tmux said handed in.
+    pub fn apply_overlay_with(&mut self, panes: &[crate::live::Pane]) {
+        // A shared wsx workspace runs its agent in a tmux session of wsx's.
+        // That claude's parent is the tmux server, not wsx, so it was taken
+        // for anybody's: recorded for a reboot beside wsx putting it back,
+        // and -- started with `--resume` -- refused by enter as "already
+        // running in tmux" instead of switched to. It is wsx's agent, and
+        // the session is wsx's, not one of ours to attach to.
+        let owned = |p: &&crate::live::Pane| self.wsx.shared.contains(&p.session);
+        let wsx_panes: HashSet<i32> = panes.iter().filter(owned).map(|p| p.pid).collect();
+        let tmux = crate::live::by_session_id(panes.iter().filter(|p| !owned(p)));
         // One stat per distinct directory, not per session: 234 of the
         // sessions here share a single cwd.
         let mut dir_exists: HashMap<String, bool> = HashMap::new();
@@ -465,7 +479,7 @@ impl App {
             if let Some(p) = self.live.by_id.get(&s.id) {
                 s.live_pid = Some(p.pid);
                 s.live_exact = true;
-                s.live_in_wsx = p.under_wsx;
+                s.live_in_wsx = p.under_wsx || wsx_panes.contains(&p.pid);
                 if s.model.is_empty() {
                     if let Some(m) = &p.model {
                         s.model = m.clone();
@@ -491,7 +505,7 @@ impl App {
                 if self.all[i].live_pid.is_none() {
                     self.all[i].live_pid = Some(p.pid);
                     self.all[i].live_exact = false;
-                    self.all[i].live_in_wsx = p.under_wsx;
+                    self.all[i].live_in_wsx = p.under_wsx || wsx_panes.contains(&p.pid);
                 }
             }
         }
@@ -2558,6 +2572,7 @@ pub mod fixtures {
                 path: format!("{WSX_ROOT}/OS-DEV/shy-daffodil"),
             }],
             repos: format!("{:<20} {}\n", "OS-DEV", "/home/u/OS-DEV"),
+            shared: Vec::new(),
         });
         a
     }
@@ -4283,6 +4298,59 @@ mod logic_tests {
         a.do_action(Action::Resume);
         assert_eq!(a.to_jump, vec![shy_daffodil()], "{:?}", a.status);
         assert!(!a.status.contains("already running"), "{:?}", a.status);
+    }
+
+    /// A shared workspace: wsx runs the agent in a tmux session of its own,
+    /// so the agent's parent is the tmux server.
+    fn shared(a: &mut App, pid: i32, start: &str) {
+        let mut w = a.wsx.clone();
+        w.shared = vec!["wsx-OS-DEV-shy-daffodil".into()];
+        a.set_wsx(w);
+        a.apply_overlay_with(&[crate::live::Pane {
+            session: "wsx-OS-DEV-shy-daffodil".into(),
+            pid,
+            start_command: start.into(),
+        }]);
+        a.rebuild();
+    }
+
+    #[test]
+    fn an_agent_in_a_shared_workspace_is_wsxs_too() {
+        let mut a = app();
+        let tree = format!("{WSX_ROOT}/OS-DEV/shy-daffodil");
+        running(&mut a, vec![claude(395298, None, &tree, false)]);
+        shared(
+            &mut a,
+            395298,
+            "claude --continue --dangerously-skip-permissions",
+        );
+        let s = a.all.iter().find(|s| s.id == "gggggggg-7").unwrap();
+        assert!(s.live_in_wsx, "not seen as wsx's agent");
+        assert!(
+            !a.open_sessions().iter().any(|e| e.id == "gggggggg-7"),
+            "recorded for a reboot beside wsx putting it back"
+        );
+        on(&mut a, "gggggggg-7");
+        a.do_action(Action::Resume);
+        assert_eq!(a.to_jump, vec![shy_daffodil()], "{:?}", a.status);
+    }
+
+    #[test]
+    fn a_shared_workspace_resumed_by_id_goes_to_wsx_not_its_tmux() {
+        let mut a = app();
+        let tree = format!("{WSX_ROOT}/OS-DEV/shy-daffodil");
+        running(&mut a, vec![claude(4242, Some("gggggggg-7"), &tree, false)]);
+        shared(&mut a, 4242, "claude --resume gggggggg-7 --model opus");
+        let s = a.all.iter().find(|s| s.id == "gggggggg-7").unwrap();
+        assert!(s.live_in_wsx && !s.has_tmux, "{s:?}");
+        on(&mut a, "gggggggg-7");
+        a.do_action(Action::Resume);
+        assert!(
+            !a.status.contains("already running in tmux"),
+            "{:?}",
+            a.status
+        );
+        assert_eq!(a.to_jump, vec![shy_daffodil()]);
     }
 
     #[test]

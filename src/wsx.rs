@@ -257,6 +257,9 @@ pub struct State {
     /// `wsx repo list` as it was printed. It cannot be split up front; see
     /// `parse_repo_list`.
     pub repos: String,
+    /// The tmux sessions shared workspaces run their agents in. A claude in
+    /// one is wsx's agent although its parent is the tmux server, not wsx.
+    pub shared: Vec<String>,
 }
 
 impl State {
@@ -376,12 +379,27 @@ fn load_with(wsx: &[&str]) -> State {
     state.available = true;
     state.workspaces = parse_workspace_list(&workspaces);
     state.repos = repos;
+    // A wsx without the command has no shared workspaces to report.
+    if let Ok(shared) = run(wsx, &["shared", "list"], deadline, Keep::Stdout) {
+        state.shared = parse_shared_list(&shared);
+    }
     state
+}
+
+/// The tmux session of each line of `wsx shared list`: repo, slug, tmux
+/// session, state, tab-separated.
+pub fn parse_shared_list(out: &str) -> Vec<String> {
+    out.lines()
+        .filter_map(|l| l.split('\t').nth(2))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Which of a child's streams is worth reading. The other goes nowhere.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Keep {
+pub(crate) enum Keep {
     /// An answer.
     Stdout,
     /// An explanation, if it fails.
@@ -395,7 +413,12 @@ enum Keep {
 /// shell wrapper carries out line by line, so anything a child printed there
 /// would be run as though it had been chosen. Its stderr is where the browser
 /// is drawn, and a stray line would tear it.
-fn run(cmd: &[&str], args: &[&str], deadline: Instant, keep: Keep) -> Result<String, String> {
+pub(crate) fn run(
+    cmd: &[&str],
+    args: &[&str],
+    deadline: Instant,
+    keep: Keep,
+) -> Result<String, String> {
     use std::io::Read;
     let (bin, first) = cmd.split_first().ok_or("nothing to run")?;
     let (out, err) = match keep {
@@ -443,10 +466,13 @@ fn run(cmd: &[&str], args: &[&str], deadline: Instant, keep: Keep) -> Result<Str
     let left = deadline
         .saturating_duration_since(Instant::now())
         .max(Duration::from_millis(50));
+    // Not finished is not an answer. Taken as an empty one, a list whose
+    // writer left a child holding the pipe read as "no repos", and every
+    // archived workspace resumed wherever you were.
     let out = rx
         .recv_timeout(left)
         .map(|b| String::from_utf8_lossy(&b).into_owned())
-        .unwrap_or_default();
+        .map_err(|_| "it did not finish answering".to_string())?;
     if status.success() {
         Ok(out)
     } else {
@@ -643,6 +669,7 @@ mod tests {
             available: true,
             workspaces,
             repos: [repo_line("OS-DEV", "/home/u/OS-DEV")].concat(),
+            shared: Vec::new(),
         }
     }
 
@@ -791,6 +818,25 @@ echo 'no such command' >&2; exit 1"#,
             "waited {:?} for something that was given 100ms",
             t.elapsed()
         );
+    }
+
+    #[test]
+    fn an_answer_still_being_written_is_not_an_answer() {
+        // It exits, but leaves something behind holding its output open.
+        // What it has said so far is not the whole list.
+        let r = run(
+            &["sh"],
+            &["-c", "echo OS-DEV /home/u/OS-DEV; (sleep 3) &"],
+            Instant::now() + Duration::from_millis(200),
+            Keep::Stdout,
+        );
+        assert!(r.is_err(), "{r:?}");
+    }
+
+    #[test]
+    fn shared_workspaces_are_read_by_their_tmux_session() {
+        let out = "mnemosyne\tmn-bug-hunt\twsx-mnemosyne-mn-bug-hunt\talive\n\nOS-DEV\tx\t\tdead\n";
+        assert_eq!(parse_shared_list(out), vec!["wsx-mnemosyne-mn-bug-hunt"]);
     }
 
     #[test]

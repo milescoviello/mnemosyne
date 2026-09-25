@@ -227,35 +227,66 @@ pub fn tmux_name(session_id: &str) -> String {
     format!("{TMUX_PREFIX}{short}")
 }
 
-/// Which Claude session each tmux session is running, by asking tmux what
-/// command it was started with.
+/// One pane of one tmux session, and what it runs.
+#[derive(Debug, Clone)]
+pub struct Pane {
+    pub session: String,
+    /// The pane's process: for a chat started in it, the claude itself.
+    pub pid: i32,
+    pub start_command: String,
+}
+
+/// Every pane tmux has, or none if it will not say in time.
+///
+/// Bounded like every other call out. A tmux server that is stopped or
+/// wedged never answers, and this is asked at startup and whenever what is
+/// running changes: the browser, `--list` and `--json` all froze on it.
+pub fn tmux_panes() -> Vec<Pane> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    let Ok(out) = crate::wsx::run(
+        &["tmux"],
+        &[
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}\t#{pane_pid}\t#{pane_start_command}",
+        ],
+        deadline,
+        crate::wsx::Keep::Stdout,
+    ) else {
+        return Vec::new();
+    };
+    parse_panes(&out)
+}
+
+fn parse_panes(out: &str) -> Vec<Pane> {
+    out.lines()
+        .filter_map(|l| {
+            let mut f = l.splitn(3, '\t');
+            let (session, pid, cmd) = (f.next()?, f.next()?, f.next().unwrap_or(""));
+            Some(Pane {
+                session: session.to_string(),
+                pid: pid.trim().parse().ok()?,
+                start_command: cmd.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Which Claude session each tmux session is running, by what command its
+/// panes were started with.
 ///
 /// Matching on the session *name* only worked while every name was ours to
 /// choose. Once a session can be named whatever you like, the name says
 /// nothing — but `pane_start_command` still carries the `--resume <uuid>`
 /// the pane was launched with, whatever the session ended up called.
-pub fn tmux_by_session_id() -> HashMap<String, String> {
+pub fn by_session_id<'a>(panes: impl IntoIterator<Item = &'a Pane>) -> HashMap<String, String> {
     let mut out = HashMap::new();
-    let res = std::process::Command::new("tmux")
-        .args([
-            "list-panes",
-            "-a",
-            "-F",
-            "#{session_name}\t#{pane_start_command}",
-        ])
-        .output();
-    let Ok(o) = res else { return out };
-    if !o.status.success() {
-        return out;
-    }
-    for line in String::from_utf8_lossy(&o.stdout).lines() {
-        let Some((name, cmd)) = line.split_once('\t') else {
-            continue;
-        };
-        if let Some(id) = resume_id_in(cmd) {
+    for p in panes {
+        if let Some(id) = resume_id_in(&p.start_command) {
             // First pane wins: a second window on the same chat is still
             // that chat, and the session it lives in is the one to go to.
-            out.entry(id).or_insert_with(|| name.to_string());
+            out.entry(id).or_insert_with(|| p.session.clone());
         }
     }
     out
@@ -390,6 +421,20 @@ mod tests {
         );
         assert_eq!(resume_id_in("\"exec claude\""), None);
         assert_eq!(resume_id_in(""), None);
+    }
+
+    #[test]
+    fn panes_are_read_with_their_pid_and_whole_command() {
+        let out = "work\t12825\t/home/u/.local/bin/claude --resume 026bcdb5-8d88-4ad7-9f23-58649bf4f353 --model x\n\
+                   wsx-mnemosyne-mn-bug-hunt\t395298\tclaude --continue --settings \"{\\\"a\\\":1}\"\tand a tab\n\
+                   garbage line\n";
+        let panes = parse_panes(out);
+        assert_eq!(panes.len(), 2);
+        assert_eq!(panes[1].pid, 395298);
+        assert!(panes[1].start_command.ends_with("and a tab"));
+        let ids = by_session_id(&panes);
+        assert_eq!(ids["026bcdb5-8d88-4ad7-9f23-58649bf4f353"], "work");
+        assert_eq!(ids.len(), 1);
     }
 
     #[test]
