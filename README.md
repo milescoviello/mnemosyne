@@ -365,6 +365,11 @@ which everything `mn` starts does. A bare `claude` you started by hand is
 matched by working directory instead, and two of those in one folder look
 like one session.
 
+That depends on the command line surviving. The native `claude` keeps it.
+The npm package runs under Node, and a Node program that sets its process
+title overwrites its own command line with it: there the `--resume` is gone,
+and every session is matched by folder, with the same limit.
+
 The offer is only made when a reboot has actually happened, which is
 established from `/proc/sys/kernel/random/boot_id` on Linux, from
 `kern.bootsessionuuid` on macOS, and from `kern.boottime` elsewhere — a boot
