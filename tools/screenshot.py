@@ -118,10 +118,14 @@ class Screen:
         while i < n:
             ch = s[i]
             if ch == "\x1b":
-                if re.fullmatch(r"\x1b\[?[0-9;?]*", s[i:]):
+                # CSI may carry a private prefix: `\x1b[>1u` pushes the
+                # keyboard flags, and without the prefix it was drawn as text
+                if re.fullmatch(r"\x1b\[?[<=>?]?[0-9;?]*", s[i:]):
                     self.pending = s[i:]
                     return
-                m = re.match(r"\x1b\[([0-9;?]*)([a-zA-Z])", s[i:])
+                m = re.match(r"\x1b\[([<=>?]?[0-9;?]*)([a-zA-Z])", s[i:])
+                if m and m.group(1)[:1] in ("<", "=", ">"):
+                    i += m.end(); continue
                 if m:
                     p, f = m.group(1), m.group(2)
                     nums = [int(x) for x in p.split(";") if x.isdigit()]
