@@ -249,7 +249,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     // anyway, and the rows below it do not move.
     app.hits.banner.clear();
     app.hits.banner_y = None;
-    if !app.reopen.is_empty() {
+    // Only where there is a row for it. On a terminal a few lines high the
+    // layout gives some rows no height at all, and one recorded there sat
+    // on top of another: with the offer up, clicking a column heading hit
+    // the Reopen button nobody could see, and opened a window for each.
+    if !app.reopen.is_empty() && rows[1].height > 0 {
         draw_reopen(f, app, rows[1]);
     }
     draw_colheads(f, app, &cols, rows[2]);
@@ -706,7 +710,8 @@ fn draw_wordmark(f: &mut Frame, app: &App, area: Rect) {
 /// Column headings, and the clickable spans that sort by them.
 fn draw_colheads(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
     app.hits.columns.clear();
-    app.hits.colhead_y = area.y;
+    // no row to click on (u16::MAX is never one)
+    app.hits.colhead_y = if area.height > 0 { area.y } else { u16::MAX };
     let mut spans: Vec<Span> = vec![Span::raw(" ".repeat(PREFIX))];
     let mut x = area.x + PREFIX as u16;
 
@@ -1339,7 +1344,7 @@ fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
     let pos = format!("{at}/{n}");
 
     app.hits.footer.clear();
-    app.hits.footer_y = area.y;
+    app.hits.footer_y = if area.height > 0 { area.y } else { u16::MAX };
     let mut spans: Vec<Span> = vec![Span::raw(" ".repeat(MARGIN))];
     let mut x = area.x + MARGIN as u16;
 
@@ -2243,6 +2248,34 @@ mod render_tests {
                     "{w}: {label} at {x}..={last}, spans {:?}",
                     a.hits.columns
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn on_a_short_terminal_no_two_things_are_clicked_on_one_row() {
+        let mut a = app();
+        a.reopen = vec![crate::workspace::Entry {
+            id: "bbbbbbbb-2".into(),
+            cwd: "/home/u/proj".into(),
+            ..Default::default()
+        }];
+        for h in 1..=8u16 {
+            for w in [60u16, 120, 178] {
+                let _ = render(&mut a, w, h);
+                let l = a.hits.list;
+                let list = l.y..l.y + l.height;
+                let mut rows: Vec<u16> = vec![a.hits.colhead_y, a.hits.footer_y];
+                rows.extend(a.hits.banner_y);
+                rows.retain(|y| *y != u16::MAX);
+                for y in &rows {
+                    assert!(*y < h, "{w}x{h}: a click row {y} past the bottom");
+                    assert!(!list.contains(y), "{w}x{h}: row {y} is also a list row");
+                }
+                let mut seen = rows.clone();
+                seen.sort();
+                seen.dedup();
+                assert_eq!(seen.len(), rows.len(), "{w}x{h}: {rows:?}");
             }
         }
     }
