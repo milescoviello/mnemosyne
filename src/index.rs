@@ -445,6 +445,27 @@ impl Index {
         Ok(rows.flatten().collect())
     }
 
+    /// Paths whose indexed prose contains `needle` as written, folded the
+    /// way the scan folds, each with an excerpt around it.
+    ///
+    /// For the queries FTS5 cannot put to its tokens. Reads the stored prose
+    /// once, borrowing each row rather than copying it -- about a tenth of
+    /// what the exhaustive scan would read, and on the corpus here a small
+    /// fraction of a second.
+    pub fn prose_containing(&self, needle: &str) -> Result<HashMap<String, String>> {
+        let lowered = needle.to_ascii_lowercase();
+        let mut st = self.conn.prepare("SELECT path, text FROM body")?;
+        let mut rows = st.query([])?;
+        let mut out = HashMap::new();
+        while let Some(r) = rows.next()? {
+            let text = r.get_ref(1)?.as_str()?;
+            if crate::search::find_ci(text.as_bytes(), lowered.as_bytes()).is_some() {
+                out.insert(r.get(0)?, crate::search::excerpt(text, needle));
+            }
+        }
+        Ok(out)
+    }
+
     /// How many paths the rowid map knows about. Should always equal the
     /// number of text rows.
     #[cfg(test)]
@@ -1154,6 +1175,36 @@ mod pipeline_tests {
             .search_text(&crate::search::fts_expr("fault page"))
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn c_plus_plus_matches_where_it_was_said_and_nowhere_else() {
+        let (_d, mut idx, key) = indexed(&[&said("user", "templates in c++ are hard")]);
+        let other = tempfile::tempdir().unwrap();
+        let path = other.path().join("b.jsonl");
+        std::fs::write(&path, said("user", "the cat sat on the mat") + "\n").unwrap();
+        let mut t = String::new();
+        let s = crate::scan::scan_with_text(&path, false, None, None, &mut t).unwrap();
+        idx.persist(
+            std::slice::from_ref(&s),
+            &[(s.path.to_string_lossy().into(), t)],
+        )
+        .unwrap();
+        let hits = idx.prose_containing("C++").unwrap();
+        assert_eq!(hits.keys().collect::<Vec<_>>(), vec![&key]);
+        assert!(hits[&key].contains("c++"), "{:?}", hits[&key]);
+    }
+
+    #[test]
+    fn a_japanese_word_is_found_in_the_middle_of_a_sentence() {
+        let (_d, idx, key) = indexed(&[&said("user", "日本語のながいテキストですね")]);
+        assert!(
+            idx.search_text(&crate::search::fts_expr("テキスト"))
+                .unwrap()
+                .is_empty(),
+            "the tokenizer found it after all; this test is stale"
+        );
+        assert!(idx.prose_containing("テキスト").unwrap().contains_key(&key));
     }
 
     #[test]

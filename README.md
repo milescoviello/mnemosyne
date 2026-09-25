@@ -626,6 +626,15 @@ prefix query, so `pool` finds "pooling". A phrase was not, so
 Both are prefix queries now: on this corpus `kernel patch` went from 7 hits
 to 17, `permission mode` from 6 to 13.
 
+**What the index cannot tokenise is looked for as written.** The index
+splits text on anything that is not a letter or a digit, and does not split
+Chinese, Japanese or Thai at all. So `c++` was a prefix search for "c" that
+matched nearly every session, and a Japanese word from the middle of a
+sentence matched nothing. A query whose words start or end in a symbol, or
+that is written in one of those scripts, is instead found by reading the
+indexed prose for it literally: about a tenth of the corpus, so `c++` answers
+in a quarter of a second here, with its 54 real matches.
+
 **The index and the scan agree.** They did not: the scan skipped `isMeta`
 lines and the index harvested them, so the same query answered differently
 depending on which engine ran — and the fallback to scanning only fires when

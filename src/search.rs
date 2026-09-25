@@ -46,7 +46,7 @@ impl Mode {
 /// ASCII case-insensitive substring search. `needle` must already be lowercase.
 /// Candidate positions come from memchr on both cases of the first byte, which
 /// keeps this close to a plain memmem while avoiding lowercasing the haystack.
-fn find_ci(hay: &[u8], needle: &[u8]) -> Option<usize> {
+pub(crate) fn find_ci(hay: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() {
         return Some(0);
     }
@@ -418,16 +418,25 @@ pub fn run(sessions: &[Session], query: &str, mode: Mode) -> (HashMap<String, St
         let expr = fts_expr(&needle);
         if !expr.is_empty() {
             if let Ok(idx) = crate::index::Index::open() {
-                if let Ok(paths) = idx.search_text(&expr) {
+                // What the tokenizer would lose is looked for as written, in
+                // the same prose: a tenth of the corpus rather than all of
+                // it, and it comes with its excerpts. Everything else goes
+                // to the index, whose excerpts are filled in one row at a
+                // time, on demand.
+                let found = if beyond_tokens(query) {
+                    idx.prose_containing(query.trim())
+                } else {
+                    idx.search_text(&expr)
+                        .map(|paths| paths.into_iter().map(|p| (p, String::new())).collect())
+                };
+                if let Ok(found) = found {
                     let known: std::collections::HashSet<String> = sessions
                         .iter()
                         .map(|s| s.path.to_string_lossy().to_string())
                         .collect();
-                    // Excerpts are filled in one row at a time, on demand.
-                    let kept: HashMap<String, String> = paths
+                    let kept: HashMap<String, String> = found
                         .into_iter()
-                        .filter(|p| known.contains(p))
-                        .map(|p| (p, String::new()))
+                        .filter(|(p, _)| known.contains(p))
                         .collect();
                     if !kept.is_empty() {
                         return (kept, How::Indexed);
@@ -437,6 +446,33 @@ pub fn run(sessions: &[Session], query: &str, mode: Mode) -> (HashMap<String, St
         }
     }
     (brute(sessions, &scan_needle(query), mode), How::Scanned)
+}
+
+/// Would the full-text index lose what this query is about?
+///
+/// unicode61 splits on anything that is not a letter or digit, and does not
+/// split scripts written without spaces at all. So `c++` became a prefix
+/// search for "c" and matched nearly every session -- and since the index
+/// had an answer, the scan that would have been right never ran -- while a
+/// Japanese word from the middle of a sentence was inside one long token
+/// nobody would type, and matched nothing. Sentence punctuation at a word's
+/// edge is not what a question is about, so `why is it slow?` still goes to
+/// the index.
+fn beyond_tokens(query: &str) -> bool {
+    let telling = |c: char| !c.is_alphanumeric() && !".,;:!?\"'()[]{}".contains(c);
+    query
+        .split_whitespace()
+        .any(|w| w.chars().next().is_some_and(telling) || w.chars().last().is_some_and(telling))
+        || query.chars().any(unspaced)
+}
+
+/// Letters of a script written without spaces between words: Chinese,
+/// Japanese, Thai, Lao, Burmese, Khmer.
+fn unspaced(c: char) -> bool {
+    matches!(c as u32,
+        0x0E00..=0x0EFF | 0x1000..=0x109F | 0x1780..=0x17FF
+        | 0x3040..=0x30FF | 0x31F0..=0x31FF | 0x3400..=0x4DBF | 0x4E00..=0x9FFF
+        | 0xF900..=0xFAFF | 0x20000..=0x2FA1F)
 }
 
 /// The query as the scan looks for it in a raw transcript line.
@@ -503,6 +539,33 @@ mod tests {
         ));
         let hit = scan_finds(&[&line], "テキスト", Mode::Everything).expect("taken for base64");
         assert!(!hit.contains('\u{fffd}'), "{hit:?}");
+    }
+
+    #[test]
+    fn what_the_tokenizer_would_lose_is_looked_for_as_written() {
+        for q in [
+            "c++",
+            "C#",
+            "-v",
+            "$HOME",
+            "~/.bashrc",
+            "テキスト",
+            "设计",
+            "templates in c++",
+        ] {
+            assert!(beyond_tokens(q), "{q:?} went to the tokenizer");
+        }
+        for q in [
+            "pool",
+            "page fault",
+            "why is it slow?",
+            "foo()",
+            "src/main.rs",
+            "Москве",
+            "e.g.",
+        ] {
+            assert!(!beyond_tokens(q), "{q:?} skipped the index");
+        }
     }
 
     #[test]
