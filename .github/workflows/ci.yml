@@ -43,24 +43,13 @@ jobs:
       # breaks resuming without breaking a single test.
       - name: the plan on stdout stays machine-readable
         run: python3 tools/plan-smoke.py
-      # Informational only. The rasteriser's output depends on the exact
-      # DejaVu version installed, so a font bump on the runner would fail this
-      # without anything actually being wrong with the repo.
-      - name: the wordmark generator still reproduces what is committed
-        continue-on-error: true
+      # The tablet is pure geometry, with no font and no rasteriser, so the
+      # generator's output is exact and the committed data must be it.
+      - name: the tablet is what the generator makes
         run: |
-          python3 -m pip install --quiet Pillow
-          sudo apt-get install -y --no-install-recommends fonts-dejavu-core
-          python3 tools/gen-wordmark.py > /tmp/regen.rs
-          # the committed constants must match what the generator produces
+          python3 tools/gen-tablet.py rust > /tmp/tablet.rs
           python3 - <<'EOF'
-          import re
-          src = open("src/art.rs").read()
-          regen = open("/tmp/regen.rs").read()
-          for name in ("ART_WIDE", "ART_MED", "ART_SMALL"):
-              pat = re.compile(rf"pub const {name}: \[&str; \d+\] = \[(.*?)\];", re.S)
-              a = pat.search(src).group(1).strip()
-              b = pat.search(regen).group(1).strip()
-              assert a == b, f"{name} drifted from tools/gen-wordmark.py"
-          print("wordmark matches the generator")
+          regen = open("/tmp/tablet.rs").read().strip()
+          assert regen in open("src/art.rs").read(), "src/art.rs drifted from tools/gen-tablet.py"
+          print("the tablet matches the generator")
           EOF
