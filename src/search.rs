@@ -371,7 +371,13 @@ pub fn excerpt(text: &str, needle: &str) -> String {
     // turned `Москве` into `москве`, which then never matched the text it
     // was typed from.
     let lowered = needle.trim().to_ascii_lowercase();
+    let full = needle.trim().to_lowercase();
     let at = find_ci(hay, lowered.as_bytes()).or_else(|| {
+        (full != lowered)
+            .then(|| find_ci(hay, full.as_bytes()))
+            .flatten()
+    });
+    let at = at.or_else(|| {
         lowered
             .split_whitespace()
             .find_map(|w| find_ci(hay, w.as_bytes()))
@@ -501,7 +507,23 @@ pub fn run(sessions: &[Session], query: &str, mode: Mode) -> (HashMap<String, St
             }
         }
     }
-    (brute(sessions, &scan_needle(query), mode), How::Scanned)
+    let mut hits = brute(sessions, &scan_needle(query), mode);
+    // A capital outside ASCII has a lowercase the scan cannot fold to. Both
+    // are looked for: as typed, and lowercased in full, which is what found
+    // `москве` from `Москве` before the scan folded ASCII only.
+    if let Some(also) = lowered_in_full(query) {
+        for (k, v) in brute(sessions, &also, mode) {
+            hits.entry(k).or_insert(v);
+        }
+    }
+    (hits, How::Scanned)
+}
+
+/// The query lowercased in full, escaped for the scan -- when that differs
+/// from what `scan_needle` makes of it.
+fn lowered_in_full(query: &str) -> Option<Vec<u8>> {
+    let full = scan_needle(&query.trim().to_lowercase());
+    (full != scan_needle(query)).then_some(full)
 }
 
 /// Would the full-text index lose what this query is about?
@@ -608,6 +630,25 @@ mod tests {
         assert!(scan_finds(&[&line], "Москве", Mode::Everything).is_some());
         let e = excerpt("встреча в Москве завтра", "Москве");
         assert!(e.contains("Москве"), "{e:?}");
+    }
+
+    #[test]
+    fn a_capital_outside_ascii_still_finds_its_lowercase() {
+        let line = user_said("встреча в москве завтра");
+        assert!(run_scan(&[&line], "Москве").is_some(), "the scan missed it");
+        let e = excerpt("встреча в москве завтра", "Москве");
+        assert!(e.contains("москве"), "{e:?}");
+    }
+
+    /// `run`'s exhaustive path over one transcript, both needles and all.
+    fn run_scan(lines: &[&str], query: &str) -> Option<String> {
+        scan_finds(lines, query, Mode::Everything).or_else(|| {
+            let also = lowered_in_full(query)?;
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("s.jsonl");
+            std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+            search_file(&path, &memmem::Finder::new(&also), Mode::Everything)
+        })
     }
 
     #[test]

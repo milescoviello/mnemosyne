@@ -484,8 +484,13 @@ impl Index {
     pub fn prose_containing(&self, needle: &str) -> Result<HashMap<String, String>> {
         let lowered = needle.to_ascii_lowercase();
         // Each row lowercased into one buffer and searched with memmem, as the
-        // scan does: twice as fast as a case-insensitive search over it.
+        // scan does: twice as fast as a case-insensitive search over it. And,
+        // as the scan does, the query lowercased in full as well, when that
+        // is different: a capital outside ASCII has no other way to its
+        // lowercase.
         let finder = memchr::memmem::Finder::new(lowered.as_bytes());
+        let full = needle.to_lowercase();
+        let also = (full != lowered).then(|| memchr::memmem::Finder::new(full.as_bytes()));
         let mut low: Vec<u8> = Vec::new();
         let mut st = self.conn.prepare("SELECT path, text FROM body")?;
         let mut rows = st.query([])?;
@@ -494,7 +499,8 @@ impl Index {
             let text = r.get_ref(1)?.as_str()?;
             low.clear();
             low.extend(text.bytes().map(|b| b.to_ascii_lowercase()));
-            if finder.find(&low).is_some() {
+            if finder.find(&low).is_some() || also.as_ref().is_some_and(|f| f.find(&low).is_some())
+            {
                 out.insert(r.get(0)?, crate::search::excerpt(text, needle));
             }
         }
