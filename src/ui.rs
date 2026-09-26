@@ -1411,6 +1411,11 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         ),
         _ => ("", String::new(), String::new()),
     };
+    // The end of what is typed, which is where the typing is: drawn from
+    // its first character, a long one ran off the edge with the caret.
+    let room =
+        (area.width as usize).saturating_sub(MARGIN + 2 + crate::model::width(label) + 1 + 1);
+    let value = tail_fit(&crate::model::clean(&value), room);
     let line = Line::from(vec![
         Span::raw(" ".repeat(MARGIN)),
         Span::styled("▸ ", Style::default().fg(rgb(art::ramp(0.6)))),
@@ -1430,6 +1435,27 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(format!("   {hint}"), Style::default().fg(th().chrome)),
     ]);
     f.render_widget(Paragraph::new(Text::from(vec![Line::raw(""), line])), area);
+}
+
+/// The last `w` columns of `s`, after an ellipsis when that is not all of it.
+fn tail_fit(s: &str, w: usize) -> String {
+    if crate::model::width(s) <= w {
+        return s.to_string();
+    }
+    if w == 0 {
+        return String::new();
+    }
+    let mut tail: Vec<char> = Vec::new();
+    let mut used = 1; // the ellipsis
+    for c in s.chars().rev() {
+        let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + cw > w {
+            break;
+        }
+        used += cw;
+        tail.push(c);
+    }
+    std::iter::once('…').chain(tail.into_iter().rev()).collect()
 }
 
 fn draw_footer(f: &mut Frame, app: &mut App, area: Rect) {
@@ -2552,6 +2578,19 @@ mod render_tests {
                 .collect();
             assert!(bad.is_empty(), "grouped {grouped}: {bad:?}");
         }
+    }
+
+    #[test]
+    fn what_is_being_typed_stays_in_view() {
+        // Drawn from its first character, a long query ran off the right
+        // edge, and the caret with it.
+        let mut a = crate::app::fixtures::app();
+        a.input_mode = InputMode::Deep;
+        a.deep = "why does the migration fail on the arm runners with zzend".into();
+        let screen = render(&mut a, 60, 20);
+        let line = screen.iter().find(|l| l.contains("search in")).unwrap();
+        assert!(line.contains("zzend▏"), "{line:?}");
+        assert!(crate::model::width(line.trim_end()) <= 60, "{line:?}");
     }
 
     #[test]
