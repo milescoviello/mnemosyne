@@ -231,6 +231,11 @@ pub struct App {
     pub view: Vec<Row>,
     pub cursor: usize,
     pub selected: HashSet<String>,
+    /// The sessions a tag or note prompt was opened for. Taken from the
+    /// cursor when it opens, not when enter is pressed: the list is rebuilt
+    /// underneath an open prompt, and the note went on whatever row the
+    /// cursor had landed on by then.
+    prompt_for: Option<Vec<String>>,
     pub meta: Meta,
     pub live: LiveMap,
 
@@ -364,6 +369,7 @@ impl App {
             view: Vec::new(),
             cursor: 0,
             selected: HashSet::new(),
+            prompt_for: None,
             meta,
             live,
             input_mode: InputMode::Normal,
@@ -1901,7 +1907,10 @@ impl App {
     }
 
     /// Session ids the next tag operation applies to: the whole selection if
-    /// there is one, otherwise just the row under the cursor.
+    /// there is one, otherwise just the row under the cursor -- the session,
+    /// on a subagent's row, as a star does. On the subagent itself a tag was
+    /// counted by `T` and matched nothing, since a subagent is never listed
+    /// on its own.
     fn tag_targets(&self) -> Vec<String> {
         if !self.selected.is_empty() {
             return self
@@ -1914,11 +1923,15 @@ impl App {
                 .map(|s| s.id.clone())
                 .collect();
         }
-        self.current().map(|s| s.id.clone()).into_iter().collect()
+        self.current()
+            .map(|s| self.resumed(s).id.clone())
+            .into_iter()
+            .collect()
     }
 
     fn commit_tag_add(&mut self) {
         let raw = self.input.trim().to_string();
+        let opened_for = self.prompt_for.take();
 
         // `old>new` renames a tag everywhere rather than tagging anything.
         if let Some((from, to)) = raw.split_once('>') {
@@ -1963,7 +1976,14 @@ impl App {
             return;
         }
 
-        let targets = self.tag_targets();
+        let targets = opened_for.unwrap_or_else(|| self.tag_targets());
+        // Said when the only one is a subagent's session rather than the row.
+        let whose = match self.current() {
+            Some(s) if targets.len() == 1 && s.parent.as_deref() == Some(targets[0].as_str()) => {
+                " its session"
+            }
+            _ => "",
+        };
         if targets.is_empty() {
             self.input.clear();
             self.input_mode = InputMode::Normal;
@@ -2021,7 +2041,7 @@ impl App {
             }
             let what = names.join(" #");
             self.status = if many == 1 {
-                format!("tagged #{what}")
+                format!("tagged{whose} #{what}")
             } else {
                 format!("tagged {many} sessions #{what}")
             };
@@ -2045,22 +2065,28 @@ impl App {
     }
 
     fn commit_note(&mut self) {
-        let Some(i) = self.current_idx() else {
+        let id = match self.prompt_for.take() {
+            Some(ids) => ids.into_iter().next(),
+            None => self.current().map(|s| s.id.clone()),
+        };
+        let Some(id) = id else {
             // Nothing to put it on; enter still has to close the prompt.
             self.input.clear();
             self.input_mode = InputMode::Normal;
             return;
         };
-        let id = self.all[i].id.clone();
-        let had = !self.all[i].note.is_empty();
+        let had = self.meta.get(&id).is_some_and(|e| !e.note.is_empty());
         self.meta.set_note(&id, &self.input);
-        self.all[i].note = self
+        let note = self
             .meta
             .get(&id)
             .map(|e| e.note.clone())
             .unwrap_or_default();
+        for s in self.all.iter_mut().filter(|s| s.id == id) {
+            s.note = note.clone();
+        }
         // An empty note clears it; "note saved" said the opposite.
-        self.status = match (had, self.all[i].note.is_empty()) {
+        self.status = match (had, note.is_empty()) {
             (_, false) => "note saved".into(),
             (true, true) => "note removed".into(),
             (false, true) => "no note to save".into(),
@@ -2182,6 +2208,7 @@ impl App {
             Action::Favorite => self.toggle_favorite(),
             Action::Tag => {
                 self.input.clear();
+                self.prompt_for = Some(self.tag_targets());
                 self.input_mode = InputMode::TagAdd;
             }
             Action::TagFilter => {
@@ -2569,6 +2596,7 @@ impl App {
                         // Backing out of the name prompt backs out of the
                         // resume as well, rather than leaving one armed.
                         self.pending_tmux = None;
+                        self.prompt_for = None;
                     }
                     KeyCode::Enter => match self.input_mode {
                         InputMode::TagAdd => self.commit_tag_add(),
@@ -2636,6 +2664,7 @@ impl App {
             KeyCode::Char('T') => self.do_action(Action::TagFilter),
             KeyCode::Char('N') => {
                 self.input = self.current().map(|s| s.note.clone()).unwrap_or_default();
+                self.prompt_for = Some(self.current().map(|s| s.id.clone()).into_iter().collect());
                 self.input_mode = InputMode::Note;
             }
             KeyCode::Char('/') => self.do_action(Action::Filter),
@@ -4749,6 +4778,79 @@ mod logic_tests {
             model: None,
             under_wsx: by_wsx,
         }
+    }
+
+    #[test]
+    fn a_note_goes_on_the_session_it_was_opened_for() {
+        // The live poll runs while the prompt is up. The session it was
+        // opened for stopped, left the live-only view, and the note went on
+        // whichever row the cursor landed on instead.
+        let mut a = app();
+        a.live_only = true;
+        running(
+            &mut a,
+            vec![
+                claude(11, Some("aaaaaaaa-1"), "/home/u", false),
+                claude(22, Some("eeeeeeee-5"), "/home/u", false),
+            ],
+        );
+        on(&mut a, "eeeeeeee-5");
+        a.on_key(KeyEvent::from(KeyCode::Char('N')));
+        for c in "for eeee".chars() {
+            a.on_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        running(
+            &mut a,
+            vec![claude(11, Some("aaaaaaaa-1"), "/home/u", false)],
+        );
+        a.on_key(KeyEvent::from(KeyCode::Enter));
+        let note = |id: &str| a.meta.get(id).map(|e| e.note.clone()).unwrap_or_default();
+        assert_eq!(note("aaaaaaaa-1"), "", "went on the row under the cursor");
+        assert_eq!(note("eeeeeeee-5"), "for eeee");
+        // and a tag the same way
+        running(
+            &mut a,
+            vec![
+                claude(11, Some("aaaaaaaa-1"), "/home/u", false),
+                claude(22, Some("eeeeeeee-5"), "/home/u", false),
+            ],
+        );
+        on(&mut a, "eeeeeeee-5");
+        a.on_key(KeyEvent::from(KeyCode::Char('t')));
+        for c in "later".chars() {
+            a.on_key(KeyEvent::from(KeyCode::Char(c)));
+        }
+        running(
+            &mut a,
+            vec![claude(11, Some("aaaaaaaa-1"), "/home/u", false)],
+        );
+        a.on_key(KeyEvent::from(KeyCode::Enter));
+        let tags = |id: &str| a.meta.get(id).map(|e| e.tags.clone()).unwrap_or_default();
+        assert!(tags("aaaaaaaa-1").is_empty(), "{:?}", tags("aaaaaaaa-1"));
+        assert_eq!(tags("eeeeeeee-5"), vec!["later"]);
+    }
+
+    #[test]
+    fn a_tag_given_on_a_subagent_row_goes_on_its_session() {
+        // Given to the subagent, it was counted by `T` and matched nothing:
+        // a subagent is never listed on its own.
+        let mut a = app();
+        a.show_subagents = true;
+        a.expanded.insert("aaaaaaaa-1".into());
+        a.rebuild();
+        a.cursor = a
+            .view
+            .iter()
+            .position(|r| matches!(r, Row::Sub(_)))
+            .unwrap();
+        a.do_action(Action::Tag);
+        a.input = "perf".into();
+        a.commit_tag_add();
+        assert!(a.status.contains("its session"), "{:?}", a.status);
+        a.input_mode = InputMode::TagFilter;
+        a.input = "perf".into();
+        a.commit_tag_filter();
+        assert_eq!(a.session_count(), 1, "T perf found nothing");
     }
 
     #[test]
