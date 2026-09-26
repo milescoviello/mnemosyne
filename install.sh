@@ -163,6 +163,13 @@ for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
     wired="yes"
 done
 
+# A path as fish reads it: in single quotes, where only \\ and \' mean
+# anything. Unquoted, a folder with a space in its name went to
+# fish_add_path as two folders, neither of them the one it meant.
+fish_quote() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/[\\\\']/\\\\&/g")"
+}
+
 # An installed binary that is not on PATH is not installed. Warning about it
 # and carrying on leaves `mn` calling a command the shell cannot find.
 path_added=""
@@ -184,7 +191,7 @@ case ":$PATH:" in
             fishpath="$HOME/.config/fish/conf.d/mnemosyne-path.fish"
             if [ ! -f "$fishpath" ]; then
                 printf '# mnemosyne: so the binary it installed can be found\nfish_add_path %s\n' \
-                    "$bindir" > "$fishpath"
+                    "$(fish_quote "$bindir")" > "$fishpath"
                 say "added $bindir to fish's PATH"
                 added="yes"
             fi
@@ -210,7 +217,7 @@ case "${SHELL##*/}" in
             say "done, but the fish function could not be installed"
         elif [ -n "$path_added" ]; then
             say "done — open a new shell, or run this once to use it now:"
-            say "    fish_add_path $bindir"
+            say "    fish_add_path $(fish_quote "$bindir")"
         else
             say "done — run: mn"
         fi

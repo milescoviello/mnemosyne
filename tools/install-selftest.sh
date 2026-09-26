@@ -36,6 +36,10 @@ has() { case "$3" in *"$2"*) ok "$1" ;; *) bad "$1" "expected to find: $2" ;; es
 # ---- what the release would have served --------------------------------
 mkdir -p "$tmp/dist" "$tmp/stub"
 cp "$binary" "$tmp/dist/mnemosyne"
+# What `mn -V` says when it works. Looking for "mnemosyne " alone also
+# found it in fish's "Unknown command: mnemosyne", so a PATH that never
+# reached the binary passed.
+version=$("$binary" -V)
 cp shell/mn.fish shell/mn.bash README.md LICENSE "$tmp/dist/"
 tar -C "$tmp/dist" -czf "$tmp/asset.tar.gz" .
 # coreutils calls it sha256sum; macOS calls it shasum
@@ -92,11 +96,11 @@ if command -v zsh >/dev/null 2>&1; then
     home="$tmp/home-zsh"
     if [ -f "$home/.zshrc" ]; then ok "a ~/.zshrc is made for it"; else bad "a ~/.zshrc is made for it" "none was"; fi
     works=$(env -i HOME="$home" PATH="$base_path" TERM=dumb zsh -c 'source ~/.zshrc; mn -V' 2>&1)
-    has "zsh: mn works in a new shell" "mnemosyne " "$works"
+    has "zsh: mn works in a new shell" "$version" "$works"
     now=$(printf '%s\n' "$said" | sed -n '/use it now/,$p' | tail -n +2 | sed 's/^ *//')
     works=$(env -i HOME="$home" PATH="$base_path" TERM=dumb zsh -c "$now
 mn -V" 2>&1)
-    has "zsh: and in this one, doing what it said" "mnemosyne " "$works"
+    has "zsh: and in this one, doing what it said" "$version" "$works"
 
     # a second run adds nothing more
     install_into zsh zsh >/dev/null
@@ -116,11 +120,11 @@ printf '# an existing config\nalias ll="ls -l"\n' > "$home/.bashrc"
 said=$(install_into bash bash)
 has "bash: what was there is kept" 'alias ll="ls -l"' "$(cat "$home/.bashrc")"
 works=$(env -i HOME="$home" PATH="$base_path" TERM=dumb bash -c 'source ~/.bashrc; mn -V' 2>&1)
-has "bash: mn works in a new shell" "mnemosyne " "$works"
+has "bash: mn works in a new shell" "$version" "$works"
 now=$(printf '%s\n' "$said" | sed -n '/use it now/,$p' | tail -n +2 | sed 's/^ *//')
 works=$(env -i HOME="$home" PATH="$base_path" TERM=dumb bash -c "$now
 mn -V" 2>&1)
-has "bash: and in this one, doing what it said" "mnemosyne " "$works"
+has "bash: and in this one, doing what it said" "$version" "$works"
 
 # ---- fish, before fish has ever been started --------------------------
 printf '\nfish, never started\n'
@@ -133,13 +137,31 @@ if command -v fish >/dev/null 2>&1; then
         bad "fish: the function is installed" "no ~/.config/fish/functions/mn.fish"
     fi
     works=$(env -i HOME="$home" PATH="$base_path" TERM=dumb fish -c 'mn -V' 2>&1)
-    has "fish: mn works in a new shell" "mnemosyne " "$works"
+    has "fish: mn works in a new shell" "$version" "$works"
     now=$(printf '%s\n' "$said" | sed -n '/use it now/,$p' | tail -n +2 | sed 's/^ *//')
-    # a shell that was already running: config was read before the install
-    works=$(env -i HOME="$home" PATH="$base_path" TERM=dumb fish --no-config -c \
-        "source $home/.config/fish/functions/mn.fish; $now
+    # A shell that was already running: its config was read before the
+    # install. Not `--no-config`, which leaves out fish's own setup too --
+    # the part that puts what fish_add_path adds on PATH -- so doing exactly
+    # what was said could never have worked there.
+    mkdir -p "$tmp/config-before"
+    works=$(env -i HOME="$home" XDG_CONFIG_HOME="$tmp/config-before" PATH="$base_path" TERM=dumb \
+        fish -c "source '$home/.config/fish/functions/mn.fish'; $now
 mn -V" 2>&1)
-    has "fish: and in this one, doing what it said" "mnemosyne " "$works"
+    has "fish: and in this one, doing what it said" "$version" "$works"
+
+    # A folder with a space in it went to fish_add_path unquoted, as two.
+    said=$(install_into "with space" fish)
+    home="$tmp/home-with space"
+    works=$(env -i HOME="$home" PATH="$base_path" TERM=dumb fish -c 'mn -V' 2>&1)
+    has "fish: a home with a space in it still works" "$version" "$works"
+    now=$(printf '%s\n' "$said" | sed -n '/use it now/,$p' | tail -n +2 | sed 's/^ *//')
+    # its own: what fish_add_path adds is kept, and the one before's would
+    # be on PATH here too
+    mkdir -p "$tmp/config-before-2"
+    works=$(env -i HOME="$home" XDG_CONFIG_HOME="$tmp/config-before-2" PATH="$base_path" TERM=dumb \
+        fish -c "source '$home/.config/fish/functions/mn.fish'; $now
+mn -V" 2>&1)
+    has "fish: and doing what it said there too" "$version" "$works"
 else
     skip "fish" "fish is not installed"
 fi
