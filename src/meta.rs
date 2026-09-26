@@ -263,13 +263,17 @@ impl Meta {
         self.sessions.get(id)
     }
 
+    #[cfg(test)]
     pub fn toggle_favorite(&mut self, id: &str) -> bool {
-        let e = self.sessions.entry(id.to_string()).or_default();
-        e.favorite = !e.favorite;
-        let now = e.favorite;
-        self.changed.entry(id.to_string()).or_default().favorite = Some(now);
-        self.gc(id);
+        let now = !self.get(id).is_some_and(|e| e.favorite);
+        self.set_favorite(id, now);
         now
+    }
+
+    pub fn set_favorite(&mut self, id: &str, on: bool) {
+        self.sessions.entry(id.to_string()).or_default().favorite = on;
+        self.changed.entry(id.to_string()).or_default().favorite = Some(on);
+        self.gc(id);
     }
 
     pub fn add_tag(&mut self, id: &str, tag: &str) {

@@ -1084,8 +1084,12 @@ impl App {
         } else {
             row
         };
+        // The opposite of what the row shows, which is not always what the
+        // marks hold: a save takes in another browser's, and a star made
+        // there on this row flipped back off here.
         let id = self.all[i].id.clone();
-        let now = self.meta.toggle_favorite(&id);
+        let now = !self.all[i].favorite;
+        self.meta.set_favorite(&id, now);
         self.all[i].favorite = now;
         let whose = if i == row { "" } else { " its session" };
         self.status = if now {
@@ -2108,6 +2112,11 @@ impl App {
             Some(p) => self.meta.save_at(&p.clone()),
             None => self.meta.save(),
         };
+        // A save takes in what another browser saved first; the rows show
+        // it too, or they say one thing while the marks hold another.
+        if saved.is_ok() {
+            self.apply_overlay();
+        }
         if let Err(e) = saved {
             let said = format!(
                 "could not save favourites, tags and notes ({e}) — this lasts until mn closes"
@@ -3678,6 +3687,42 @@ mod logic_tests {
         a.rebuild();
         assert_eq!(a.item_count(), 1);
         assert_eq!(a.current().unwrap().title(), "ancient");
+    }
+
+    #[test]
+    fn f_does_what_the_row_shows_with_another_browser_open() {
+        // B's save took in A's star on S without showing it, and `f` on S --
+        // shown unstarred -- flipped the star B now held: it unstarred S.
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("meta.json");
+        let mk = || {
+            let mut x = app_with(crate::meta::Meta::default(), true);
+            x.persist = true;
+            x.meta_file = Some(p.clone());
+            x
+        };
+        let (mut a, mut b) = (mk(), mk());
+        let on = |x: &mut App, id: &str| {
+            x.cursor = x
+                .view
+                .iter()
+                .position(|r| matches!(r, Row::Item(i) if x.all[*i].id == id))
+                .unwrap();
+        };
+        on(&mut a, "bbbbbbbb-2");
+        a.do_action(Action::Favorite);
+        on(&mut b, "cccccccc-3");
+        b.do_action(Action::Favorite);
+        on(&mut b, "bbbbbbbb-2");
+        let shown = b.current().unwrap().favorite;
+        b.do_action(Action::Favorite);
+        let now = crate::meta::Meta::load_at(&p);
+        assert_eq!(
+            now.get("bbbbbbbb-2").is_some_and(|e| e.favorite),
+            !shown,
+            "f did the opposite of what the row showed: {:?}",
+            b.status
+        );
     }
 
     #[test]
