@@ -289,7 +289,13 @@ mn() {
                     fi
                 else
                     inner="cd $(printf %q "$cwd"); exec $(__mn_quote "$(__mn_claude)" --resume "$sid" "${margs[@]}" "${extra[@]}" "${fwd[@]}")"
-                    term="$(__mn_term_open "$cwd" "$inner")" && notes+="  ▶ $ttl  ($term)"$'\n'
+                    # Said, as fish says it: without it the session was not
+                    # opened and nothing was said at all.
+                    if term="$(__mn_term_open "$cwd" "$inner")"; then
+                        notes+="  ▶ $ttl  ($term)"$'\n'
+                    else
+                        notes+="  ✗ no terminal emulator found (set \$MN_TERMINAL)"$'\n'
+                    fi
                 fi
                 ;;
             window)

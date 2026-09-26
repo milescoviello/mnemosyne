@@ -244,6 +244,20 @@ run_shell() {
         skip "$shell_name: a tmux name that needs quoting" "tmux is not installed"
     fi
 
+    # --- a window each, with neither tmux nor a terminal to open it in
+    # fish said so. bash said nothing and exited 0, and the sessions were
+    # simply not opened -- which is a GNOME desktop without tmux.
+    local lim="$tmp/lim" c
+    rm -rf "$lim"
+    mkdir -p "$lim"
+    for c in mktemp cat rm tr head cut sh grep sed printf "$runner"; do
+        [ -e "$lim/$c" ] || ln -s "$(command -v "$c")" "$lim/$c" 2>/dev/null
+    done
+    cp "$bin/mnemosyne" "$bin/claude" "$lim/"
+    write_plan "$WINTMUX_PLAN"
+    out=$(PATH="$lim" MN_TERMINAL= "$runner" -c "$source_line; mn --restore" 2>&1)
+    has "$shell_name: with no tmux and no terminal, it says so" "no terminal emulator found" "$out"
+
     # --- found running however claude was told which chat it is
     # The binary knows a pane started `-r ID`, `--resume=ID` or
     # `--session-id ID` for the chat it is, and names it in the plan. The
