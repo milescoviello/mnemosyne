@@ -187,6 +187,12 @@ __mn_split() {
 }
 
 mn() {
+    # A zsh you type into runs the process substitution the plan is read
+    # through in a process group of its own, and the browser was stopped the
+    # moment it set up the terminal: `mn` hung with nothing drawn. Without
+    # job control, for this function only, it runs in the foreground as it
+    # does in bash.
+    [ -n "${ZSH_VERSION:-}" ] && setopt local_options no_monitor
     local mine=() fwd=() no_bypass=0 a take_value=0 report=0
     for a in "$@"; do
         if [ "$take_value" = 1 ]; then mine+=("$a"); take_value=0; continue; fi

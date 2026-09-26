@@ -67,6 +67,11 @@ if [ -n "\${MN_STUB_LINGER:-}" ]; then
     sleep 1
     echo "-- browser closed --" >&2
 fi
+# Set the terminal up, as the browser's first act is: from a process group
+# that is not the terminal's, that stops the process until it is resumed.
+if [ -n "\${MN_STUB_TTY:-}" ]; then
+    stty -echo < /dev/tty && stty echo < /dev/tty
+fi
 exit \${MN_STUB_EXIT:-0}
 EOF
 
@@ -535,6 +540,46 @@ run_shell() {
     hasnt "$shell_name: nor opened" "term:" "$(cat "$log")"
 }
 
+# ---- typed into, with job control on -----------------------------------
+# Every check above runs `shell -c`, which has no job control. A shell you
+# type into has it, and zsh ran the process substitution the plan is read
+# through in a process group of its own: the browser was stopped the moment
+# it set up the terminal, and `mn` hung with nothing drawn.
+interactive() {
+    local shell_name=$1 typed=$2
+    shift 2
+    write_plan ""
+    local got
+    got=$(MN_STUB_TTY=1 python3 - "$typed" "$@" <<'PY'
+import os, pty, select, signal, sys, time
+typed, argv = sys.argv[1], sys.argv[2:]
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp(argv[0], argv)
+# fish asks the terminal what it is, and where the cursor is, and waits for
+# the answers before it reads anything typed; a terminal would say.
+answers = {b"\x1b[0c": b"\x1b[?62;22c", b"\x1b[c": b"\x1b[?62;22c", b"\x1b[6n": b"\x1b[1;1R"}
+seen, end, sent, started = b"", time.time() + 8, False, time.time()
+while time.time() < end and b"mn-came-back-0" not in seen:
+    if select.select([fd], [], [], 0.1)[0]:
+        try:
+            got = os.read(fd, 65536)
+        except OSError:
+            break
+        seen += got
+        for ask, say in answers.items():
+            for _ in range(got.count(ask)):
+                os.write(fd, say)
+    if not sent and time.time() - started > 1.0:
+        os.write(fd, typed.encode() + b"\r")
+        sent = True
+print("came back" if b"mn-came-back-0" in seen else "hung")
+os.system(f"pkill -9 -s {pid} 2>/dev/null")
+PY
+)
+    has "$shell_name typed into: mn comes back" "came back" "$got"
+}
+
 printf 'shell wrapper self-test\n'
 
 run_shell bash "source $root/shell/mn.bash" bash
@@ -553,6 +598,15 @@ if command -v fish >/dev/null 2>&1; then
 else
     printf '\nfish\n'
     skip "fish wrapper" "fish is not installed"
+fi
+
+printf '\ntyped into\n'
+interactive bash "source $root/shell/mn.bash; mn; echo mn-came-back-\$?" bash --norc --noprofile -i
+if command -v zsh >/dev/null 2>&1; then
+    interactive zsh "source $root/shell/mn.bash; mn; echo mn-came-back-\$?" zsh -f -i
+fi
+if command -v fish >/dev/null 2>&1; then
+    interactive fish "source $root/shell/mn.fish; mn; echo mn-came-back-\$status" fish --no-config -i
 fi
 
 printf '\n%d checks, %d failed, %d skipped\n' "$checks" "$fails" "$skips"
