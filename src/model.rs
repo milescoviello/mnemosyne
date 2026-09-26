@@ -119,11 +119,15 @@ impl Session {
 
     /// Where it ran, as the list names it: `wsx OS-DEV/shy-daffodil` for a
     /// wsx workspace, the folder otherwise.
+    ///
+    /// Cleaned, since it is drawn: a folder's name can hold an escape, and in
+    /// a grouped heading or the rail one set the window's title or cleared
+    /// the screen. The folder itself, where resuming goes, is `cwd`.
     pub fn folder(&self) -> String {
-        match &self.wsx {
+        clean(&match &self.wsx {
             Some(w) => format!("{}{}", crate::wsx::MARK, w.label()),
             None => short_cwd(&self.cwd),
-        }
+        })
     }
 
     /// The folder resuming it lands in, when that is not the one it ran in.
@@ -344,6 +348,13 @@ pub fn width(s: &str) -> usize {
 pub fn drawable(c: char) -> bool {
     !c.is_control()
         && !matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+/// Only what may be drawn: see `drawable`. For text that reaches the screen
+/// other than through `fit` -- a folder, a branch, a mode, all whatever the
+/// transcript said they were.
+pub fn clean(s: &str) -> String {
+    s.chars().filter(|&c| drawable(c)).collect()
 }
 
 /// Clip to `w` display columns, ending in an ellipsis when it had to cut.

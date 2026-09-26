@@ -1265,7 +1265,9 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
     if s.has_tmux {
         facts.push(format!("tmux {}", crate::live::tmux_name(&s.id)));
     }
-    let fact_str = facts.join(" · ");
+    // The branch and the mode are whatever the transcript said, escapes
+    // and all, and this line is not drawn through `fit`.
+    let fact_str = crate::model::clean(&facts.join(" · "));
     let title = fit(
         s.title(),
         width.saturating_sub(crate::model::width(&fact_str) + MARGIN * 3),
@@ -2509,6 +2511,36 @@ mod render_tests {
                 theirs.offset(),
                 "step {step}: cursor {cursor} of {len}, height {h}"
             );
+        }
+    }
+
+    #[test]
+    fn an_escape_in_a_folder_or_branch_never_reaches_the_terminal() {
+        // Drawn in a heading and in the rail's facts without being cleaned:
+        // a transcript whose cwd carried `ESC ]0;…` set the window's title,
+        // and `ESC [2J` cleared the screen.
+        let mut a = crate::app::fixtures::app();
+        let i = a.all.iter().position(|s| s.id == "aaaaaaaa-1").unwrap();
+        a.all[i].cwd = "/home/u/evil\x1b]0;pwned\x07\x1b[2Jdir".into();
+        a.all[i].git_branch = "main\x1b[31m\u{202e}".into();
+        a.all[i].permission_mode = "plan\x1b[1m".into();
+        a.show_preview = true;
+        a.rebuild();
+        for grouped in [false, true] {
+            if grouped {
+                a.do_action(crate::app::Action::GroupByDir);
+            }
+            a.cursor = a
+                .view
+                .iter()
+                .position(|r| matches!(r, crate::app::Row::Item(j) if *j == i))
+                .unwrap();
+            let screen = render(&mut a, 140, 30);
+            let bad: Vec<&String> = screen
+                .iter()
+                .filter(|l| l.chars().any(|c| !crate::model::drawable(c)))
+                .collect();
+            assert!(bad.is_empty(), "grouped {grouped}: {bad:?}");
         }
     }
 
