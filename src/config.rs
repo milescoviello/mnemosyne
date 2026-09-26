@@ -62,7 +62,7 @@ fn d_true() -> bool {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Splash {
     #[serde(default = "d_true")]
     pub enabled: bool,
@@ -84,7 +84,7 @@ impl Default for Splash {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Update {
     #[serde(default = "d_true")]
     pub auto: bool,
@@ -101,7 +101,7 @@ impl Default for Update {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Start {
     pub mouse: bool,
     pub preview: bool,
@@ -119,7 +119,7 @@ impl Default for Start {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub ramp: Option<Vec<String>>,
     pub accent: Option<String>,
@@ -197,7 +197,10 @@ impl Config {
 
 type Usable = fn(&toml::Table, &str, &mut Vec<String>) -> toml::Table;
 
-/// The keys of `t` that `T` accepts on their own, with the rest reported.
+/// The keys of `t` that `T` accepts on their own, with the rest reported --
+/// a key none of them has too. Accepted and ignored, `accent` added under
+/// the last section, or `[update] automatic = false` for `auto`, was dropped
+/// without a word, the second leaving on the updates it meant to turn off.
 fn usable<T: serde::de::DeserializeOwned>(
     t: &toml::Table,
     at: &str,
@@ -253,6 +256,26 @@ pub fn parse_color(s: &str) -> Option<(u8, u8, u8)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_key_nothing_reads_is_said_rather_than_ignored() {
+        // `accent` added at the bottom of the example lands under the last
+        // section, where nothing reads it, and `[update] automatic = false`
+        // is not `auto`: both were dropped without a word, the second
+        // leaving the updates on that it was written to turn off.
+        let (_, problems) = Config::parse(
+            "colour = \"red\"\n[start]\nmouse = true\naccent = \"#ff0000\"\n[update]\nautomatic = false\n",
+        );
+        for key in ["colour", "start.accent", "update.automatic"] {
+            assert!(
+                problems.iter().any(|p| p.starts_with(key)),
+                "{key} not reported: {problems:?}"
+            );
+        }
+        let (c, problems) = Config::parse(EXAMPLE);
+        assert!(problems.is_empty(), "the example itself: {problems:?}");
+        assert!(c.start.mouse);
+    }
 
     #[test]
     fn the_example_config_parses_into_the_defaults_shape() {
