@@ -43,7 +43,8 @@ pub fn db_path() -> PathBuf {
 ///   10 a tool's result is left out of the text, list-shaped ones too
 ///   11 an IDE block before the first prompt no longer hides it
 ///   12 an escaped quote or backslash in a cwd is decoded
-pub const SCANNER_VERSION: u32 = 12;
+///   13 a line with half an emoji in it is read, not dropped
+pub const SCANNER_VERSION: u32 = 13;
 
 /// Every column the loader expects. Compared against what the database
 /// actually has, so drift is detected rather than assumed away.

@@ -93,7 +93,63 @@ fn raw_str(hay: &[u8], key: &str) -> Option<String> {
         return Some(String::from_utf8_lossy(&rest[..end]).into_owned());
     }
     // the value with its quotes, decoded the way JSON means it
-    serde_json::from_slice::<String>(&hay[i - 1..i + end + 1]).ok()
+    let quoted = &hay[i - 1..i + end + 1];
+    serde_json::from_slice::<String>(quoted)
+        .ok()
+        .or_else(|| serde_json::from_slice::<String>(&mend_surrogates(quoted)?).ok())
+}
+
+/// A transcript line as JSON.
+///
+/// JavaScript writes a string cut between the two halves of an emoji as a
+/// lone `\ud83d`, which is JSON to it and an error to serde -- and the whole
+/// line went with it: fifteen of Claude's replies here were missing from
+/// the viewer, and a title or first prompt with one in it was never read.
+/// Such an escape reads as U+FFFD instead. Only a line serde refused is
+/// looked at again, so the rest cost nothing.
+pub fn parse_line(line: &[u8]) -> Option<serde_json::Value> {
+    serde_json::from_slice(line)
+        .ok()
+        .or_else(|| serde_json::from_slice(&mend_surrogates(line)?).ok())
+}
+
+/// The line with every lone surrogate escape made `\ufffd`, or `None` if
+/// it has none.
+fn mend_surrogates(line: &[u8]) -> Option<Vec<u8>> {
+    let unit = |at: usize| -> Option<u16> {
+        let hex = line.get(at..at + 6)?;
+        if hex[0] != b'\\' || hex[1] != b'u' {
+            return None;
+        }
+        u16::from_str_radix(std::str::from_utf8(&hex[2..]).ok()?, 16).ok()
+    };
+    let (mut out, mut i, mut mended) = (Vec::with_capacity(line.len()), 0, false);
+    while i < line.len() {
+        if line[i] != b'\\' {
+            out.push(line[i]);
+            i += 1;
+            continue;
+        }
+        match unit(i) {
+            // a whole pair
+            Some(0xD800..=0xDBFF) if matches!(unit(i + 6), Some(0xDC00..=0xDFFF)) => {
+                out.extend_from_slice(&line[i..i + 12]);
+                i += 12;
+            }
+            Some(0xD800..=0xDFFF) => {
+                out.extend_from_slice(b"\\ufffd");
+                mended = true;
+                i += 6;
+            }
+            // any other escape, `\\` included, is two bytes or more that
+            // are copied as they are
+            _ => {
+                out.extend_from_slice(&line[i..(i + 2).min(line.len())]);
+                i += 2;
+            }
+        }
+    }
+    mended.then_some(out)
 }
 
 /// Pull a JSON number out of raw bytes. The key must match exactly, so
@@ -402,14 +458,14 @@ fn process_line(s: &mut Session, line: &[u8], text: &mut Option<&mut String>) {
             // A name given with `/rename`. Written again as the session goes
             // on, and a later one is a rename, so the last is the one.
             b"custom-title" => {
-                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) {
+                if let Some(v) = parse_line(line) {
                     if let Some(t) = v.get("customTitle").and_then(|x| x.as_str()) {
                         s.custom_title = squash(t, 160);
                     }
                 }
             }
             b"ai-title" => {
-                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) {
+                if let Some(v) = parse_line(line) {
                     if let Some(t) = v.get("aiTitle").and_then(|x| x.as_str()) {
                         if !t.trim().is_empty() {
                             s.ai_title = squash(t, 160);
@@ -418,7 +474,7 @@ fn process_line(s: &mut Session, line: &[u8], text: &mut Option<&mut String>) {
                 }
             }
             b"last-prompt" => {
-                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) {
+                if let Some(v) = parse_line(line) {
                     if let Some(t) = v.get("lastPrompt").and_then(|x| x.as_str()) {
                         if is_real_user_text(t) {
                             s.last_prompt = squash(t, 200);
@@ -479,7 +535,7 @@ fn process_line(s: &mut Session, line: &[u8], text: &mut Option<&mut String>) {
     if is_user {
         s.user_msgs += 1;
         if s.first_prompt.is_empty() && memmem::find(f, b"\"isMeta\":true").is_none() {
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) {
+            if let Some(v) = parse_line(line) {
                 if v.get("type").and_then(|t| t.as_str()) == Some("user") {
                     if let Some(c) = v.get("message").and_then(|m| m.get("content")) {
                         let t = content_text(c);
@@ -1092,6 +1148,16 @@ mod robustness_tests {
         }
         drop(f);
         scan(&path, false, None, None).unwrap()
+    }
+
+    #[test]
+    fn a_title_or_prompt_with_half_an_emoji_in_it_is_kept() {
+        let s = scan_lines(&[
+            r#"{"parentUuid":"p","message":{"role":"user","content":[{"type":"text","text":"fix the \ud83d button"}]},"cwd":"/w","type":"user"}"#,
+            r#"{"type":"ai-title","aiTitle":"The \ud83d button","sessionId":"s"}"#,
+        ]);
+        assert_eq!(s.first_prompt, "fix the \u{fffd} button");
+        assert_eq!(s.ai_title, "The \u{fffd} button");
     }
 
     #[test]

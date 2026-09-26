@@ -26,7 +26,7 @@ fn extract_turns(bytes: &[u8], drop_first_partial: bool) -> Vec<Turn> {
         if line.is_empty() {
             continue;
         }
-        let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) else {
+        let Some(v) = crate::scan::parse_line(line) else {
             continue;
         };
         if v.get("isMeta").and_then(|m| m.as_bool()) == Some(true) {
@@ -207,6 +207,22 @@ mod tests {
         format!(
             r#"{{"parentUuid":"p","message":{{"role":"assistant","content":[{{"type":"text","text":"{text}"}}]}},"type":"assistant"}}"#
         )
+    }
+
+    #[test]
+    fn a_reply_with_half_an_emoji_in_it_is_still_shown() {
+        // JavaScript writes a string cut between the halves of an emoji as
+        // a lone `\ud83d`. serde refuses it, and the whole reply was gone
+        // from the viewer: fifteen of Claude's, in the transcripts here.
+        let (_d, s) = write_transcript(&[
+            user("hello"),
+            asst(r"cut here \ud83d and a stray \ude00 too"),
+            asst(r"a whole one \ud83d\ude00 and an escaped \\ud83d"),
+        ]);
+        let t = tail_turns(&s, 8);
+        assert_eq!(t.len(), 3, "{t:?}");
+        assert_eq!(t[1].text, "cut here \u{fffd} and a stray \u{fffd} too");
+        assert_eq!(t[2].text, "a whole one 😀 and an escaped \\ud83d");
     }
 
     #[test]
