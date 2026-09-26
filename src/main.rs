@@ -260,6 +260,30 @@ fn flags_given(args: &[String]) -> Vec<&str> {
 }
 
 /// The argument after `flag`, unless that is itself a flag.
+/// A field of `--list` as TSV writes one: a tab, a newline or a carriage
+/// return as `\t`, `\n` or `\r`, a backslash doubled, any other control
+/// character as `\xHH`. Written as they were, a folder with a tab in its
+/// name split its row into another field, one with a newline into another
+/// row, and an escape went to the terminal of whoever asked. `--json` has
+/// every value exactly.
+fn tsv(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.contains(|c: char| c == '\\' || c.is_control()) {
+        return s.into();
+    }
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_control() => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.into()
+}
+
 fn value_of<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
     let i = args.iter().position(|a| a == flag)?;
     let v = args.get(i + 1)?.as_str();
@@ -775,9 +799,9 @@ fn main() -> Result<()> {
                         model::reltime(s.mtime),
                         model::pad_fit(&s.folder(), 24),
                         s.title(),
-                        s.path.to_string_lossy(),
-                        s.id,
-                        s.cwd
+                        tsv(&s.path.to_string_lossy()),
+                        tsv(&s.id),
+                        tsv(&s.cwd)
                     );
                 }
             }
@@ -1317,6 +1341,16 @@ mod arg_tests {
         let e = check_args(&args("--nosplash")).unwrap_err();
         assert!(e.contains("--nosplash"), "{e}");
         assert!(e.contains("--help"), "should point somewhere useful: {e}");
+    }
+
+    #[test]
+    fn a_list_field_cannot_break_its_row_or_reach_the_terminal() {
+        // A folder is named whatever it was named: a tab in one split its
+        // row into another field, a newline into another row, and an escape
+        // went to the terminal of whoever ran `--list`.
+        assert_eq!(super::tsv("/home/u/plain"), "/home/u/plain");
+        assert_eq!(super::tsv("/a\tb\nc\\d"), "/a\\tb\\nc\\\\d");
+        assert_eq!(super::tsv("e\x1b]0;x\x07\u{9b}"), "e\\x1b]0;x\\x07\\x9b");
     }
 
     #[test]

@@ -526,7 +526,7 @@ Handy from scripts, and from inside a Claude session that wants to find its own
 past work.
 
 ```sh
-mnemosyne --list                      # TSV of every session
+mnemosyne --list                      # TSV of every session; a tab or newline in a field is \t, \n
 mnemosyne --json                      # same, as JSON
 mnemosyne --search "connection reset" # which sessions discussed this
 mnemosyne --search Cargo.toml --search-mode file   # which sessions edited it
