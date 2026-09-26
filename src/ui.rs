@@ -1132,12 +1132,18 @@ fn draw_list(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
 /// The first row on screen, scrolled the way ratatui's list scrolls its
 /// one-line rows: from where it was, just far enough to keep the selected
 /// row in view.
+///
+/// But never so far that the screen has room left over below the last row
+/// while rows above the top are hidden, which ratatui's list allows. A
+/// filter that left three rows, the last of them under the cursor, drew
+/// that one and twenty blank lines, with the other two scrolled out of
+/// sight above; so did a terminal made taller.
 fn visible_from(offset: usize, selected: usize, len: usize, height: usize) -> usize {
     if len == 0 || height == 0 {
         return 0;
     }
     let selected = selected.min(len - 1);
-    let mut first = offset.min(len - 1);
+    let mut first = offset.min(len.saturating_sub(height));
     if selected >= first + height {
         first = selected + 1 - height;
     }
@@ -2475,10 +2481,9 @@ mod render_tests {
     }
 
     #[test]
-    fn drawing_only_what_shows_scrolls_as_the_whole_list_did() {
-        // ratatui's list, given every row, against the window worked out
-        // here, over a cursor wandering up and down and a list that shrinks.
-        use ratatui::widgets::{List, ListItem, ListState};
+    fn the_window_keeps_the_cursor_in_view_fills_the_screen_and_holds_still() {
+        // Over a cursor wandering up and down, a list that grows and
+        // shrinks, and a terminal that changes height.
         let mut seed: u64 = 7;
         let mut next = |n: usize| {
             seed = seed
@@ -2486,31 +2491,36 @@ mod render_tests {
                 .wrapping_add(1442695040888963407);
             (seed >> 33) as usize % n
         };
-        let (mut theirs, mut ours) = (ListState::default(), 0usize);
-        let mut len = 200;
-        let mut cursor = 0usize;
-        for step in 0..600 {
+        let (mut first, mut len, mut cursor) = (0usize, 200usize, 0usize);
+        for step in 0..2000 {
             match next(4) {
                 0 => cursor = cursor.saturating_sub(next(15)),
                 1 => cursor = (cursor + next(15)).min(len - 1),
                 2 => cursor = next(len),
                 _ => {
-                    len = 20 + next(200);
+                    len = 1 + next(200);
                     cursor = cursor.min(len - 1);
                 }
             }
-            let h = 5 + next(30) as u16;
-            let items: Vec<ListItem> = (0..len).map(|i| ListItem::new(i.to_string())).collect();
-            let mut term = Terminal::new(TestBackend::new(20, h)).unwrap();
-            theirs.select(Some(cursor));
-            term.draw(|f| f.render_stateful_widget(List::new(items), f.area(), &mut theirs))
-                .unwrap();
-            ours = visible_from(ours, cursor, len, h as usize);
-            assert_eq!(
-                ours,
-                theirs.offset(),
-                "step {step}: cursor {cursor} of {len}, height {h}"
+            let h = 1 + next(40);
+            let was = first;
+            first = visible_from(first, cursor, len, h);
+            let at = format!("step {step}: cursor {cursor} of {len}, height {h}, from {was}");
+            assert!(
+                first <= cursor && cursor < first + h,
+                "cursor out of view, {at}"
             );
+            // Rows past the end are not shown while rows before the top are
+            // hidden. ratatui's own list scrolls without this: a filter that
+            // left three rows, the last under the cursor, drew only that one.
+            assert!(
+                first <= len.saturating_sub(h),
+                "blank below, rows above: {at} -> {first}"
+            );
+            // and it does not move for nothing
+            if was <= len.saturating_sub(h) && was <= cursor && cursor < was + h {
+                assert_eq!(first, was, "moved for nothing, {at}");
+            }
         }
     }
 
