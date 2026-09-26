@@ -236,6 +236,11 @@ pub struct App {
     /// underneath an open prompt, and the note went on whatever row the
     /// cursor had landed on by then.
     prompt_for: Option<Vec<String>>,
+    /// The session the viewer or the tmux name prompt was opened over, which
+    /// is the one `current` means until it closes. A search that landed
+    /// underneath moved the cursor, and enter resumed a different session
+    /// from the one on the screen.
+    pinned: Option<std::path::PathBuf>,
     pub meta: Meta,
     pub live: LiveMap,
 
@@ -375,6 +380,7 @@ impl App {
             cursor: 0,
             selected: HashSet::new(),
             prompt_for: None,
+            pinned: None,
             meta,
             live,
             input_mode: InputMode::Normal,
@@ -925,6 +931,11 @@ impl App {
     }
 
     pub fn current_idx(&self) -> Option<usize> {
+        if let Some(p) = &self.pinned {
+            if let Some(i) = self.all.iter().position(|s| s.path == *p) {
+                return Some(i);
+            }
+        }
         match self.view.get(self.cursor)? {
             Row::Item(i) | Row::Sub(i) => Some(*i),
             _ => None,
@@ -1463,6 +1474,7 @@ impl App {
             }
         }
         self.pending_tmux = Some(target);
+        self.pinned = self.current().map(|s| s.path.clone());
         self.input.clear();
         self.input_mode = InputMode::TmuxName;
     }
@@ -1479,6 +1491,7 @@ impl App {
             return;
         };
         self.resume(target);
+        self.pinned = None;
     }
 
     /// The session resuming a row resumes: a subagent's is its parent's.
@@ -2362,9 +2375,20 @@ impl App {
             self.status = "nothing readable in this transcript".into();
             return;
         }
+        self.show_viewer(turns, more);
+    }
+
+    fn show_viewer(&mut self, turns: Vec<Turn>, more: bool) {
+        self.pinned = self.current().map(|s| s.path.clone());
         self.viewer = Some((turns, more));
         self.viewer_scroll = u16::MAX; // start at the end, then clamp on draw
         self.input_mode = InputMode::Viewer;
+    }
+
+    fn close_viewer(&mut self) {
+        self.viewer = None;
+        self.pinned = None;
+        self.input_mode = InputMode::Normal;
     }
 
     fn help_scroll_by(&mut self, delta: i32) {
@@ -2396,10 +2420,7 @@ impl App {
             match m.kind {
                 MouseEventKind::ScrollUp => self.viewer_scroll_by(-3),
                 MouseEventKind::ScrollDown => self.viewer_scroll_by(3),
-                MouseEventKind::Down(_) => {
-                    self.viewer = None;
-                    self.input_mode = InputMode::Normal;
-                }
+                MouseEventKind::Down(_) => self.close_viewer(),
                 _ => {}
             }
             return;
@@ -2559,10 +2580,7 @@ impl App {
             }
             InputMode::Viewer => {
                 match k.code {
-                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('v') => {
-                        self.viewer = None;
-                        self.input_mode = InputMode::Normal;
-                    }
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('v') => self.close_viewer(),
                     KeyCode::Up | KeyCode::Char('k') => self.viewer_scroll_by(-1),
                     KeyCode::Down | KeyCode::Char('j') => self.viewer_scroll_by(1),
                     KeyCode::PageUp => self.viewer_scroll_by(-(self.viewer_page as i32)),
@@ -2576,9 +2594,14 @@ impl App {
                     KeyCode::Home | KeyCode::Char('g') => self.viewer_scroll = 0,
                     KeyCode::End | KeyCode::Char('G') => self.viewer_scroll_by(i32::MAX / 2),
                     KeyCode::Enter => {
+                        // "↵ resume this one": the one being read, not the
+                        // sessions picked before it was opened.
                         self.viewer = None;
                         self.input_mode = InputMode::Normal;
+                        let picks = std::mem::take(&mut self.selected);
                         self.do_action(Action::Resume);
+                        self.selected = picks;
+                        self.pinned = None;
                     }
                     _ => {}
                 }
@@ -2648,6 +2671,7 @@ impl App {
                         // resume as well, rather than leaving one armed.
                         self.pending_tmux = None;
                         self.prompt_for = None;
+                        self.pinned = None;
                     }
                     KeyCode::Enter => match self.input_mode {
                         InputMode::TagAdd => self.commit_tag_add(),
@@ -4865,6 +4889,86 @@ mod logic_tests {
             model: None,
             under_wsx: by_wsx,
         }
+    }
+
+    /// What would be resumed: handed to the shell now, or on the way out.
+    fn handed_over(a: &App) -> Vec<String> {
+        let mut v: Vec<String> = a
+            .to_open
+            .iter()
+            .flat_map(|(_, t)| t.iter().map(|t| t.id.clone()))
+            .collect();
+        if let Some(Outcome::Resume { targets, .. }) = &a.outcome {
+            v.extend(targets.iter().map(|t| t.id.clone()));
+        }
+        v
+    }
+
+    /// A search's answer arriving, holding only `bbbbbbbb-2`.
+    fn search_lands_without_it(a: &mut App) {
+        a.deep = "thing".into();
+        a.deep_generation += 1;
+        a.deep_busy = true;
+        let mut hits = HashMap::new();
+        hits.insert("/p/bbbbbbbb-2.jsonl".to_string(), String::new());
+        a.deep_tx
+            .send(DeepResult {
+                generation: a.deep_generation,
+                hits,
+            })
+            .unwrap();
+        a.absorb_deep();
+    }
+
+    fn reading(a: &mut App) {
+        a.show_viewer(
+            vec![crate::preview::Turn {
+                role: "you",
+                text: "hi".into(),
+            }],
+            false,
+        );
+    }
+
+    #[test]
+    fn enter_in_the_viewer_resumes_the_one_being_read() {
+        // "↵ resume this one" resumed whatever was picked instead.
+        let mut a = app();
+        on(&mut a, "bbbbbbbb-2");
+        a.on_key(KeyEvent::from(KeyCode::Char(' ')));
+        on(&mut a, "cccccccc-3");
+        a.on_key(KeyEvent::from(KeyCode::Char(' ')));
+        on(&mut a, "dddddddd-4");
+        reading(&mut a);
+        a.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(handed_over(&a), vec!["dddddddd-4"]);
+    }
+
+    #[test]
+    fn a_search_landing_under_the_viewer_does_not_change_what_it_resumes() {
+        let mut a = app();
+        on(&mut a, "dddddddd-4");
+        reading(&mut a);
+        search_lands_without_it(&mut a);
+        assert_eq!(a.input_mode, InputMode::Viewer);
+        assert_eq!(
+            a.current().unwrap().id,
+            "dddddddd-4",
+            "the title changed too"
+        );
+        a.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(handed_over(&a), vec!["dddddddd-4"]);
+    }
+
+    #[test]
+    fn a_search_landing_under_the_tmux_name_prompt_does_not_change_it_either() {
+        let mut a = app();
+        on(&mut a, "dddddddd-4");
+        a.on_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+        assert_eq!(a.input_mode, InputMode::TmuxName);
+        search_lands_without_it(&mut a);
+        a.on_key(KeyEvent::from(KeyCode::Enter));
+        assert_eq!(handed_over(&a), vec!["dddddddd-4"]);
     }
 
     #[test]
