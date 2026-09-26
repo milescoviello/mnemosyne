@@ -124,10 +124,17 @@ impl Session {
     /// a grouped heading or the rail one set the window's title or cleared
     /// the screen. The folder itself, where resuming goes, is `cwd`.
     pub fn folder(&self) -> String {
-        clean(&match &self.wsx {
+        let f = match &self.wsx {
             Some(w) => format!("{}{}", crate::wsx::MARK, w.label()),
             None => short_cwd(&self.cwd),
-        })
+        };
+        // Built once more only when there is something to leave out: this
+        // is asked for every session whenever the list is grouped.
+        if f.chars().all(drawable) {
+            f
+        } else {
+            clean(&f)
+        }
     }
 
     /// The folder resuming it lands in, when that is not the one it ran in.
