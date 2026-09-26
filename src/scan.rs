@@ -217,7 +217,8 @@ pub fn is_real_user_text(t: &str) -> bool {
 /// counted when a column is measured but occupy no cell when drawn, so one
 /// bell in a title shifted every column after it by one. And an ESC in a
 /// title would be handed straight to the terminal, which is a transcript
-/// deciding what your screen does.
+/// deciding what your screen does. What would turn the row around goes too
+/// (see `model::drawable`).
 pub fn squash(s: &str, max: usize) -> String {
     let mut out = String::with_capacity(max.min(s.len()));
     // Counted as it goes, the joining spaces included: counting only after
@@ -230,7 +231,7 @@ pub fn squash(s: &str, max: usize) -> String {
             space = true;
             continue;
         }
-        if c.is_control() {
+        if !crate::model::drawable(c) {
             continue;
         }
         if space && n > 0 {
@@ -917,6 +918,18 @@ mod tests {
         assert_eq!(squash("a\x07b", 99), "ab");
         assert_eq!(squash("x\x1b[31mred", 99), "x[31mred");
         assert_eq!(squash("keep \u{2014} this", 99), "keep — this");
+    }
+
+    #[test]
+    fn squash_drops_what_would_turn_the_row_around() {
+        // A right-to-left override is not a control character, and a
+        // terminal that lays out bidirectional text -- Konsole does by
+        // default -- drew the rest of the row backwards from it.
+        assert_eq!(squash("a\u{202e}evil\u{202c} b", 99), "aevil b");
+        assert_eq!(squash("x\u{2067}y\u{2069}\u{200f}z", 99), "xyz");
+        assert_eq!(crate::model::fit("a\u{202e}bc", 9), "abc");
+        // and nothing a language needs
+        assert_eq!(squash("שלום \u{05d0} مرحبا", 99), "שלום \u{05d0} مرحبا");
     }
 
     #[test]

@@ -334,6 +334,18 @@ pub fn width(s: &str) -> usize {
     s.width()
 }
 
+/// Whether a character from a transcript may be drawn as it is.
+///
+/// Not a control character, and not one that tells the terminal which way
+/// the text runs: a terminal that lays out bidirectional text -- Konsole
+/// does by default -- drew the rest of a row backwards from a right-to-left
+/// override in a title. Hebrew and Arabic still run right to left on their
+/// own; these only force it.
+pub fn drawable(c: char) -> bool {
+    !c.is_control()
+        && !matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
 /// Clip to `w` display columns, ending in an ellipsis when it had to cut.
 ///
 /// Control characters are left out on the way. They occupy no cell, and
@@ -342,8 +354,8 @@ pub fn width(s: &str) -> usize {
 /// -- a folder is whatever its name is, escapes and all.
 pub fn fit(s: &str, w: usize) -> String {
     let clean: String;
-    let s = if s.contains(char::is_control) {
-        clean = s.chars().filter(|c| !c.is_control()).collect();
+    let s = if s.contains(|c| !drawable(c)) {
+        clean = s.chars().filter(|&c| drawable(c)).collect();
         clean.as_str()
     } else {
         s
