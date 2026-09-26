@@ -187,16 +187,20 @@ fn wrap_words(text: &str, wrap_at: usize) -> Vec<String> {
             // A character goes on the next line if it would not fit on
             // this one. Checked after adding it instead, a two-column
             // character one column short of the edge went one past it.
+            // What is drawn as one character is kept as one, and measured
+            // as one: a warning sign with the selector after it that makes
+            // it an emoji is two columns, though each alone measures one.
+            use unicode_segmentation::UnicodeSegmentation;
             let mut chunk = String::new();
             let mut used = 0usize;
-            for ch in word.chars() {
-                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                if used + cw > wrap_at && !chunk.is_empty() {
+            for g in word.graphemes(true) {
+                let gw = width(g);
+                if used + gw > wrap_at && !chunk.is_empty() {
                     out.push(std::mem::take(&mut chunk));
                     used = 0;
                 }
-                chunk.push(ch);
-                used += cw;
+                chunk.push_str(g);
+                used += gw;
             }
             if !chunk.is_empty() {
                 line = chunk;
@@ -2601,6 +2605,22 @@ mod render_tests {
             }
             for line in wrap_words(&format!("a{}", "語".repeat(15)), w) {
                 assert!(width(&line) <= w, "{w}: {line:?}");
+            }
+            // An emoji drawn as one with a selector after it is two columns,
+            // though each character alone measures one, and a flag is two
+            // characters and two columns; neither is cut in half either.
+            for s in [
+                "\u{26a0}\u{fe0f}".repeat(30),
+                "\u{1f1ef}\u{1f1f5}".repeat(20),
+            ] {
+                for line in wrap_words(&s, w) {
+                    assert!(
+                        width(&line) <= w.max(2),
+                        "{w}: {line:?} is {}",
+                        width(&line)
+                    );
+                    assert!(!line.starts_with('\u{fe0f}'), "{w}: {line:?}");
+                }
             }
         }
     }
