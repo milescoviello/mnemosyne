@@ -122,10 +122,14 @@ __mn_tmux_ensure() {
     # Already there, whatever it ended up called: attach rather than starting
     # a second client on the same transcript. tmux remembers the command each
     # pane was started with, so the chat is found by its session id and not by
-    # a name that is now yours to choose.
+    # a name that is now yours to choose -- told to claude any of the ways
+    # mnemosyne reads one: `--resume ID` alone missed `-r ID`, `--resume=ID`
+    # and `--session-id ID`, and a second claude went on the same transcript.
+    # A fork is a chat of its own.
     local have
     have="$(tmux list-panes -a -F '#{session_name}	#{pane_start_command}' 2>/dev/null \
-            | grep -F -- "--resume $sid" | head -1 | cut -f1)"
+            | grep -E -- "[[:space:]\"'](--resume|-r|--session-id)[\"']?[ =][\"']?$sid" \
+            | grep -vF -- '--fork-session' | head -1 | cut -f1)"
     if [ -n "$have" ]; then
         printf '%s\nrunning\n' "$have"
         return 0

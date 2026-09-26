@@ -244,6 +244,27 @@ run_shell() {
         skip "$shell_name: a tmux name that needs quoting" "tmux is not installed"
     fi
 
+    # --- found running however claude was told which chat it is
+    # The binary knows a pane started `-r ID`, `--resume=ID` or
+    # `--session-id ID` for the chat it is, and names it in the plan. The
+    # wrappers looked for `--resume ID` alone, took the name for somebody
+    # else's, and started a second claude on the same transcript.
+    if [ -n "$real_tmux" ]; then
+        local sid=026bcdb5-8d88-4ad7-9f23-58649bf4f353 form
+        for form in "-r $sid" "--resume=$sid" "--session-id $sid"; do
+            "$bin/tmux" kill-server 2>/dev/null
+            : > "$log"
+            "$bin/tmux" new-session -d -s work -c "$tmp/work-a" "claude $form"
+            wait_for "claude: $form" "$log"
+            write_plan "tmux\t$tmp/work-a\t$sid\t\tdefault\tt\twork\n"
+            : > "$log"
+            out=$("$runner" -c "$source_line; mn" 2>&1)
+            sleep 0.3
+            hasnt "$shell_name: one started \`claude ${form%%[ =]*}\` is not started twice" "claude:" "$(cat "$log")"
+        done
+        "$bin/tmux" kill-server 2>/dev/null
+    fi
+
     # --- nothing is drawn over the browser, and each window is said once
     # Window lines arrive while the browser is still on screen. Anything
     # printed then lands on top of it and vanishes with it -- which fish did

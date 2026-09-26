@@ -168,9 +168,13 @@ function __mn_tmux_ensure --description 'Make sure a tmux session exists for thi
     # Already there, whatever it ended up called: attach rather than starting
     # a second client on the same transcript. tmux remembers the command each
     # pane was started with, so the chat is found by its session id and not
-    # by a name that is now yours to choose.
+    # by a name that is now yours to choose -- told to claude any of the ways
+    # mnemosyne reads one: `--resume` alone missed `-r ID` and
+    # `--session-id ID`, and a second claude went on the same transcript. A
+    # fork is a chat of its own.
     set -l running (tmux list-panes -a -F '#{session_name}	#{pane_start_command}' 2>/dev/null \
-        | string match -r '^[^\t]+\t.*--resume[ =]'$sid'.*$' | head -1)
+        | string match -r '^[^\t]+\t.*[\s\x22\x27](--resume|-r|--session-id)[\x22\x27]?[ =][\x22\x27]?'$sid'.*$' \
+        | string match -v -- '*--fork-session*' | head -1)
     if test -n "$running"
         string split \t -- $running | head -1
         echo running
