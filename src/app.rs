@@ -312,7 +312,12 @@ pub struct App {
     /// Everything handed over during this run. They will be running moments
     /// from now and nothing else is watching, so they belong in the record
     /// of what was open -- which is what a reboot is put back from.
+    ///
+    /// Until the process table shows them running, that is: from then on it
+    /// says whether they still are, and one seen and then gone has closed.
     pub launched: Vec<ResumeTarget>,
+    /// Those of `launched` the process table has shown running.
+    launched_seen: HashSet<String>,
     /// Live wsx workspaces to hand back to wsx, which already runs their
     /// agent. Carried out by main between frames, like `to_open`.
     pub to_jump: Vec<crate::wsx::Jump>,
@@ -416,6 +421,7 @@ impl App {
             indexing: false,
             to_open: Vec::new(),
             launched: Vec::new(),
+            launched_seen: HashSet::new(),
             to_jump: Vec::new(),
             notes: Vec::new(),
             persist: true,
@@ -539,6 +545,42 @@ impl App {
             }
         }
         self.apply_wsx();
+        self.settle_launched();
+    }
+
+    /// Windows just opened from here, counted as open from now.
+    fn note_launched(&mut self, targets: &[ResumeTarget]) {
+        for t in targets {
+            // opened again after it closed: not seen yet, this time
+            self.launched_seen.remove(&t.id);
+        }
+        self.launched.extend(targets.iter().cloned());
+    }
+
+    /// Forget a window opened from here once it has been seen running and
+    /// has stopped. Kept, it was "just opened" for the rest of the run --
+    /// enter refused it long after it closed, and quitting recorded it as
+    /// open for the next reboot to put back. One never seen stays: it may be
+    /// running where the process table cannot tell.
+    fn settle_launched(&mut self) {
+        if !self.live.supported || self.launched.is_empty() {
+            return;
+        }
+        let running: HashSet<&str> = self
+            .all
+            .iter()
+            .filter(|s| s.live_exact || s.has_tmux)
+            .map(|s| s.id.as_str())
+            .collect();
+        let seen = &mut self.launched_seen;
+        self.launched.retain(|t| {
+            if running.contains(t.id.as_str()) {
+                seen.insert(t.id.clone());
+                true
+            } else {
+                !seen.contains(&t.id)
+            }
+        });
     }
 
     /// Name the wsx workspace each session ran in, once per folder.
@@ -1306,7 +1348,7 @@ impl App {
             .collect();
         // Same as any other window: hand them over and stay open, so the
         // list is still there when they appear.
-        self.launched.extend(targets.iter().cloned());
+        self.note_launched(&targets);
         // Each under its own generated name. The name typed for the last
         // `W` is still here, and every one of these went out under it --
         // `eft-work-2`, `eft-work-3` -- none of them the session you named.
@@ -1796,7 +1838,7 @@ impl App {
             } else {
                 format!("opening {what} in a new window")
             };
-            self.launched.extend(targets.iter().cloned());
+            self.note_launched(&targets);
             self.to_open.push((target, targets));
             self.selected.clear();
             self.rebuild();
@@ -4896,6 +4938,40 @@ mod logic_tests {
         a.input = "perf".into();
         a.commit_tag_filter();
         assert_eq!(a.session_count(), 1, "T perf found nothing");
+    }
+
+    #[test]
+    fn a_window_seen_running_and_then_closed_no_longer_counts_as_open() {
+        // Everything opened from the browser stayed "just opened" for the
+        // rest of its life: enter refused it long after its window closed,
+        // and quitting recorded it as open for the next reboot to reopen.
+        let mut a = app();
+        on(&mut a, "dddddddd-4");
+        a.do_action(Action::NewWindow);
+        running(
+            &mut a,
+            vec![claude(33, Some("dddddddd-4"), "/home/u", false)],
+        );
+        running(&mut a, vec![]);
+        assert!(
+            !a.launched.iter().any(|t| t.id == "dddddddd-4"),
+            "a window that closed still counts as open"
+        );
+        on(&mut a, "dddddddd-4");
+        a.do_action(Action::Resume);
+        assert!(!a.status.contains("already"), "{:?}", a.status);
+        // opened again, it counts again
+        a.do_action(Action::NewWindow);
+        running(&mut a, vec![]);
+        assert!(
+            a.launched.iter().any(|t| t.id == "dddddddd-4"),
+            "opened again"
+        );
+        // one the process table has not seen yet still counts
+        on(&mut a, "cccccccc-3");
+        a.do_action(Action::NewWindow);
+        running(&mut a, vec![]);
+        assert!(a.launched.iter().any(|t| t.id == "cccccccc-3"));
     }
 
     #[test]
