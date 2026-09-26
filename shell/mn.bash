@@ -196,6 +196,13 @@ mn() {
     local mine=() fwd=() no_bypass=0 a take_value=0 report=0
     for a in "$@"; do
         if [ "$take_value" = 1 ]; then mine+=("$a"); take_value=0; continue; fi
+        # `--restore` may stand alone, meaning five: the word after it is its
+        # count only when it is not an option. Taken regardless, `--ask` went
+        # as the count, and every session came back with its prompts off.
+        if [ "$take_value" = count ]; then
+            take_value=0
+            case "$a" in -*) ;; *) mine+=("$a"); continue ;; esac
+        fi
         # Every flag mnemosyne has, sorted by what it does. The tags are read
         # by a test that holds these lists to the binary's own (src/main.rs);
         # a list kept by hand here fell behind, and `mn --stats` opened the
@@ -204,7 +211,8 @@ mn() {
             -h|--help|-V|--version|--list|--json|--refresh|--stats|--update|--check-update|--write-config) mine+=("$a"); report=1 ;;  # flags: report
             --search) mine+=("$a"); report=1; take_value=1 ;;  # flags: report value
             --reopen|--subagents|--no-splash|--no-mouse|--no-model|--no-update) mine+=("$a") ;;  # flags: plan
-            --search-mode|--restore) mine+=("$a"); take_value=1 ;;  # flags: plan value
+            --search-mode) mine+=("$a"); take_value=1 ;;  # flags: plan value
+            --restore) mine+=("$a"); take_value=count ;;  # flags: plan value
             --ask|--no-bypass) no_bypass=1 ;;
             *) fwd+=("$a") ;;
         esac

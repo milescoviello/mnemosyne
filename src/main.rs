@@ -180,8 +180,14 @@ fn check_args(args: &[String]) -> std::result::Result<(), String> {
             // A query may look like anything, `--update` included; a mode
             // never looks like a flag. `--restore` alone means five.
             let next = args.get(i + 1);
+            // Alone, `--restore` means five, and what follows is an option
+            // of its own. Taken for the count, it was skipped unchecked:
+            // `--restore --no-such-flag` exited 0.
+            if a == "--restore" && next.is_none_or(|v| v.starts_with('-')) {
+                i += 1;
+                continue;
+            }
             let missing = match a {
-                "--restore" => false,
                 "--search-mode" => next.is_none_or(|v| v.starts_with("--")),
                 _ => next.is_none(),
             };
@@ -1302,6 +1308,10 @@ mod arg_tests {
         assert!(check_args(&args("--restore 12")).is_ok());
         // omitted entirely is fine; it has a default
         assert!(check_args(&args("--restore")).is_ok());
+        // and then what follows is an option of its own, checked as one:
+        // taken for the count, a mistyped option was skipped, and exit 0
+        assert!(check_args(&args("--restore --no-such-flag")).is_err());
+        assert!(check_args(&args("--restore --no-splash")).is_ok());
     }
 
     #[test]

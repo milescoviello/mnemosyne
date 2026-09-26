@@ -11,10 +11,20 @@ function mn --description 'Browse, search, tag and resume Claude Code sessions (
     set -l take_value 0
     set -l report 0
     for a in $argv
-        if test $take_value -eq 1
+        if test "$take_value" = 1
             set -a mine $a
             set take_value 0
             continue
+        end
+        # `--restore` may stand alone, meaning five: the word after it is its
+        # count only when it is not an option. Taken regardless, `--ask` went
+        # as the count, and every session came back with its prompts off.
+        if test "$take_value" = count
+            set take_value 0
+            if not string match -q -- '-*' $a
+                set -a mine $a
+                continue
+            end
         end
         # Every flag mnemosyne has, sorted by what it does. The tags are read
         # by a test that holds these lists to the binary's own (src/main.rs);
@@ -30,9 +40,12 @@ function mn --description 'Browse, search, tag and resume Claude Code sessions (
                 set take_value 1
             case --reopen --subagents --no-splash --no-mouse --no-model --no-update  # flags: plan
                 set -a mine $a
-            case --search-mode --restore  # flags: plan value
+            case --search-mode  # flags: plan value
                 set -a mine $a
                 set take_value 1
+            case --restore  # flags: plan value
+                set -a mine $a
+                set take_value count
             case --ask --no-bypass
                 set no_bypass 1
             case '*'

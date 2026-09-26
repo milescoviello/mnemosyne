@@ -339,6 +339,21 @@ run_shell() {
     seen=$(cat "$log")
     hasnt "$shell_name: --ask refuses to skip permissions" "--dangerously-skip-permissions" "$seen"
 
+    # `--restore` may stand alone. Its count was whatever word came next,
+    # so `--restore --ask` sent `--ask` as the count and every session came
+    # back with its permission prompts switched off.
+    write_plan "$BYPASS_PLAN"
+    : > "$log"
+    "$runner" -c "$source_line; mn --restore --ask" >/dev/null 2>&1
+    seen=$(grep '^claude-args:' "$log")
+    has "$shell_name: --restore --ask resumes" "[--resume]" "$seen"
+    hasnt "$shell_name: and still refuses to skip permissions" "[--dangerously-skip-permissions]" "$seen"
+    : > "$log"
+    : > "$log.mn"
+    "$runner" -c "$source_line; mn --restore 3 --ask" >/dev/null 2>&1
+    has "$shell_name: a count after --restore is still its count" "[--restore] [3]" "$(cat "$log.mn")"
+    hasnt "$shell_name: with --ask after it too" "[--dangerously-skip-permissions]" "$(grep '^claude-args:' "$log")"
+
     # --- one name, several chats
     if [ -n "$real_tmux" ]; then
         "$bin/tmux" kill-server 2>/dev/null
