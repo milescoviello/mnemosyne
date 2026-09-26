@@ -589,6 +589,7 @@ fn main() -> Result<()> {
         app.set_wsx(wsx::load());
         let mut out = std::io::stdout().lock();
         let mut opened = 0;
+        let mut put_back: Vec<workspace::Entry> = Vec::new();
         for s in most_recent_first(&app) {
             if opened >= n {
                 break;
@@ -615,10 +616,28 @@ fn main() -> Result<()> {
                 "",
             )? {
                 opened += 1;
+                put_back.push(workspace::Entry {
+                    id: s.id.clone(),
+                    cwd: s.cwd.clone(),
+                    model: model.to_string(),
+                    perms: s.permission_mode.clone(),
+                    title: s.title().to_string(),
+                });
             }
         }
         if opened == 0 {
             eprintln!("nothing to restore — no recent sessions whose folder is still there and that are not running");
+        }
+        // Open from now, as `--reopen` records them: left out, a second
+        // reboot before the next browser offered none of them.
+        if !put_back.is_empty() {
+            let mut open = app.open_sessions();
+            for e in put_back {
+                if !open.iter().any(|o| o.id == e.id) {
+                    open.push(e);
+                }
+            }
+            workspace::record(open, live::detection_supported());
         }
         return Ok(());
     }

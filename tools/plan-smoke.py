@@ -214,6 +214,29 @@ def main():
     check("and it is said once the browser has closed",
           leave != -1 and said > leave, f"left at {leave}, said at {said}")
 
+    # --restore is a reopen too, and says so in the record of what was open,
+    # as --reopen does. It did not: a second reboot before the next browser
+    # offered none of what it had put back.
+    import json
+    env = dict(os.environ, HOME=home, MNEMOSYNE_NO_UPDATE="1")
+    listed = subprocess.run([binary, "--list"], env=env, capture_output=True, text=True).stdout
+    for line in listed.splitlines():
+        f = line.split("\t")
+        if len(f) >= 4 and f[3].startswith(home):
+            os.makedirs(f[3], exist_ok=True)
+    ws = os.path.join(home, ".claude/mnemosyne/workspace.json")
+    if os.path.exists(ws):
+        os.remove(ws)
+    out = subprocess.run([binary, "--restore", "2"], env=env, capture_output=True, text=True).stdout
+    opened = [l.split("\t")[2] for l in out.splitlines() if l.startswith("wintmux\t")]
+    check("--restore 2 opens two", len(opened) == 2, repr(out[:200]))
+    try:
+        recorded = [e["id"] for e in json.load(open(ws))["current"]["sessions"]]
+    except (OSError, KeyError, ValueError):
+        recorded = []
+    check("and records them as open", bool(opened) and all(i in recorded for i in opened),
+          f"opened {opened}, recorded {recorded}")
+
     print()
     if failures:
         print(f"{len(failures)} failed")
