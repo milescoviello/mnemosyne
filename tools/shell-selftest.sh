@@ -258,6 +258,20 @@ run_shell() {
     out=$(PATH="$lim" MN_TERMINAL= "$runner" -c "$source_line; mn --restore" 2>&1)
     has "$shell_name: with no tmux and no terminal, it says so" "no terminal emulator found" "$out"
 
+    # --- a folder that is there but cannot be entered
+    # fish printed the cd error and resumed where you were anyway.
+    mkdir -p "$tmp/locked"
+    chmod 000 "$tmp/locked"
+    write_plan "here\t$tmp/locked\t026bcdb5-8d88-4ad7-9f23-58649bf4f353\t\tdefault\tlocked\n"
+    : > "$log"
+    (cd "$tmp" && "$runner" -c "$source_line; mn" >/dev/null 2>&1)
+    if [ "$(id -u)" = 0 ]; then
+        skip "$shell_name: a folder it cannot enter is not resumed from elsewhere" "root enters anything"
+    else
+        hasnt "$shell_name: a folder it cannot enter is not resumed from elsewhere" "claude:" "$(cat "$log")"
+    fi
+    chmod 755 "$tmp/locked"
+
     # --- found running however claude was told which chat it is
     # The binary knows a pane started `-r ID`, `--resume=ID` or
     # `--session-id ID` for the chat it is, and names it in the plan. The

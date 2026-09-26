@@ -129,7 +129,9 @@ function mn --description 'Browse, search, tag and resume Claude Code sessions (
     set -l ttl $p[6]
     set -l extra (__mn_perms "$p[5]" $no_bypass $fwd)
     if test -d "$cwd"
-        cd "$cwd"
+        # There but not enterable: resuming from here instead is a session
+        # in the wrong folder, which bash refuses too.
+        cd "$cwd"; or return 1
     else
         echo "folder is gone: $cwd — resuming from "(pwd)
     end
