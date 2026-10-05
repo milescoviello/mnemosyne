@@ -291,8 +291,10 @@ the conversation and in any form — `installation` finds "install". Put
 words in quotes to find them together, as a phrase.
 
 The best answer comes first, and `v` on it opens the conversation at the
-match rather than at its end, with what was searched for drawn out in gold;
-`n` and `N` step to the next match and back.
+match rather than at its end; `n` and `N` step to the next match and back.
+What was searched for is drawn out in lapis wherever it shows — in the
+excerpt beside the list, the viewer, and a title that says it — and so are
+the letters `/` matched.
 
 Content search runs against a full-text index, so it answers in
 **milliseconds** rather than re-reading the corpus:
@@ -775,6 +777,12 @@ a search the viewer now opens on the turn with the most of the words, draws
 them out, and steps through the rest with `n` and `N`. A long turn keeps
 its start and the stretch around the match. When the match is not in the
 part it reads — the last 8 MB, earlier on, or in a subagent — it says so.
+
+**What matched is drawn out.** Neither search showed why a row was there:
+`/` kept a title without marking the letters it matched, and the excerpt
+beside the list did not mark the words. Both are drawn now in lapis, the
+colour of your own ink, since they are the words you typed. Gold would have
+read as a fresh session's age, which is drawn in it.
 
 **What the index cannot tokenise is looked for as written.** The index
 splits text on anything that is not a letter or a digit, and does not split

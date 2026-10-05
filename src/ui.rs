@@ -532,11 +532,56 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
     );
 }
 
-/// What a search found, drawn out of the text around it.
+/// What a search found, drawn out of the text around it: in lapis, which
+/// is your own ink, since these are the words you asked for. Gold would
+/// read as a fresh session's age, which is drawn in it.
 fn found_style() -> Style {
-    Style::default()
-        .fg(rgb(art::ramp(1.0)))
-        .add_modifier(Modifier::BOLD)
+    Style::default().fg(th().tag).add_modifier(Modifier::BOLD)
+}
+
+/// The characters of `text`, by position, that `find` finds.
+fn char_spots(text: &str, find: &crate::search::Spotter) -> Vec<usize> {
+    let mut out = Vec::new();
+    for s in find.spots(text) {
+        let first = text[..s.start].chars().count();
+        let n = text[s.start..s.end].chars().count();
+        out.extend(first..first + n);
+    }
+    out
+}
+
+/// `text` in `style`, with the characters at `at` drawn out.
+fn lit(text: String, at: &[usize], style: Style) -> Vec<Span<'static>> {
+    // Drawn out over the row's own style, so the cursor's bold stays.
+    if at.is_empty() {
+        return vec![Span::styled(text, style)];
+    }
+    let marked: std::collections::HashSet<usize> = at.iter().copied().collect();
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut run = String::new();
+    let mut on = false;
+    for (i, ch) in text.chars().enumerate() {
+        let here = marked.contains(&i);
+        if here != on && !run.is_empty() {
+            let st = if on {
+                style.patch(found_style())
+            } else {
+                style
+            };
+            out.push(Span::styled(std::mem::take(&mut run), st));
+        }
+        on = here;
+        run.push(ch);
+    }
+    if !run.is_empty() {
+        let st = if on {
+            style.patch(found_style())
+        } else {
+            style
+        };
+        out.push(Span::styled(run, st));
+    }
+    out
 }
 
 /// `text` in `style`, with what `find` finds in it drawn out.
@@ -948,6 +993,17 @@ fn draw_colheads(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
 fn draw_list(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
     let width = area.width as usize;
     let cursor = app.cursor;
+    // What a search in the conversations found, drawn out where a title
+    // says it too.
+    let deep = app
+        .deep_hits
+        .as_ref()
+        .map(|_| crate::search::Spotter::new(app.deep.trim()))
+        .filter(|f| !f.is_empty());
+    // and what the `/` filter matched
+    let filter = crate::filter::Filter::new(app.fuzzy.trim());
+    let mut matcher = nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT);
+    let mut marks = |field, text: &str| filter.positions(field, text, &mut matcher);
 
     // Where the subagent cell sits, so a click on ⌁ can expand it: after
     // the age, and after the folder and its space when there is a folder.
@@ -1109,7 +1165,10 @@ fn draw_list(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                         Style::default().fg(rgb(art::ramp(0.45 + d * 0.2)))
                     };
                     sp.push(Span::styled(mark, Style::default().fg(th().chrome)));
-                    sp.push(Span::styled(format!("{} ", pad_fit(&folder, room)), fstyle));
+                    let shown = pad_fit(&folder, room);
+                    let at = marks(crate::filter::Field::Folder, &shown);
+                    sp.extend(lit(shown, &at, fstyle));
+                    sp.push(Span::styled(" ", fstyle));
                 }
 
                 if c.sub == 0 {
@@ -1127,8 +1186,14 @@ fn draw_list(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                     sp.push(Span::raw(" ".repeat(c.sub)));
                 }
 
-                sp.push(Span::styled(
-                    pad_fit(s.title(), c.title),
+                let shown = pad_fit(s.title(), c.title);
+                let mut at = marks(crate::filter::Field::Title, &shown);
+                if let Some(find) = &deep {
+                    at.extend(char_spots(&shown, find));
+                }
+                sp.extend(lit(
+                    shown,
+                    &at,
                     Style::default()
                         .fg(if s.is_live() { th().bright } else { th().text })
                         .add_modifier(if row_i == cursor {
@@ -1148,13 +1213,25 @@ fn draw_list(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                         cue = "";
                     }
                     sp.push(Span::raw("  "));
+                    // Where `/` matched only past the end of the column,
+                    // it starts a little before the match instead: the row
+                    // was there for a word it did not show.
+                    let room = c.preview.saturating_sub(2);
+                    let from = marks(crate::filter::Field::Prompt, cue)
+                        .first()
+                        .copied()
+                        .filter(|&at| at + 4 > room)
+                        .map(|at| at.saturating_sub(room / 3));
+                    let cue = match from {
+                        Some(skip) => format!("…{}", cue.chars().skip(skip).collect::<String>()),
+                        None => cue.to_string(),
+                    };
                     // Padded by columns, not characters: a prompt in CJK
                     // came out half as wide as its column, and every
                     // column after it moved left to fill the gap.
-                    sp.push(Span::styled(
-                        pad_fit(&fit(cue, c.preview.saturating_sub(2)), c.preview),
-                        Style::default().fg(th().chrome),
-                    ));
+                    let shown = pad_fit(&fit(&cue, room), c.preview);
+                    let at = marks(crate::filter::Field::Prompt, &shown);
+                    sp.extend(lit(shown, &at, Style::default().fg(th().chrome)));
                 }
                 if c.model > 0 {
                     sp.push(Span::styled(
@@ -1407,11 +1484,14 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
     const BODY: usize = 3;
     let mut body_lines: Vec<Line> = Vec::new();
     if let Some(sn) = snippet {
-        body_lines.push(Line::from(vec![
-            Span::raw(" ".repeat(MARGIN)),
-            label("match"),
-            Span::styled(fit(&sn, body), Style::default().fg(th().bright)),
-        ]));
+        let find = crate::search::Spotter::new(app.deep.trim());
+        let mut line = vec![Span::raw(" ".repeat(MARGIN)), label("match")];
+        line.extend(marked(
+            fit(&sn, body),
+            Some(&find),
+            Style::default().fg(th().text),
+        ));
+        body_lines.push(Line::from(line));
     }
     if show_cue && !s.last_prompt.is_empty() {
         body_lines.push(Line::from(vec![
@@ -2003,6 +2083,73 @@ mod render_tests {
                 out
             })
             .collect()
+    }
+
+    /// The text drawn out as a match on screen, run by run.
+    fn drawn_out(app: &mut App, w: u16, h: u16) -> Vec<String> {
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| draw(f, app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let gold = found_style().fg;
+        let mut runs = Vec::new();
+        for y in 0..h {
+            let mut run = String::new();
+            for x in 0..w {
+                let cell = &buf[(x, y)];
+                if Some(cell.fg) == gold && cell.modifier.contains(Modifier::BOLD) {
+                    run.push_str(cell.symbol());
+                } else if !run.is_empty() {
+                    runs.push(std::mem::take(&mut run));
+                }
+            }
+            if !run.is_empty() {
+                runs.push(run);
+            }
+        }
+        runs
+    }
+
+    #[test]
+    fn the_letters_a_filter_matched_are_drawn_out() {
+        let mut a = app();
+        a.fuzzy = "paging".into();
+        a.rebuild();
+        let runs = drawn_out(&mut a, 160, 20);
+        assert!(runs.contains(&"paging".to_string()), "{runs:?}");
+        // in the folder too
+        a.fuzzy = "daffodil".into();
+        a.rebuild();
+        let runs = drawn_out(&mut a, 160, 20);
+        assert!(runs.iter().any(|r| r == "daffodil"), "{runs:?}");
+        // and in the last prompt, brought into view if it was past the edge
+        let i = a.all.iter().position(|s| s.id == "dddddddd-4").unwrap();
+        a.all[i].last_prompt =
+            "go on with the rest of what we were doing and then look at the zpool".into();
+        a.fuzzy = "zpool".into();
+        a.rebuild();
+        let runs = drawn_out(&mut a, 160, 20);
+        assert!(runs.iter().any(|r| r == "zpool"), "{runs:?}");
+        // and nothing at all without a filter
+        a.fuzzy.clear();
+        a.rebuild();
+        assert!(drawn_out(&mut a, 160, 20).is_empty());
+    }
+
+    #[test]
+    fn what_a_search_found_is_drawn_out_beside_the_list() {
+        let mut a = app();
+        a.deep = "degraded zpool".into();
+        let mut hits = std::collections::HashMap::new();
+        let path = a.current().unwrap().path.to_string_lossy().to_string();
+        hits.insert(
+            path,
+            crate::search::Hit::new("…the zpool on the nas is degraded again…".into()),
+        );
+        a.deep_hits = Some(hits);
+        a.rebuild();
+        let runs = drawn_out(&mut a, 160, 30);
+        assert!(runs.contains(&"zpool".to_string()), "{runs:?}");
+        assert!(runs.contains(&"degraded".to_string()), "{runs:?}");
     }
 
     /// Sizes worth caring about, from silly to wide.

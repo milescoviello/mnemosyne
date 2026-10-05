@@ -127,6 +127,28 @@ impl Filter {
         }
         Some(total)
     }
+
+    /// Which characters of `text` the filter matched, by position, to draw
+    /// them out. Asked of the text as it is drawn, cut to its column, so
+    /// what is marked is what is there.
+    pub fn positions(&self, field: Field, text: &str, m: &mut Matcher) -> Vec<usize> {
+        if self.words.is_empty() {
+            return Vec::new();
+        }
+        let mut buf = Vec::new();
+        let mut idx = Vec::new();
+        let mut out: Vec<u32> = Vec::new();
+        for w in self.words.iter().filter(|w| !w.atom.negative) {
+            if w.found(field, Utf32Str::new(text, &mut buf), m, &mut idx)
+                .is_some()
+            {
+                out.extend(idx.iter().copied());
+            }
+        }
+        out.sort_unstable();
+        out.dedup();
+        out.into_iter().map(|i| i as usize).collect()
+    }
 }
 
 impl Word {
@@ -304,6 +326,13 @@ mod tests {
         let t = [(Field::Title, "Make the decision about CI runners")];
         assert!(finds("ci", &t));
         assert!(!finds("ci", &[(Field::Title, "A specific decision")]));
+        // and the place it starts is what is drawn out
+        let at = Filter::new("ci").positions(
+            Field::Title,
+            "Make the decision about CI runners",
+            &mut Matcher::new(Config::DEFAULT),
+        );
+        assert_eq!(at, vec![24, 25]);
     }
 
     #[test]
