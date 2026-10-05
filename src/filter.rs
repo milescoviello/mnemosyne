@@ -111,7 +111,7 @@ impl Filter {
                 if text.is_empty() {
                     continue;
                 }
-                let hay = Utf32Str::new(text, &mut buf);
+                let hay = chars(text, &mut buf);
                 if let Some(s) = w.found(field, hay, m, &mut idx) {
                     let s = s as u32 * field.weight();
                     best = Some(best.map_or(s, |b| b.max(s)));
@@ -139,9 +139,7 @@ impl Filter {
         let mut idx = Vec::new();
         let mut out: Vec<u32> = Vec::new();
         for w in self.words.iter().filter(|w| !w.atom.negative) {
-            if w.found(field, Utf32Str::new(text, &mut buf), m, &mut idx)
-                .is_some()
-            {
+            if w.found(field, chars(text, &mut buf), m, &mut idx).is_some() {
                 out.extend(idx.iter().copied());
             }
         }
@@ -225,6 +223,22 @@ impl Word {
         idx.clear();
         None
     }
+}
+
+/// `text` as the matcher reads it, one character to a position.
+///
+/// nucleo's own conversion counts grapheme clusters, and where those all
+/// begin with ASCII but the text is not ASCII -- an accent written as its
+/// own mark -- it counts bytes. The list draws by character, so a title
+/// with an emoji or an accent in it had the letters after it marked one or
+/// two places along: `⚙️ zpool rebuild` marked " zpoo".
+fn chars<'a>(text: &'a str, buf: &'a mut Vec<char>) -> Utf32Str<'a> {
+    if text.is_ascii() {
+        return Utf32Str::Ascii(text.as_bytes());
+    }
+    buf.clear();
+    buf.extend(text.chars());
+    Utf32Str::Unicode(buf)
 }
 
 /// Whether the matched letters leave out no more than half as many again.
@@ -333,6 +347,22 @@ mod tests {
             &mut Matcher::new(Config::DEFAULT),
         );
         assert_eq!(at, vec![24, 25]);
+    }
+
+    #[test]
+    fn what_is_marked_is_counted_by_character() {
+        let at = |q: &str, t: &str| -> String {
+            let f = Filter::new(q);
+            let marks = f.positions(Field::Title, t, &mut Matcher::new(Config::DEFAULT));
+            t.chars()
+                .enumerate()
+                .filter(|(i, _)| marks.contains(i))
+                .map(|(_, c)| c)
+                .collect()
+        };
+        assert_eq!(at("zpool", "⚙\u{fe0f} zpool rebuild"), "zpool");
+        assert_eq!(at("zpool", "e\u{301}te zpool"), "zpool");
+        assert_eq!(at("zpool", "👨\u{200d}👩\u{200d}👧 zpool"), "zpool");
     }
 
     #[test]
