@@ -290,6 +290,10 @@ Several words find the sessions that have every one of them, anywhere in
 the conversation and in any form — `installation` finds "install". Put
 words in quotes to find them together, as a phrase.
 
+The best answer comes first, and `v` on it opens the conversation at the
+match rather than at its end, with what was searched for drawn out in gold;
+`n` and `N` step to the next match and back.
+
 Content search runs against a full-text index, so it answers in
 **milliseconds** rather than re-reading the corpus:
 
@@ -763,6 +767,14 @@ session with every word, the ones with some of them are listed instead, the
 most of them first, and the status line says that is what they are:
 `no session has every word of “…” — 12 have some`. `--search` says it on
 stderr.
+
+**The viewer goes to the match.** A session found by what was said in it
+opened at its end, and the match was somewhere above, to be scrolled for by
+eye — past the 700 characters a long turn is cut to, not there at all. Over
+a search the viewer now opens on the turn with the most of the words, draws
+them out, and steps through the rest with `n` and `N`. A long turn keeps
+its start and the stretch around the match. When the match is not in the
+part it reads — the last 8 MB, earlier on, or in a subagent — it says so.
 
 **What the index cannot tokenise is looked for as written.** The index
 splits text on anything that is not a letter or a digit, and does not split

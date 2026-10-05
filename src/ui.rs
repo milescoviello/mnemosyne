@@ -355,10 +355,16 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
             && t.split_whitespace()
                 .all(|w| w.starts_with('[') && w.ends_with(']'))
     };
+    // The line each turn starts on, so a match can be scrolled to.
+    let mut turn_line: Vec<usize> = vec![0; turns.len()];
+    let find = app.viewer_find.clone();
     let mut i = 0;
     while i < turns.len() {
         if only_tools(&turns[i].text) {
             let start = i;
+            for l in turn_line.iter_mut().skip(start) {
+                *l = lines.len();
+            }
             let mut names: Vec<String> = Vec::new();
             while i < turns.len() && only_tools(&turns[i].text) {
                 for w in turns[i].text.split_whitespace() {
@@ -389,9 +395,10 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
             continue;
         }
         let t = &turns[i];
+        turn_line[i] = lines.len();
         let (label, colour) = speaker(t.role);
         for (n, chunk) in wrap_words(&t.text, body_w).into_iter().enumerate() {
-            lines.push(Line::from(vec![
+            let mut spans = vec![
                 Span::raw(" ".repeat(MARGIN)),
                 if n == 0 {
                     Span::styled(
@@ -401,8 +408,9 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     Span::raw("        ")
                 },
-                Span::styled(chunk, Style::default().fg(th().text)),
-            ]));
+            ];
+            spans.extend(marked(chunk, find.as_ref(), Style::default().fg(th().text)));
+            lines.push(Line::from(spans));
         }
         lines.push(Line::raw(""));
         i += 1;
@@ -416,11 +424,22 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
     // sixteen columns is 93,600 lines, recorded as 28,064, and the viewer
     // opened part way and could never reach the end. It opens at the end,
     // so the newest are the ones to keep.
+    let mut dropped = 0;
     if lines.len() > u16::MAX as usize {
-        lines.drain(..lines.len() - u16::MAX as usize);
+        dropped = lines.len() - u16::MAX as usize;
+        lines.drain(..dropped);
     }
     app.viewer_height = lines.len() as u16;
     app.viewer_page = page;
+    // A match to go to, with the line before it for a little context.
+    if let Some(t) = app.viewer_focus.take() {
+        let at = turn_line
+            .get(t)
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(dropped);
+        app.viewer_scroll = at.saturating_sub(1).min(u16::MAX as usize) as u16;
+    }
     if app.viewer_scroll > app.viewer_height.saturating_sub(page.max(1)) {
         app.viewer_scroll = app.viewer_height.saturating_sub(page.max(1));
     }
@@ -469,26 +488,82 @@ fn draw_viewer(f: &mut Frame, app: &mut App, area: Rect) {
     let k = |t: &'static str| Span::styled(t, Style::default().fg(rgb(art::ramp(0.85))));
     let d = |t: &'static str| Span::styled(t, Style::default().fg(th().chrome));
     f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::raw(" ".repeat(MARGIN)),
-            k("↑↓"),
-            d(" scroll   "),
-            k("↵"),
-            d(if app.enter_jumps().is_some() {
-                " switch to it in wsx   "
-            } else {
-                " resume this one   "
-            }),
-            k("esc"),
-            d(" back   "),
-            Span::styled(
+        Paragraph::new(Line::from(
+            vec![
+                Span::raw(" ".repeat(MARGIN)),
+                k("↑↓"),
+                d(" scroll   "),
+                k("↵"),
+                d(if app.enter_jumps().is_some() {
+                    " switch to it in wsx   "
+                } else {
+                    " resume this one   "
+                }),
+                k("esc"),
+                d(" back   "),
+            ]
+            .into_iter()
+            .chain(
+                (!app.viewer_marks.is_empty())
+                    .then(|| {
+                        [
+                            k("n N"),
+                            Span::styled(
+                                format!(
+                                    " match {} of {}   ",
+                                    app.viewer_mark + 1,
+                                    app.viewer_marks.len()
+                                ),
+                                Style::default().fg(th().chrome),
+                            ),
+                        ]
+                    })
+                    .into_iter()
+                    .flatten(),
+            )
+            .chain([Span::styled(
                 format!("{} turns · {pct}%", turns.len()),
                 Style::default().fg(th().chrome),
-            ),
-        ]))
+            )])
+            .collect::<Vec<_>>(),
+        ))
         .block(Block::default().style(Style::default().bg(th().panel))),
         head[2],
     );
+}
+
+/// What a search found, drawn out of the text around it.
+fn found_style() -> Style {
+    Style::default()
+        .fg(rgb(art::ramp(1.0)))
+        .add_modifier(Modifier::BOLD)
+}
+
+/// `text` in `style`, with what `find` finds in it drawn out.
+fn marked(text: String, find: Option<&crate::search::Spotter>, style: Style) -> Vec<Span<'static>> {
+    let spots = find.map(|f| f.spots(&text)).unwrap_or_default();
+    if spots.is_empty() {
+        return vec![Span::styled(text, style)];
+    }
+    let mut out = Vec::new();
+    let mut at = 0;
+    for s in spots {
+        if s.start < at {
+            continue;
+        }
+        if s.start > at {
+            out.push(Span::styled(text[at..s.start].to_string(), style));
+        }
+        out.push(Span::styled(
+            text[s.start..s.end].to_string(),
+            found_style(),
+        ));
+        at = s.end;
+    }
+    if at < text.len() {
+        out.push(Span::styled(text[at..].to_string(), style));
+    }
+    out
 }
 
 /// The offer to put back what a reboot took away.
@@ -1569,6 +1644,7 @@ fn guide() -> Vec<H> {
         Head("opening one"),
         Key("enter", "", "resume it: cd to its folder and pick up where you left off"),
         Key("v", "", "read it first, without resuming or changing it"),
+        Say("Opened after a search, it goes to the match; n and N step through the rest."),
         Key("ctrl+t", "", "resume inside tmux, attaching if a session is already waiting"),
         Key("ctrl+n", "alt+enter", "resume in a new terminal window"),
         Key("W", "ctrl+shift+t", "both: a new terminal window with tmux inside it"),
@@ -1667,6 +1743,7 @@ fn keys() -> Vec<H> {
             "",
             "search mode: content · file touched · tool used · everything",
         ),
+        Key("n N", "", "in the viewer: the next or the previous match"),
         Gap,
         Head("marking"),
         Key("f", "", "favourite"),
@@ -2362,6 +2439,63 @@ mod render_tests {
         for w in 1..=14 {
             let _ = render(&mut a, w, 12);
         }
+    }
+
+    #[test]
+    fn the_viewer_scrolls_to_the_match_and_says_which_it_is() {
+        let mut a = app();
+        a.deep = "zpool".into();
+        a.viewer_find = Some(crate::search::Spotter::new("zpool"));
+        let turns = (0..80)
+            .map(|i| crate::preview::Turn {
+                role: if i % 2 == 0 { "you" } else { "claude" },
+                text: match i {
+                    20 => "the zpool is degraded".into(),
+                    60 => "zpool status again".into(),
+                    _ => format!("turn {i:03}"),
+                },
+            })
+            .collect();
+        a.show_viewer(turns, false);
+        let rows = render(&mut a, 100, 20);
+        assert!(
+            rows.iter().any(|r| r.contains("zpool is degraded")),
+            "{rows:#?}"
+        );
+        assert!(rows.iter().any(|r| r.contains("match 1 of 2")), "{rows:#?}");
+        a.on_key(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Char('n'),
+        ));
+        let rows = render(&mut a, 100, 20);
+        assert!(
+            rows.iter().any(|r| r.contains("zpool status again")),
+            "{rows:#?}"
+        );
+        assert!(rows.iter().any(|r| r.contains("match 2 of 2")));
+        // scrolling by hand afterwards is not undone by the next draw
+        a.on_key(crossterm::event::KeyEvent::from(
+            crossterm::event::KeyCode::Up,
+        ));
+        let at = a.viewer_scroll;
+        let _ = render(&mut a, 100, 20);
+        assert_eq!(a.viewer_scroll, at);
+    }
+
+    #[test]
+    fn what_was_searched_for_is_drawn_out() {
+        let f = crate::search::Spotter::new("pool");
+        let plain = Style::default().fg(th().text);
+        let spans = marked("the pooling of a spool".into(), Some(&f), plain);
+        let words: Vec<(&str, bool)> = spans
+            .iter()
+            .map(|s| (s.content.as_ref(), s.style == found_style()))
+            .collect();
+        assert_eq!(
+            words,
+            vec![("the ", false), ("pooling", true), (" of a spool", false)]
+        );
+        // nothing to find, nothing changed
+        assert_eq!(marked("plain".into(), None, plain).len(), 1);
     }
 
     #[test]

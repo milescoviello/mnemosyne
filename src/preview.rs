@@ -16,7 +16,29 @@ pub struct Turn {
 
 const TAIL_BYTES: u64 = 512 * 1024;
 
-fn extract_turns(bytes: &[u8], drop_first_partial: bool) -> Vec<Turn> {
+/// A turn as it is shown: its first 700 characters -- or, when what was
+/// searched for is only further on, the start of it and the stretch around
+/// that, so the viewer has the match to show.
+fn shown(full: &str, find: Option<&crate::search::Spotter>) -> String {
+    let text = crate::scan::squash(full, 700);
+    let Some(find) = find.filter(|f| !f.is_empty()) else {
+        return text;
+    };
+    if find.count(&text) > 0 || find.count(full) == 0 {
+        return text;
+    }
+    format!(
+        "{} {}",
+        crate::scan::squash(full, 300),
+        crate::search::excerpt_by(full, find)
+    )
+}
+
+fn extract_turns(
+    bytes: &[u8],
+    drop_first_partial: bool,
+    find: Option<&crate::search::Spotter>,
+) -> Vec<Turn> {
     let mut turns = Vec::new();
     let mut iter = bytes.split(|b| *b == b'\n');
     if drop_first_partial {
@@ -40,8 +62,7 @@ fn extract_turns(bytes: &[u8], drop_first_partial: bool) -> Vec<Turn> {
         let Some(c) = v.get("message").and_then(|m| m.get("content")) else {
             continue;
         };
-        let text = flatten(c, role == "you");
-        let text = crate::scan::squash(&text, 700);
+        let text = shown(&flatten(c, role == "you"), find);
         // Only what you sent is checked for being machinery: Claude's reply
         // is never an injected envelope, and one that happens to open with
         // `<` is still what it said.
@@ -102,7 +123,14 @@ fn current_len(f: &std::fs::File, s: &Session) -> u64 {
 /// you almost always want the recent end of it. Returns whether anything was
 /// left off, so the viewer can say so instead of pretending it showed you
 /// everything.
-pub fn load_turns(s: &Session, max_bytes: u64, want: usize) -> (Vec<Turn>, bool) {
+///
+/// A turn too long to show whole keeps in sight what `find` finds in it.
+pub fn load_turns(
+    s: &Session,
+    max_bytes: u64,
+    want: usize,
+    find: Option<&crate::search::Spotter>,
+) -> (Vec<Turn>, bool) {
     let Ok(mut f) = std::fs::File::open(&s.path) else {
         return (Vec::new(), false);
     };
@@ -123,7 +151,7 @@ pub fn load_turns(s: &Session, max_bytes: u64, want: usize) -> (Vec<Turn>, bool)
     {
         return (Vec::new(), partial);
     }
-    let mut turns = extract_turns(&buf, partial);
+    let mut turns = extract_turns(&buf, partial, find);
     let clipped = turns.len() > want;
     if clipped {
         let n = turns.len();
@@ -154,7 +182,7 @@ pub fn tail_turns(s: &Session, want: usize) -> Vec<Turn> {
     {
         return Vec::new();
     }
-    let mut turns = extract_turns(&buf, partial);
+    let mut turns = extract_turns(&buf, partial, None);
     // A single enormous final message can swallow the whole window; if we found
     // nothing at all, fall back to a bigger bite before giving up.
     if turns.is_empty() && start > 0 {
@@ -164,7 +192,7 @@ pub fn tail_turns(s: &Session, want: usize) -> Vec<Turn> {
             if (&mut f).take(bigger + 4096).read_to_end(&mut buf).is_ok() {
                 // Partial only if it starts part way in: from the top of
                 // the file, the first line is a whole one.
-                turns = extract_turns(&buf, len > bigger);
+                turns = extract_turns(&buf, len > bigger, None);
             }
         }
     }
@@ -210,6 +238,32 @@ mod tests {
     }
 
     #[test]
+    fn a_long_turn_keeps_in_sight_what_was_searched_for() {
+        // Turns are cut at 700 characters, and a match past that was not
+        // there to be shown.
+        let long = format!(
+            "{} the zpool is degraded {}",
+            "a ".repeat(600),
+            "b ".repeat(300)
+        );
+        let (_d, s) = write_transcript(&[user(&long), asst("ok")]);
+        let find = crate::search::Spotter::new("zpool");
+        let (turns, _) = load_turns(&s, 1 << 20, 10, Some(&find));
+        assert!(
+            turns[0].text.contains("zpool is degraded"),
+            "{:?}",
+            turns[0].text
+        );
+        assert!(
+            turns[0].text.starts_with("a a"),
+            "and still begins at the start"
+        );
+        // without a search it is cut as it was
+        let (turns, _) = load_turns(&s, 1 << 20, 10, None);
+        assert!(!turns[0].text.contains("zpool"));
+    }
+
+    #[test]
     fn a_reply_with_half_an_emoji_in_it_is_still_shown() {
         // JavaScript writes a string cut between the halves of an emoji as
         // a lone `\ud83d`. serde refuses it, and the whole reply was gone
@@ -232,7 +286,7 @@ mod tests {
         let t = tail_turns(&s, 8);
         assert_eq!(t.len(), 2, "{t:?}");
         assert_eq!(t[0].text, "why does this fail");
-        assert_eq!(load_turns(&s, 1 << 20, 8).0.len(), 2);
+        assert_eq!(load_turns(&s, 1 << 20, 8, None).0.len(), 2);
     }
 
     #[test]
@@ -262,7 +316,7 @@ mod tests {
             "the newest question"
         );
         assert_eq!(
-            load_turns(&s, 256 << 10, 8).0.last().unwrap().text,
+            load_turns(&s, 256 << 10, 8, None).0.last().unwrap().text,
             "the newest question"
         );
     }
@@ -345,17 +399,17 @@ mod tests {
             ..Default::default()
         };
         assert!(tail_turns(&s, 8).is_empty());
-        assert_eq!(load_turns(&s, 1 << 20, 10).0.len(), 0);
+        assert_eq!(load_turns(&s, 1 << 20, 10, None).0.len(), 0);
     }
 
     #[test]
     fn load_turns_reports_when_it_left_something_out() {
         let many: Vec<String> = (0..40).map(|i| user(&format!("line {i}"))).collect();
         let (_d, s) = write_transcript(&many);
-        let (turns, more) = load_turns(&s, 1 << 20, 10);
+        let (turns, more) = load_turns(&s, 1 << 20, 10, None);
         assert_eq!(turns.len(), 10);
         assert!(more, "it clipped, so it must say so");
-        let (all, more) = load_turns(&s, 1 << 20, 500);
+        let (all, more) = load_turns(&s, 1 << 20, 500, None);
         assert_eq!(all.len(), 40);
         assert!(!more, "nothing was left out");
     }
@@ -364,7 +418,7 @@ mod tests {
     fn a_tiny_byte_budget_still_returns_something_readable() {
         let many: Vec<String> = (0..200).map(|i| user(&format!("line {i}"))).collect();
         let (_d, s) = write_transcript(&many);
-        let (turns, more) = load_turns(&s, 2048, 500);
+        let (turns, more) = load_turns(&s, 2048, 500, None);
         assert!(!turns.is_empty(), "the tail should still parse");
         assert!(more, "reading only the tail means there was more");
         assert!(turns.last().unwrap().text.contains("199"));

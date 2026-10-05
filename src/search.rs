@@ -659,9 +659,14 @@ pub fn session_scores<'a>(
 /// appears in every transcript. Cutting the window out of the stored text
 /// does the same job for the whole corpus in under a second.
 pub fn excerpt(text: &str, needle: &str) -> String {
+    excerpt_by(text, &Spotter::new(needle))
+}
+
+/// An excerpt of `text` around where `spotter` finds the most.
+pub fn excerpt_by(text: &str, spotter: &Spotter) -> String {
     const PAD: usize = 90;
     let hay = text.as_bytes();
-    let at = best_spot(hay, &spot_needles(needle));
+    let at = spotter.best(text);
     let Some(at) = at else {
         // Nothing of the query is in the text: a prefix match on a longer
         // word. The opening line still says what the session was about.
@@ -725,66 +730,125 @@ fn spot_needles(needle: &str) -> Vec<Vec<String>> {
     out
 }
 
-/// Where in `hay` to centre an excerpt: the stretch holding the most of the
-/// terms, the earliest of those that hold as many.
-///
-/// The first mention of the first word was where it went, and with several
-/// words that was usually somewhere only that one word was: "zfs snapshot"
-/// showed a line about zfs and nothing about a snapshot.
-fn best_spot(hay: &[u8], terms: &[Vec<String>]) -> Option<usize> {
-    const SPAN: usize = 150;
-    const MOST: usize = 4096;
-    let mut marks: Vec<(usize, usize)> = Vec::new();
-    for (t, ways) in terms.iter().enumerate() {
-        let mut at: Vec<usize> = Vec::new();
-        for w in ways {
-            let mut from = 0;
-            while at.len() < MOST {
-                let Some(rel) = find_ci(&hay[from..], w.as_bytes()) else {
-                    break;
-                };
-                at.push(from + rel);
-                from += rel + 1;
-                if from >= hay.len() {
-                    break;
+/// Where a query's terms are in a text: what an excerpt is cut around, and
+/// what the viewer goes to and draws out.
+#[derive(Clone, Debug, Default)]
+pub struct Spotter {
+    terms: Vec<Vec<String>>,
+}
+
+/// One place a term was found: its bytes, and which term it was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Spot {
+    pub start: usize,
+    pub end: usize,
+    pub term: usize,
+}
+
+impl Spotter {
+    pub fn new(query: &str) -> Spotter {
+        Spotter {
+            terms: spot_needles(query),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.terms.is_empty()
+    }
+
+    /// Every place in `text` a term is, in order. A word is marked to its
+    /// end, since the index matched the word: `pool` marks all of
+    /// "pooling".
+    pub fn spots(&self, text: &str) -> Vec<Spot> {
+        const MOST: usize = 4096;
+        let hay = text.as_bytes();
+        let mut out: Vec<Spot> = Vec::new();
+        for (t, ways) in self.terms.iter().enumerate() {
+            let mut at: Vec<(usize, usize)> = Vec::new();
+            for w in ways {
+                let mut from = 0;
+                while at.len() < MOST && from < hay.len() {
+                    let Some(rel) = find_ci(&hay[from..], w.as_bytes()) else {
+                        break;
+                    };
+                    at.push((from + rel, from + rel + w.len()));
+                    from += rel + 1;
                 }
             }
-        }
-        // Where a word starts, as the index matched it -- "pool", not
-        // "spool" -- unless it never does, as in Japanese.
-        let starts: Vec<usize> = at
-            .iter()
-            .copied()
-            .filter(|&p| p == 0 || !hay[p - 1].is_ascii_alphanumeric())
-            .collect();
-        let at = if starts.is_empty() { at } else { starts };
-        marks.extend(at.into_iter().map(|p| (p, t)));
-    }
-    marks.sort_unstable();
-    marks.dedup();
-    let (&(first, _), _) = marks.split_first()?;
-    let mut held = vec![0usize; terms.len()];
-    let (mut distinct, mut lo) = (0usize, 0usize);
-    let mut best = (0usize, first, first);
-    for hi in 0..marks.len() {
-        let (p, t) = marks[hi];
-        if held[t] == 0 {
-            distinct += 1;
-        }
-        held[t] += 1;
-        while marks[lo].0 + SPAN < p {
-            let t0 = marks[lo].1;
-            held[t0] -= 1;
-            if held[t0] == 0 {
-                distinct -= 1;
+            // Where a word starts, as the index matched it -- "pool", not
+            // "spool" -- unless it never does, as in Japanese.
+            let starts = |&&(p, _): &&(usize, usize)| p == 0 || !hay[p - 1].is_ascii_alphanumeric();
+            let any_start = at.iter().any(|p| starts(&p));
+            for (p, e) in at {
+                if any_start && !starts(&&(p, e)) {
+                    continue;
+                }
+                // Only ASCII is folded, so a match begins and ends where
+                // a character does; and carries on to the end of its word.
+                let word_end = text[e..]
+                    .char_indices()
+                    .find(|(_, c)| !c.is_alphanumeric())
+                    .map_or(text.len(), |(i, _)| e + i);
+                out.push(Spot {
+                    start: p,
+                    end: word_end,
+                    term: t,
+                });
             }
-            lo += 1;
         }
-        if distinct > best.0 {
-            best = (distinct, marks[lo].0, p);
-        }
+        out.sort_unstable();
+        out.dedup_by(|b, a| a.start == b.start);
+        out
     }
-    Some((best.1 + best.2) / 2)
+
+    /// Where to centre an excerpt: the stretch holding the most of the
+    /// terms, the earliest of those that hold as many.
+    ///
+    /// The first mention of the first word was where it went, and with
+    /// several words that was usually somewhere only that one word was:
+    /// "zfs snapshot" showed a line about zfs and nothing about a snapshot.
+    pub fn best(&self, text: &str) -> Option<usize> {
+        let (_, from, to) = self.densest(&self.spots(text))?;
+        Some((from + to) / 2)
+    }
+
+    /// How many of the terms `text` has.
+    pub fn count(&self, text: &str) -> usize {
+        let mut seen = vec![false; self.terms.len()];
+        for s in self.spots(text) {
+            seen[s.term] = true;
+        }
+        seen.iter().filter(|s| **s).count()
+    }
+
+    fn densest(&self, spots: &[Spot]) -> Option<(usize, usize, usize)> {
+        const SPAN: usize = 150;
+        let first = spots.first()?.start;
+        let mut held = vec![0usize; self.terms.len()];
+        let (mut distinct, mut lo) = (0usize, 0usize);
+        let mut best = (0usize, first, first);
+        for hi in 0..spots.len() {
+            let Spot {
+                start: p, term: t, ..
+            } = spots[hi];
+            if held[t] == 0 {
+                distinct += 1;
+            }
+            held[t] += 1;
+            while spots[lo].start + SPAN < p {
+                let t0 = spots[lo].term;
+                held[t0] -= 1;
+                if held[t0] == 0 {
+                    distinct -= 1;
+                }
+                lo += 1;
+            }
+            if distinct > best.0 {
+                best = (distinct, spots[lo].start, p);
+            }
+        }
+        Some(best)
+    }
 }
 
 /// Scan one file for every group of needles, returning a readable hit.

@@ -276,6 +276,15 @@ pub struct App {
     /// Conversation loaded for the viewer, with a flag for "there was more".
     pub viewer: Option<(Vec<Turn>, bool)>,
     pub viewer_scroll: u16,
+    /// What the viewer finds and draws out: the search it was opened over.
+    pub viewer_find: Option<search::Spotter>,
+    /// The turns it found something in, in order, and which of them it
+    /// went to last.
+    pub viewer_marks: Vec<usize>,
+    pub viewer_mark: usize,
+    /// A turn to bring into view at the next draw, which alone knows where
+    /// it falls once the conversation is wrapped to the screen.
+    pub viewer_focus: Option<usize>,
     /// Total wrapped height of the viewer, filled in by the renderer so
     /// scrolling can stop at the bottom instead of running off into blank.
     pub viewer_height: u16,
@@ -413,6 +422,10 @@ impl App {
             help_rows: 0,
             viewer: None,
             viewer_scroll: 0,
+            viewer_find: None,
+            viewer_marks: Vec::new(),
+            viewer_mark: 0,
+            viewer_focus: None,
             viewer_height: 0,
             viewer_page: 0,
             status: String::new(),
@@ -2380,25 +2393,76 @@ impl App {
     /// Load the current session's conversation for reading.
     fn open_viewer(&mut self) {
         let Some(i) = self.current_idx() else { return };
+        // Opened over a search, it finds what was searched for: a session
+        // found by what was said in it opened at its end, and the match was
+        // somewhere above, to be scrolled for by eye.
+        // Not a file search: a path is in what a tool was given, which the
+        // viewer does not show, and it would say the match was not there.
+        let find = self
+            .deep_hits
+            .as_ref()
+            .filter(|_| self.deep_mode != search::Mode::File)
+            .map(|_| search::Spotter::new(self.deep.trim()))
+            .filter(|f| !f.is_empty());
         // 8 MB covers almost every session whole; the biggest here is 400 MB,
         // where the recent end is what you want anyway.
-        let (turns, more) = preview::load_turns(&self.all[i], 8 << 20, 400);
+        let (turns, more) = preview::load_turns(&self.all[i], 8 << 20, 400, find.as_ref());
         if turns.is_empty() {
             self.status = "nothing readable in this transcript".into();
             return;
         }
+        self.viewer_find = find;
         self.show_viewer(turns, more);
     }
 
-    fn show_viewer(&mut self, turns: Vec<Turn>, more: bool) {
+    pub(crate) fn show_viewer(&mut self, turns: Vec<Turn>, more: bool) {
         self.pinned = self.current().map(|s| s.path.clone());
-        self.viewer = Some((turns, more));
         self.viewer_scroll = u16::MAX; // start at the end, then clamp on draw
+        self.viewer_marks.clear();
+        self.viewer_focus = None;
+        if let Some(find) = &self.viewer_find {
+            let held: Vec<(usize, usize)> = turns
+                .iter()
+                .enumerate()
+                .map(|(i, t)| (i, find.count(&t.text)))
+                .filter(|(_, n)| *n > 0)
+                .collect();
+            self.viewer_marks = held.iter().map(|(i, _)| *i).collect();
+            // To the turn with the most of the words, the first of those,
+            // as the excerpt beside the list does.
+            let most = held.iter().map(|(_, n)| *n).max().unwrap_or(0);
+            self.viewer_mark = held.iter().position(|(_, n)| *n == most).unwrap_or(0);
+            self.viewer_focus = self.viewer_marks.get(self.viewer_mark).copied();
+            if self.viewer_marks.is_empty() {
+                self.status = format!(
+                    "“{}” is not in what the viewer shows: earlier on, or in a subagent",
+                    self.deep.trim()
+                );
+            }
+        }
+        self.viewer = Some((turns, more));
         self.input_mode = InputMode::Viewer;
+    }
+
+    /// Go to the next turn with a match in it, or back to the one before.
+    fn viewer_next(&mut self, back: bool) {
+        let n = self.viewer_marks.len();
+        if n == 0 {
+            return;
+        }
+        self.viewer_mark = if back {
+            (self.viewer_mark + n - 1) % n
+        } else {
+            (self.viewer_mark + 1) % n
+        };
+        self.viewer_focus = Some(self.viewer_marks[self.viewer_mark]);
     }
 
     fn close_viewer(&mut self) {
         self.viewer = None;
+        self.viewer_find = None;
+        self.viewer_marks.clear();
+        self.viewer_focus = None;
         self.pinned = None;
         self.input_mode = InputMode::Normal;
     }
@@ -2603,6 +2667,8 @@ impl App {
                     KeyCode::Char('d') if ctrl => {
                         self.viewer_scroll_by(self.viewer_page as i32 / 2)
                     }
+                    KeyCode::Char('n') => self.viewer_next(false),
+                    KeyCode::Char('N') => self.viewer_next(true),
                     KeyCode::Home | KeyCode::Char('g') => self.viewer_scroll = 0,
                     KeyCode::End | KeyCode::Char('G') => self.viewer_scroll_by(i32::MAX / 2),
                     KeyCode::Enter => {
@@ -5150,6 +5216,97 @@ mod logic_tests {
             }],
             false,
         );
+    }
+
+    /// A session whose transcript is on disk, with `turns` said in it.
+    fn on_disk(a: &mut App, id: &str, turns: &[&str]) -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join(format!("{id}.jsonl"));
+        let lines: Vec<String> = turns
+            .iter()
+            .enumerate()
+            .map(|(n, t)| {
+                let role = if n % 2 == 0 { "user" } else { "assistant" };
+                let t = serde_json::to_string(t).unwrap();
+                format!(
+                    r#"{{"parentUuid":"p","message":{{"role":"{role}","content":[{{"type":"text","text":{t}}}]}},"type":"{role}"}}"#
+                )
+            })
+            .collect();
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let i = a.all.iter().position(|s| s.id == id).unwrap();
+        a.all[i].path = path;
+        a.all[i].size = std::fs::metadata(&a.all[i].path).unwrap().len();
+        d
+    }
+
+    #[test]
+    fn the_viewer_opened_over_a_search_goes_to_what_was_found() {
+        // It opened at the end, and the match was somewhere above it, to be
+        // scrolled for by eye.
+        let mut a = app();
+        let _d = on_disk(
+            &mut a,
+            "dddddddd-4",
+            &[
+                "the pool is degraded",
+                "checking it",
+                "is the zfs snapshot from monday still there?",
+                "yes",
+                "and the zfs scrub?",
+                "clean",
+            ],
+        );
+        a.deep = "zfs snapshot".into();
+        a.deep_hits = Some(HashMap::new());
+        on(&mut a, "dddddddd-4");
+        a.do_action(Action::View);
+        assert_eq!(a.input_mode, InputMode::Viewer);
+        assert_eq!(a.viewer_marks, vec![2, 4], "every turn with a word in it");
+        // the one with both words, not the first with either
+        assert_eq!(a.viewer_focus, Some(2));
+        a.on_key(KeyEvent::from(KeyCode::Char('n')));
+        assert_eq!(a.viewer_focus, Some(4));
+        a.on_key(KeyEvent::from(KeyCode::Char('n')));
+        assert_eq!(a.viewer_focus, Some(2), "round to the first again");
+        a.on_key(KeyEvent::from(KeyCode::Char('N')));
+        assert_eq!(a.viewer_focus, Some(4));
+        // and closing it forgets them
+        a.on_key(KeyEvent::from(KeyCode::Esc));
+        assert!(a.viewer_marks.is_empty() && a.viewer_find.is_none());
+    }
+
+    #[test]
+    fn the_viewer_says_when_the_match_is_not_in_what_it_shows() {
+        let mut a = app();
+        let _d = on_disk(&mut a, "dddddddd-4", &["hello", "hi"]);
+        a.deep = "zpool".into();
+        a.deep_hits = Some(HashMap::new());
+        on(&mut a, "dddddddd-4");
+        a.do_action(Action::View);
+        assert_eq!(a.input_mode, InputMode::Viewer);
+        assert!(
+            a.status.contains("not in what the viewer shows"),
+            "{}",
+            a.status
+        );
+        // nor after a file search, whose paths it never shows
+        a.on_key(KeyEvent::from(KeyCode::Esc));
+        a.deep_mode = search::Mode::File;
+        a.status.clear();
+        a.do_action(Action::View);
+        assert!(
+            a.viewer_find.is_none() && a.status.is_empty(),
+            "{}",
+            a.status
+        );
+        a.deep_mode = search::Mode::Content;
+        // without a search, it opens as it always did
+        a.on_key(KeyEvent::from(KeyCode::Esc));
+        a.deep_hits = None;
+        a.status.clear();
+        a.do_action(Action::View);
+        assert!(a.viewer_find.is_none() && a.status.is_empty());
     }
 
     #[test]
