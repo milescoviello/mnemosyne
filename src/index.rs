@@ -484,19 +484,30 @@ impl Index {
         Ok(())
     }
 
-    /// Paths whose conversation matches, with a readable excerpt.
+    /// Paths whose conversation matches, each with how well: FTS5's bm25,
+    /// turned so that more is better.
     ///
     /// The caller passes an already-escaped FTS5 expression.
     /// Deliberately does not build excerpts. `snippet()` has to re-locate the
     /// match inside every hit, which for a common word over a thousand
     /// documents cost seconds — slower than the brute scan it replaced. The
     /// excerpt for the row you are actually looking at is fetched on demand.
-    pub fn search_text(&self, expr: &str) -> Result<Vec<String>> {
+    pub fn search_text(&self, expr: &str) -> Result<Vec<(String, f64)>> {
         let mut st = self
             .conn
-            .prepare("SELECT path FROM body WHERE body MATCH ?1")?;
-        let rows = st.query_map([expr], |r| r.get::<_, String>(0))?;
+            .prepare("SELECT path, bm25(body) FROM body WHERE body MATCH ?1")?;
+        let rows = st.query_map([expr], |r| {
+            Ok((r.get::<_, String>(0)?, -r.get::<_, f64>(1)?))
+        })?;
         Ok(rows.flatten().collect())
+    }
+
+    /// Just the paths that match, best first.
+    #[cfg(test)]
+    pub fn search_paths(&self, expr: &str) -> Result<Vec<String>> {
+        let mut found = self.search_text(expr)?;
+        found.sort_by(|a, b| b.1.total_cmp(&a.1));
+        Ok(found.into_iter().map(|(p, _)| p).collect())
     }
 
     /// Paths whose indexed prose contains every one of `terms` as written,
@@ -511,7 +522,7 @@ impl Index {
         &self,
         terms: &[Vec<String>],
         query: &str,
-    ) -> Result<HashMap<String, String>> {
+    ) -> Result<crate::search::Hits> {
         // Each row lowercased into one buffer and searched with memmem, as
         // the scan does: twice as fast as a case-insensitive search over it.
         let finders: Vec<Vec<memchr::memmem::Finder>> = terms
@@ -535,11 +546,28 @@ impl Index {
             let text = r.get_ref(1)?.as_str()?;
             low.clear();
             low.extend(text.bytes().map(|b| b.to_ascii_lowercase()));
-            if finders
-                .iter()
-                .all(|ways| ways.iter().any(|f| f.find(&low).is_some()))
-            {
-                out.insert(r.get(0)?, crate::search::excerpt(text, query));
+            // How often each term is said, damped: a session that keeps
+            // coming back to it is likelier to be about it, but not ten
+            // times likelier for ten times the mentions.
+            let mut score = 0.0;
+            let mut all = true;
+            for ways in &finders {
+                let n: usize = ways
+                    .iter()
+                    .map(|f| f.find_iter(&low).take(1000).count())
+                    .sum();
+                if n == 0 {
+                    all = false;
+                    break;
+                }
+                score += (1.0 + n as f64).ln();
+            }
+            if all {
+                let hit = crate::search::Hit {
+                    excerpt: crate::search::excerpt(text, query),
+                    score,
+                };
+                out.insert(r.get(0)?, hit);
             }
         }
         Ok(out)
@@ -1059,10 +1087,10 @@ mod tests {
 
         assert_eq!(idx.text_rows().unwrap(), 1, "the old row was left behind");
         assert!(
-            idx.search_text("\"first\"*").unwrap().is_empty(),
+            idx.search_paths("\"first\"*").unwrap().is_empty(),
             "replaced text is still findable"
         );
-        assert_eq!(idx.search_text("\"second\"*").unwrap().len(), 1);
+        assert_eq!(idx.search_paths("\"second\"*").unwrap().len(), 1);
         assert_eq!(idx.rowid_map_len().unwrap(), 1, "the map drifted");
 
         // and emptying it removes both sides
@@ -1159,8 +1187,8 @@ mod tests {
             1,
             "the dead transcript's text went too"
         );
-        assert!(idx.search_text("\"beta\"*").unwrap().is_empty());
-        assert_eq!(idx.search_text("\"alpha\"*").unwrap().len(), 1);
+        assert!(idx.search_paths("\"beta\"*").unwrap().is_empty());
+        assert_eq!(idx.search_paths("\"alpha\"*").unwrap().len(), 1);
     }
 
     #[test]
@@ -1275,7 +1303,7 @@ mod pipeline_tests {
             &said("assistant", "and 110,000 major page faults"),
         ]);
         for q in ["connection pool", "page fault"] {
-            let hits = idx.search_text(&crate::search::fts_expr(q)).unwrap();
+            let hits = idx.search_paths(&crate::search::fts_expr(q)).unwrap();
             assert_eq!(hits, vec![key.clone()], "{q:?} found nothing");
         }
     }
@@ -1288,7 +1316,9 @@ mod pipeline_tests {
             &said_plain("user", "help me figure out why beamng is slow"),
             &said("assistant", "let us look at the frame times"),
         ]);
-        let hits = idx.search_text(&crate::search::fts_expr("beamng")).unwrap();
+        let hits = idx
+            .search_paths(&crate::search::fts_expr("beamng"))
+            .unwrap();
         assert_eq!(hits, vec![key], "the typed prompt was not indexed");
     }
 
@@ -1300,7 +1330,7 @@ mod pipeline_tests {
         let meta = r#"{"parentUuid":"p","message":{"role":"user","content":"the zpool is raidz2"},"type":"user","isMeta":true}"#;
         let (_d, idx, _key) = indexed(&[meta, &said("assistant", "understood")]);
         assert!(
-            idx.search_text(&crate::search::fts_expr("raidz2"))
+            idx.search_paths(&crate::search::fts_expr("raidz2"))
                 .unwrap()
                 .is_empty(),
             "injected context was indexed as if someone had said it"
@@ -1313,14 +1343,14 @@ mod pipeline_tests {
             &said("user", "the zpool is degraded"),
             &said("assistant", "checking the array now"),
         ]);
-        let hits = idx.search_text(&crate::search::fts_expr("zpool")).unwrap();
+        let hits = idx.search_paths(&crate::search::fts_expr("zpool")).unwrap();
         assert_eq!(hits, vec![key.clone()]);
         assert!(idx
-            .search_text(&crate::search::fts_expr("degraded"))
+            .search_paths(&crate::search::fts_expr("degraded"))
             .unwrap()
             .contains(&key));
         assert!(idx
-            .search_text(&crate::search::fts_expr("never mentioned"))
+            .search_paths(&crate::search::fts_expr("never mentioned"))
             .unwrap()
             .is_empty());
     }
@@ -1330,13 +1360,13 @@ mod pipeline_tests {
         let (_d, idx, key) = indexed(&[&said("user", "the page fault happened at boot")]);
         for q in ["page fault", "\"page fault\""] {
             assert_eq!(
-                idx.search_text(&crate::search::fts_expr(q)).unwrap(),
+                idx.search_paths(&crate::search::fts_expr(q)).unwrap(),
                 vec![key.clone()],
                 "{q}"
             );
         }
         assert!(idx
-            .search_text(&crate::search::fts_expr("\"fault page\""))
+            .search_paths(&crate::search::fts_expr("\"fault page\""))
             .unwrap()
             .is_empty());
     }
@@ -1356,16 +1386,77 @@ mod pipeline_tests {
             "typo hyprland config",
         ] {
             assert_eq!(
-                idx.search_text(&crate::search::fts_expr(q)).unwrap(),
+                idx.search_paths(&crate::search::fts_expr(q)).unwrap(),
                 vec![key.clone()],
                 "{q}"
             );
         }
         // every word still has to be there
         assert!(idx
-            .search_text(&crate::search::fts_expr("hyprland wayland"))
+            .search_paths(&crate::search::fts_expr("hyprland wayland"))
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn the_session_about_it_comes_before_one_that_mentions_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut idx = Index::open_at(&dir.path().join("i.db")).unwrap();
+        let mut put = |name: &str, lines: &[String]| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+            let mut t = String::new();
+            let s = crate::scan::scan_with_text(&path, false, None, None, &mut t).unwrap();
+            let key = s.path.to_string_lossy().to_string();
+            idx.persist(
+                std::slice::from_ref(&s),
+                &[(key.clone(), TextUpdate::Replace(t))],
+            )
+            .unwrap();
+            key
+        };
+        let filler = |n: usize| {
+            said(
+                "assistant",
+                &"the build is fine and so is the test run ".repeat(n),
+            )
+        };
+        let passing = put("a.jsonl", &[said("user", "the zpool is fine"), filler(20)]);
+        let about = put(
+            "b.jsonl",
+            &[
+                said("user", "the zpool will not import after the scrub"),
+                said(
+                    "assistant",
+                    "the zpool reports a faulted vdev; zpool clear may help",
+                ),
+                filler(2),
+            ],
+        );
+        let got = idx.search_paths(&crate::search::fts_expr("zpool")).unwrap();
+        assert_eq!(got, vec![about, passing]);
+    }
+
+    #[test]
+    fn the_word_as_typed_counts_for_more_than_its_relatives() {
+        // Why a word is asked for with its root, not stemmed away: the
+        // session that used the word itself matches twice.
+        let (_d, mut idx, exact) = indexed(&[&said("user", "the installation of hyprland failed")]);
+        let other = tempfile::tempdir().unwrap();
+        let path = other.path().join("b.jsonl");
+        std::fs::write(&path, said("user", "please install hyprland for me") + "\n").unwrap();
+        let mut t = String::new();
+        let s = crate::scan::scan_with_text(&path, false, None, None, &mut t).unwrap();
+        let relative = s.path.to_string_lossy().to_string();
+        idx.persist(
+            std::slice::from_ref(&s),
+            &[(relative.clone(), TextUpdate::Replace(t))],
+        )
+        .unwrap();
+        let got = idx
+            .search_paths(&crate::search::fts_expr("hyprland installation"))
+            .unwrap();
+        assert_eq!(got, vec![exact, relative]);
     }
 
     #[test]
@@ -1383,14 +1474,14 @@ mod pipeline_tests {
             "stopping",
         ] {
             assert_eq!(
-                idx.search_text(&crate::search::fts_expr(q)).unwrap(),
+                idx.search_paths(&crate::search::fts_expr(q)).unwrap(),
                 vec![key.clone()],
                 "{q}"
             );
         }
         // but what is in quotes is looked for as written
         assert!(idx
-            .search_text(&crate::search::fts_expr("\"installation\""))
+            .search_paths(&crate::search::fts_expr("\"installation\""))
             .unwrap()
             .is_empty());
     }
@@ -1410,14 +1501,14 @@ mod pipeline_tests {
         .unwrap();
         let hits = idx.prose_containing(&[vec!["C++".into()]], "C++").unwrap();
         assert_eq!(hits.keys().collect::<Vec<_>>(), vec![&key]);
-        assert!(hits[&key].contains("c++"), "{:?}", hits[&key]);
+        assert!(hits[&key].excerpt.contains("c++"), "{:?}", hits[&key]);
     }
 
     #[test]
     fn a_japanese_word_is_found_in_the_middle_of_a_sentence() {
         let (_d, idx, key) = indexed(&[&said("user", "日本語のながいテキストですね")]);
         assert!(
-            idx.search_text(&crate::search::fts_expr("テキスト"))
+            idx.search_paths(&crate::search::fts_expr("テキスト"))
                 .unwrap()
                 .is_empty(),
             "the tokenizer found it after all; this test is stale"
@@ -1432,7 +1523,8 @@ mod pipeline_tests {
     fn a_partial_word_matches_by_prefix() {
         let (_d, idx, key) = indexed(&[&said("user", "checkpatch was clean")]);
         assert_eq!(
-            idx.search_text(&crate::search::fts_expr("checkp")).unwrap(),
+            idx.search_paths(&crate::search::fts_expr("checkp"))
+                .unwrap(),
             vec![key]
         );
     }
@@ -1445,13 +1537,13 @@ mod pipeline_tests {
             "<system-reminder>NVENC needs cuda</system-reminder>look at the disk",
         )]);
         assert!(
-            idx.search_text(&crate::search::fts_expr("nvenc"))
+            idx.search_paths(&crate::search::fts_expr("nvenc"))
                 .unwrap()
                 .is_empty(),
             "a memory file leaked into the index"
         );
         assert!(!idx
-            .search_text(&crate::search::fts_expr("disk"))
+            .search_paths(&crate::search::fts_expr("disk"))
             .unwrap()
             .is_empty());
     }
@@ -1463,11 +1555,11 @@ mod pipeline_tests {
             r#"{"parentUuid":"p","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"zpool status -v"}}]},"type":"assistant"}"#,
         ]);
         assert!(!idx
-            .search_text(&crate::search::fts_expr("resilvering"))
+            .search_paths(&crate::search::fts_expr("resilvering"))
             .unwrap()
             .is_empty());
         assert!(!idx
-            .search_text(&crate::search::fts_expr("zpool"))
+            .search_paths(&crate::search::fts_expr("zpool"))
             .unwrap()
             .is_empty());
     }
@@ -1486,7 +1578,7 @@ mod pipeline_tests {
         ] {
             let expr = crate::search::fts_expr(nasty);
             // must not error; finding nothing is a fine answer
-            let _ = idx.search_text(&expr).unwrap_or_default();
+            let _ = idx.search_paths(&expr).unwrap_or_default();
         }
     }
 
@@ -1545,7 +1637,7 @@ mod pipeline_tests {
 
         for word in ["zebra", "quokka"] {
             assert!(
-                !idx.search_text(&crate::search::fts_expr(word))
+                !idx.search_paths(&crate::search::fts_expr(word))
                     .unwrap()
                     .is_empty(),
                 "{word} went missing after the append"
@@ -1643,7 +1735,7 @@ mod pipeline_tests {
     }
 
     fn finds(idx: &Index, word: &str) -> bool {
-        !idx.search_text(&crate::search::fts_expr(word))
+        !idx.search_paths(&crate::search::fts_expr(word))
             .unwrap()
             .is_empty()
     }

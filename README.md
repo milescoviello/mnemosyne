@@ -742,6 +742,20 @@ it said "optimize", so each word is asked for together with its root —
 shorter than four letters. The two questions now find their session 83% and
 100% of the time; `tools/search-eval.py` asks them of any binary.
 
+**The best answer comes first.** A search's answers were listed in the
+chosen sort, which is newest first, so the session that was *about* what
+you asked sat wherever its date put it, under every one that merely
+mentioned it. They are ranked now, by FTS5's bm25 — how often the words
+are said, how rare they are across the corpus, how long the session is —
+with a session counting as well as the best of its subagents, and the
+cursor lands on the first. The header says `best match` while the list is
+in that order, which `/` uses too. Asked the same two questions, the
+session wanted comes first 31% and 44% of the time, up from 11%, and in
+the top five 62% and 76%, up from about a fifth. Giving newer sessions a
+lift made every measure worse, so age only breaks ties. The exhaustive
+scan stops at the first match and cannot rank, so what it finds stays in
+the list's own order.
+
 **What the index cannot tokenise is looked for as written.** The index
 splits text on anything that is not a letter or a digit, and does not split
 Chinese, Japanese or Thai at all. So `c++` was a prefix search for "c" that

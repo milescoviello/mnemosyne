@@ -43,6 +43,30 @@ impl Mode {
     }
 }
 
+/// A session a search found: why, and how well.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Hit {
+    /// The words around the match. Empty for an indexed hit until the row
+    /// is looked at, when it is cut from the stored prose.
+    pub excerpt: String,
+    /// How well it answers the question, higher better. Zero where there
+    /// is no telling -- the exhaustive scan stops at the first match -- and
+    /// then the list's own order decides.
+    pub score: f64,
+}
+
+impl Hit {
+    pub fn new(excerpt: String) -> Hit {
+        Hit {
+            excerpt,
+            score: 0.0,
+        }
+    }
+}
+
+/// Path to hit, for what a search found.
+pub type Hits = HashMap<String, Hit>;
+
 /// ASCII case-insensitive substring search, leftmost match first. `needle`
 /// must already be lowercase.
 ///
@@ -580,15 +604,42 @@ fn root(word: &str) -> Option<String> {
 /// spawned it is. The browser reveals the parent when the answer was found
 /// in one of its children, and the command line did not -- so the same
 /// query gave two different answers depending on where you asked it.
-pub fn parents_of_hits(
+pub fn parents_of_hits<V>(
     sessions: &[crate::model::Session],
-    hits: &HashMap<String, String>,
+    hits: &HashMap<String, V>,
 ) -> std::collections::HashSet<String> {
     sessions
         .iter()
         .filter(|s| s.is_subagent && hits.contains_key(&s.path.to_string_lossy().to_string()))
         .filter_map(|s| s.parent.clone())
         .collect()
+}
+
+/// How well each session answered, by id: its own hit, or the best of its
+/// subagents', whichever is better. A subagent is listed under its session,
+/// so its match is what puts that session where it goes.
+pub fn session_scores<'a>(
+    sessions: &'a [crate::model::Session],
+    hits: &Hits,
+) -> HashMap<&'a str, f64> {
+    let mut best: HashMap<&str, f64> = HashMap::new();
+    for s in sessions {
+        let Some(h) = hits.get(s.path.to_string_lossy().as_ref()) else {
+            continue;
+        };
+        let id = match (&s.parent, s.is_subagent) {
+            (Some(p), true) => p.as_str(),
+            _ => s.id.as_str(),
+        };
+        let e = best.entry(id).or_insert(h.score);
+        *e = e.max(h.score);
+        // an orphan is listed as itself
+        if s.is_subagent {
+            let e = best.entry(s.id.as_str()).or_insert(h.score);
+            *e = e.max(h.score);
+        }
+    }
+    best
 }
 
 /// A readable excerpt of indexed prose around the first mention.
@@ -784,8 +835,8 @@ fn search_file(
     }
 }
 
-/// Search every session in parallel. Returns path -> snippet for hits only.
-fn brute(sessions: &[Session], groups: &[Vec<Vec<u8>>], mode: Mode) -> HashMap<String, String> {
+/// Search every session in parallel, for the ones every group is in.
+fn brute(sessions: &[Session], groups: &[Vec<Vec<u8>>], mode: Mode) -> Hits {
     if groups.is_empty() {
         return HashMap::new();
     }
@@ -797,7 +848,7 @@ fn brute(sessions: &[Session], groups: &[Vec<Vec<u8>>], mode: Mode) -> HashMap<S
         .par_iter()
         .filter_map(|s| {
             search_file(&s.path, &finders, mode)
-                .map(|snip| (s.path.to_string_lossy().to_string(), snip))
+                .map(|snip| (s.path.to_string_lossy().to_string(), Hit::new(snip)))
         })
         .collect()
 }
@@ -851,7 +902,7 @@ pub enum How {
 /// a word; when it finds nothing we fall back to the exhaustive scan rather
 /// than claiming there is nothing there. File and tool searches always scan,
 /// because they query structure rather than prose.
-pub fn run(sessions: &[Session], query: &str, mode: Mode) -> (HashMap<String, String>, How) {
+pub fn run(sessions: &[Session], query: &str, mode: Mode) -> (Hits, How) {
     if query.trim().is_empty() {
         return (HashMap::new(), How::Indexed);
     }
@@ -866,15 +917,25 @@ pub fn run(sessions: &[Session], query: &str, mode: Mode) -> (HashMap<String, St
             let found = if beyond_tokens(query) {
                 idx.prose_containing(&q.literals(), query.trim())
             } else {
-                idx.search_text(&q.fts())
-                    .map(|paths| paths.into_iter().map(|p| (p, String::new())).collect())
+                idx.search_text(&q.fts()).map(|found| {
+                    found
+                        .into_iter()
+                        .map(|(p, score)| {
+                            let hit = Hit {
+                                excerpt: String::new(),
+                                score,
+                            };
+                            (p, hit)
+                        })
+                        .collect()
+                })
             };
             if let Ok(found) = found {
                 let known: std::collections::HashSet<String> = sessions
                     .iter()
                     .map(|s| s.path.to_string_lossy().to_string())
                     .collect();
-                let kept: HashMap<String, String> = found
+                let kept: Hits = found
                     .into_iter()
                     .filter(|(p, _)| known.contains(p))
                     .collect();

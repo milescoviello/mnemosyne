@@ -223,7 +223,7 @@ enum Claim {
 
 pub struct DeepResult {
     pub generation: u64,
-    pub hits: HashMap<String, String>,
+    pub hits: search::Hits,
 }
 
 pub struct App {
@@ -248,7 +248,7 @@ pub struct App {
     pub fuzzy: String,
     pub deep: String,
     pub deep_mode: search::Mode,
-    pub deep_hits: Option<HashMap<String, String>>,
+    pub deep_hits: Option<search::Hits>,
     /// Parents of subagents that matched a deep search. Without this a hit
     /// inside a subagent is invisible whenever its parent did not also match,
     /// because only parents appear at the top level.
@@ -256,6 +256,10 @@ pub struct App {
     snippet_cache: HashMap<String, String>,
     pub deep_busy: bool,
     pub deep_generation: u64,
+    /// Whether the list is in order of how well each matches -- a filter
+    /// typed, or a search that could rank its answers -- rather than the
+    /// chosen sort.
+    pub by_match: bool,
     pub input: String,
 
     pub sort: Sort,
@@ -389,6 +393,7 @@ impl App {
             snippet_cache: HashMap::new(),
             deep_busy: false,
             deep_generation: 0,
+            by_match: false,
             input: String::new(),
             sort: Sort::Recency,
             group_by_dir: false,
@@ -717,10 +722,22 @@ impl App {
             idx.push(i);
         }
 
+        // How well each answered a search in the conversations, when one
+        // has: the best of a session and its subagents.
+        let found: HashMap<&str, f64> = match &self.deep_hits {
+            Some(hits) => search::session_scores(&self.all, hits),
+            None => HashMap::new(),
+        };
+        let ranked = found.values().any(|v| *v != 0.0);
+        self.by_match = filtering || ranked;
+
         // Favourites float to the top, then the chosen sort -- except while
-        // a filter is being typed, when the best match comes first. Pinned
-        // above it, a favourite that barely matched sat on top, and `/`, a
-        // title, enter, enter resumed the favourite.
+        // a filter is being typed or a search has answered, when the best
+        // match comes first. Pinned above it, a favourite that barely
+        // matched sat on top, and `/`, a title, enter, enter resumed the
+        // favourite. A search's answers were in the chosen sort too, which
+        // is newest first: the session that was about what you asked sat
+        // wherever its date put it, under every other that mentioned it.
         let sort = self.sort;
         let all = &self.all;
         idx.sort_by(|&a, &b| {
@@ -730,11 +747,17 @@ impl App {
                 let sb = scores.get(&b).copied().unwrap_or(0);
                 sb.cmp(&sa)
             };
+            let answer = || {
+                let fa = found.get(x.id.as_str()).copied().unwrap_or(0.0);
+                let fb = found.get(y.id.as_str()).copied().unwrap_or(0.0);
+                fb.total_cmp(&fa)
+            };
             let pinned = || y.favorite.cmp(&x.favorite);
-            let first = if filtering {
-                score().then_with(pinned)
-            } else {
-                pinned()
+            let first = match (filtering, ranked) {
+                (true, true) => score().then_with(answer).then_with(pinned),
+                (true, false) => score().then_with(pinned),
+                (false, true) => answer().then_with(pinned),
+                (false, false) => pinned(),
             };
             first.then_with(|| match sort {
                 Sort::Recency => y.mtime.cmp(&x.mtime),
@@ -790,7 +813,7 @@ impl App {
             // yesterday" as the list crosses back into time order.
             // Nor while filtering, when the list is in order of how well
             // each matches: the bands repeated and went backwards.
-            let banded = self.sort == Sort::Recency && !filtering;
+            let banded = self.sort == Sort::Recency && !filtering && !ranked;
             let mut band = String::new();
             for &i in &idx {
                 if banded {
@@ -1046,7 +1069,7 @@ impl App {
     /// one you are looking at and remembers it.
     pub fn deep_snippet(&mut self) -> Option<String> {
         let path = self.current()?.path.to_string_lossy().to_string();
-        let stored = self.deep_hits.as_ref()?.get(&path)?.clone();
+        let stored = self.deep_hits.as_ref()?.get(&path)?.excerpt.clone();
         if !stored.is_empty() {
             return Some(stored);
         }
@@ -1913,9 +1936,16 @@ impl App {
                             || self.deep_parent_hits.contains(&s.id))
                 })
                 .count();
+            let ranked = r.hits.values().any(|h| h.score != 0.0);
             self.deep_hits = Some(r.hits);
             self.deep_busy = false;
             self.rebuild();
+            // To the best answer, as the filter does. Not for the scan's,
+            // which come in no order and can take seconds -- long enough to
+            // have moved on to something else in the list meanwhile.
+            if ranked {
+                self.goto_top();
+            }
             // Count the list, not the search. With a tag filter or a date
             // range also on, the two differ, and saying "3 match" over a
             // list of one leaves you unable to tell which number is wrong.
@@ -2932,10 +2962,111 @@ mod logic_tests {
         );
     }
 
+    #[test]
+    fn a_search_lists_the_best_answer_first() {
+        // Its answers were listed newest first, so the session that was
+        // about what you asked sat wherever its date put it.
+        let mut a = app();
+        a.deep = "zpool".into();
+        a.deep_generation += 1;
+        let mut hits = HashMap::new();
+        for (p, score) in [
+            ("/p/bbbbbbbb-2.jsonl", 1.0),
+            ("/p/eeeeeeee-5.jsonl", 9.0),
+            ("/p/cccccccc-3.jsonl", 4.0),
+            // a favourite that barely matched does not jump the queue
+            ("/p/aaaaaaaa-1.jsonl", 0.5),
+        ] {
+            let hit = search::Hit {
+                excerpt: "…".into(),
+                score,
+            };
+            hits.insert(p.to_string(), hit);
+        }
+        a.deep_tx
+            .send(DeepResult {
+                generation: a.deep_generation,
+                hits,
+            })
+            .unwrap();
+        a.absorb_deep();
+        let order: Vec<&str> = a
+            .view
+            .iter()
+            .filter_map(|r| match r {
+                Row::Item(i) => Some(a.all[*i].id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            order,
+            ["eeeeeeee-5", "cccccccc-3", "bbbbbbbb-2", "aaaaaaaa-1"]
+        );
+        assert_eq!(
+            a.current().unwrap().id,
+            "eeeeeeee-5",
+            "the cursor is on the best"
+        );
+        // and no date bands, which in this order would repeat and go back
+        assert!(!a.view.iter().any(|r| matches!(r, Row::Divider(_))));
+    }
+
+    #[test]
+    fn a_session_counts_as_well_as_its_best_subagent() {
+        let mut a = app();
+        a.deep = "zpool".into();
+        a.deep_generation += 1;
+        let mut hits = HashMap::new();
+        let scored = |score| search::Hit {
+            excerpt: "…".into(),
+            score,
+        };
+        hits.insert("/p/bbbbbbbb-2.jsonl".to_string(), scored(3.0));
+        hits.insert("/p/agent-a1.jsonl".to_string(), scored(8.0));
+        a.deep_tx
+            .send(DeepResult {
+                generation: a.deep_generation,
+                hits,
+            })
+            .unwrap();
+        a.absorb_deep();
+        let first = a.view.iter().find_map(|r| match r {
+            Row::Item(i) => Some(a.all[*i].id.clone()),
+            _ => None,
+        });
+        assert_eq!(first.as_deref(), Some("aaaaaaaa-1"));
+    }
+
+    #[test]
+    fn a_scan_s_answers_keep_the_list_s_own_order() {
+        // The scan stops at the first match and cannot say which is best,
+        // so its answers stay newest first, favourites on top, in bands.
+        let mut a = app();
+        a.deep = "zpool".into();
+        deliver_hits(
+            &mut a,
+            &[
+                "/p/eeeeeeee-5.jsonl",
+                "/p/bbbbbbbb-2.jsonl",
+                "/p/aaaaaaaa-1.jsonl",
+            ],
+        );
+        let order: Vec<&str> = a
+            .view
+            .iter()
+            .filter_map(|r| match r {
+                Row::Item(i) => Some(a.all[*i].id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(order, ["aaaaaaaa-1", "bbbbbbbb-2", "eeeeeeee-5"]);
+        assert!(a.view.iter().any(|r| matches!(r, Row::Divider(_))));
+    }
+
     fn deliver_hits(a: &mut App, paths: &[&str]) {
         let mut hits = HashMap::new();
         for p in paths {
-            hits.insert((*p).to_string(), "…".to_string());
+            hits.insert((*p).to_string(), search::Hit::new("…".to_string()));
         }
         a.deep_tx
             .send(DeepResult {
@@ -3086,7 +3217,10 @@ mod logic_tests {
 
         // the abandoned search finishes now
         let mut hits = HashMap::new();
-        hits.insert("/p/aaaaaaaa-1.jsonl".to_string(), "…zpool…".to_string());
+        hits.insert(
+            "/p/aaaaaaaa-1.jsonl".to_string(),
+            search::Hit::new("…zpool…".to_string()),
+        );
         a.deep_tx
             .send(DeepResult {
                 generation: stale,
@@ -3110,7 +3244,10 @@ mod logic_tests {
         a.do_action(Action::Clear);
 
         let mut hits = HashMap::new();
-        hits.insert("/p/aaaaaaaa-1.jsonl".to_string(), "…".to_string());
+        hits.insert(
+            "/p/aaaaaaaa-1.jsonl".to_string(),
+            search::Hit::new("…".to_string()),
+        );
         a.deep_tx
             .send(DeepResult {
                 generation: stale,
@@ -3133,7 +3270,7 @@ mod logic_tests {
             "/p/agent-a2.jsonl",
             "/p/bbbbbbbb-2.jsonl",
         ] {
-            hits.insert(p.to_string(), "…zpool…".to_string());
+            hits.insert(p.to_string(), search::Hit::new("…zpool…".to_string()));
         }
         a.deep_tx
             .send(DeepResult {
@@ -3159,7 +3296,10 @@ mod logic_tests {
         a.on_key(KeyEvent::from(KeyCode::Esc));
 
         let mut hits = HashMap::new();
-        hits.insert("/p/aaaaaaaa-1.jsonl".to_string(), "…".to_string());
+        hits.insert(
+            "/p/aaaaaaaa-1.jsonl".to_string(),
+            search::Hit::new("…".to_string()),
+        );
         a.deep_tx
             .send(DeepResult {
                 generation: stale,
@@ -3184,7 +3324,10 @@ mod logic_tests {
         a.start_deep();
 
         let mut hits = HashMap::new();
-        hits.insert("/p/aaaaaaaa-1.jsonl".to_string(), "stale".to_string());
+        hits.insert(
+            "/p/aaaaaaaa-1.jsonl".to_string(),
+            search::Hit::new("stale".to_string()),
+        );
         a.deep_tx
             .send(DeepResult {
                 generation: first,
@@ -4936,7 +5079,10 @@ mod logic_tests {
         a.deep_generation += 1;
         a.deep_busy = true;
         let mut hits = HashMap::new();
-        hits.insert("/p/bbbbbbbb-2.jsonl".to_string(), String::new());
+        hits.insert(
+            "/p/bbbbbbbb-2.jsonl".to_string(),
+            search::Hit::new(String::new()),
+        );
         a.deep_tx
             .send(DeepResult {
                 generation: a.deep_generation,

@@ -517,14 +517,14 @@ fn main() -> Result<()> {
         // Only when there is one to fill: a hit the prose lookup found came
         // with its excerpt, and for `c++` this pass would match nearly every
         // document just to throw the answer away.
-        if how == search::How::Indexed && hits.values().any(|s| s.is_empty()) {
+        if how == search::How::Indexed && hits.values().any(|h| h.excerpt.is_empty()) {
             let expr = search::fts_expr(q);
             if let Ok(idx) = index::Index::open() {
                 if let Ok(all) = idx.excerpts(&expr, q) {
-                    for (path, snip) in hits.iter_mut() {
-                        if snip.is_empty() {
+                    for (path, hit) in hits.iter_mut() {
+                        if hit.excerpt.is_empty() {
                             if let Some(s) = all.get(path) {
-                                snip.clone_from(s);
+                                hit.excerpt.clone_from(s);
                             }
                         }
                     }
@@ -553,23 +553,33 @@ fn main() -> Result<()> {
                 hits.contains_key(&s.path.to_string_lossy().to_string()) || parents.contains(&s.id)
             })
             .collect();
-        rows.sort_by_key(|s| std::cmp::Reverse(s.mtime));
         // A parent listed for its subagent's match says why with that
         // match: its own column was empty, where every hit is meant to say.
         let mut through_child: std::collections::HashMap<&str, &str> =
             std::collections::HashMap::new();
         for s in pool.iter().filter(|s| s.is_subagent) {
-            if let (Some(p), Some(snip)) = (&s.parent, hits.get(s.path.to_string_lossy().as_ref()))
-            {
-                if !snip.is_empty() {
-                    through_child.entry(p.as_str()).or_insert(snip.as_str());
+            if let (Some(p), Some(hit)) = (&s.parent, hits.get(s.path.to_string_lossy().as_ref())) {
+                if !hit.excerpt.is_empty() {
+                    through_child
+                        .entry(p.as_str())
+                        .or_insert(hit.excerpt.as_str());
                 }
             }
         }
+        // Best first, as the browser lists them; a session counts as well
+        // as the best of itself and its subagents. Newest first among
+        // equals, which is all of them when the scan answered.
+        let best = search::session_scores(&pool, &hits);
+        let score = |s: &model::Session| best.get(s.id.as_str()).copied().unwrap_or(0.0);
+        rows.sort_by(|a, b| {
+            score(b)
+                .total_cmp(&score(a))
+                .then_with(|| b.mtime.cmp(&a.mtime))
+        });
         for s in &rows {
             let own = hits
                 .get(&s.path.to_string_lossy().to_string())
-                .map(|x| x.as_str())
+                .map(|x| x.excerpt.as_str())
                 .filter(|x| !x.is_empty());
             println!(
                 "{:>4}\t{}\t{}\t{}\t{}",

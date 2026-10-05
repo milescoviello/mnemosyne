@@ -659,7 +659,13 @@ fn draw_wordmark(f: &mut Frame, app: &App, area: Rect) {
     if live > 0 {
         segs.push((2, plain(format!("●{live} live"), th().live)));
     }
-    segs.push((5, plain(app.sort.label().to_string(), th().chrome)));
+    // Not the sort while the list is in match order, which it then is not.
+    let order = if app.by_match {
+        "best match"
+    } else {
+        app.sort.label()
+    };
+    segs.push((5, plain(order.to_string(), th().chrome)));
     if let Some(found) = &app.update_notice {
         // Near the front, because it is the one thing on screen that asks
         // something of you.
@@ -2627,6 +2633,24 @@ mod render_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_header_says_the_list_is_in_match_order_when_it_is() {
+        let mut a = app();
+        let says = |a: &mut App, what: &str| render(a, 160, 24)[0].contains(what);
+        assert!(says(&mut a, "recency"));
+        a.fuzzy = "last".into();
+        a.rebuild();
+        assert!(
+            says(&mut a, "best match"),
+            "{:?}",
+            render(&mut a, 160, 24)[0]
+        );
+        assert!(!says(&mut a, "recency"));
+        a.fuzzy.clear();
+        a.rebuild();
+        assert!(says(&mut a, "recency"));
     }
 
     #[test]
