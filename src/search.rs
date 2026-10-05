@@ -419,6 +419,12 @@ impl Term {
         }
     }
 
+    /// Whether the index has anything to match it by: FTS5 refuses a
+    /// phrase its tokenizer makes nothing of.
+    fn tokens(&self) -> bool {
+        self.text().chars().any(char::is_alphanumeric)
+    }
+
     /// This term as FTS5 reads it. Quotes are doubled, so nothing typed can
     /// be read as syntax.
     fn fts(&self) -> String {
@@ -477,9 +483,11 @@ impl Query {
             }
             rest = after;
         }
-        // Nothing to look for in a word that is all punctuation, and FTS5
-        // refuses an empty phrase.
-        terms.retain(|t| t.text().chars().any(char::is_alphanumeric));
+        // Nothing to look for in a word that is all sentence punctuation.
+        // One of symbols is kept -- `->`, `::` -- and is found as written:
+        // dropped, `C++ ->` lost its arrow, and `->` alone had nothing left
+        // to ask the prose for and read every transcript instead.
+        terms.retain(|t| t.text().chars().any(|c| c.is_alphanumeric() || telling(c)));
         Query { terms }
     }
 
@@ -491,6 +499,7 @@ impl Query {
     pub fn fts_any(&self) -> String {
         self.terms
             .iter()
+            .filter(|t| t.tokens())
             .map(Term::fts)
             .collect::<Vec<_>>()
             .join(" OR ")
@@ -500,6 +509,7 @@ impl Query {
     pub fn fts(&self) -> String {
         self.terms
             .iter()
+            .filter(|t| t.tokens())
             .map(Term::fts)
             .collect::<Vec<_>>()
             .join(" AND ")
@@ -1139,12 +1149,23 @@ fn titled(spotter: &Spotter, title: Option<&str>, score: f64) -> f64 {
 /// -- except what belongs to the sentence rather than the word: `*`, the
 /// index's own prefix search, and quotes and brackets in any script. Those
 /// sent `pool*` and `«bonjour»` to an exact match that found nothing.
+///
+/// Asked of the words as the query is read, quotes taken off: asked of the
+/// query as typed, `"c++"` had a quote at each edge, which is punctuation,
+/// and went to the index as a search for "c".
 fn beyond_tokens(query: &str) -> bool {
-    let telling = |c: char| !c.is_alphanumeric() && !PROSE.contains(c);
-    query
-        .split_whitespace()
-        .any(|w| w.chars().next().is_some_and(telling) || w.chars().last().is_some_and(telling))
+    let edge =
+        |w: &str| w.chars().next().is_some_and(telling) || w.chars().last().is_some_and(telling);
+    Query::parse(query)
+        .terms
+        .iter()
+        .any(|t| t.text().split_whitespace().any(edge))
         || query.chars().any(unspaced)
+}
+
+/// Not a letter or a digit, nor a mark that belongs to the sentence.
+fn telling(c: char) -> bool {
+    !c.is_alphanumeric() && !c.is_whitespace() && !PROSE.contains(c)
 }
 
 /// Marks at a word's edge that are the sentence's, not the word's.
@@ -1309,6 +1330,11 @@ mod tests {
             "_id",
             "£5",
             "€100",
+            // in quotes it is the same word
+            "\"c++\"",
+            "“c++ templates”",
+            "->",
+            "C++ ->",
         ] {
             assert!(beyond_tokens(q), "{q:?} went to the tokenizer");
         }
@@ -1384,6 +1410,9 @@ mod tests {
         assert_eq!(fts_expr("a OR b"), r#""a" AND "or" AND "b""#);
         // what has nothing to look for is dropped, not sent as `""`
         assert_eq!(fts_expr("? —"), "");
+        // a word of symbols is kept for the prose, but is not FTS5's to ask
+        assert_eq!(Query::parse("C++ ->").literals().len(), 2);
+        assert_eq!(fts_expr("->"), "");
         assert_eq!(fts_expr(r#""""#), "");
         assert_eq!(fts_expr(""), "");
         assert_eq!(fts_expr("   "), "");
