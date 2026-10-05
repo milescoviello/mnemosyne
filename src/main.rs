@@ -8,6 +8,7 @@
 mod app;
 mod art;
 mod config;
+mod filter;
 mod index;
 mod live;
 mod meta;

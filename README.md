@@ -113,7 +113,7 @@ No borders, aligned columns, one footer line. The full key list lives behind
 
 ## What it does
 
-**Finds things.** `/` fuzzy-filters titles, folders, branches and tags. `F`
+**Finds things.** `/` filters by title, folder, branch, tag and note. `F`
 searches *inside* the conversations — the actual text of what you and Claude
 said — across the whole corpus in about a fifth of a second. `m` switches that
 between three questions: what was *said*, which *files* a session actually
@@ -278,7 +278,13 @@ on.
 
 ![searching inside the conversations](docs/search.png)
 
-`/` filters the list. `F` searches *inside* the conversations.
+`/` filters the list. Every word you type has to be found in one of a
+session's title, folder, branch, tags, note, last prompt or id, and the best
+match comes first. Titles, folders, branches and tags match loosely, so
+`mnbh` finds mn-bug-hunt, while the prose has to say the word. The fzf marks
+work too: `'exact`, `^start`, `end$` and `!not`.
+
+`F` searches *inside* the conversations.
 
 Content search runs against a full-text index, so it answers in
 **milliseconds** rather than re-reading the corpus:
@@ -736,6 +742,19 @@ depending on which engine ran — and the fallback to scanning only fires when
 the index finds *nothing*, so a partial answer never triggered it. Both now
 use one predicate, checked against the whole line rather than its first 64KB,
 because `isMeta` lands wherever the writer put it.
+
+**The filter matches a word, not its letters.** `/` was one fuzzy match over
+the title, folder, branch, tags, last prompt and id joined into one line, and
+a fuzzy match asks only that the letters turn up in order. Across a long
+prompt and thirty-two hex digits they nearly always do: here `/nvenc` kept
+123 of 436 sessions, not one of which said "nvenc" anywhere it looked, and
+`/ci` kept 343. Each word is now matched against each field on its own, and
+has to be found inside one of them. Titles, folders, branches and tags still
+match loosely, but only while the letters sit close together or start its
+words — `mnbh` is mn-bug-hunt, `rust` is not "ruleset". The last prompt and
+the note are prose and have to say the word, and an id matches from its
+start. `/nvenc` now keeps none and `/ci` four, and a match in the title ranks
+above one in the last prompt.
 
 ## Help
 

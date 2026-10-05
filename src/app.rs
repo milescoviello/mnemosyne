@@ -4,14 +4,14 @@
 //! documented path and are always shown in the footer, so nothing has to be
 //! memorised. Vim motions are wired up as silent aliases alongside them.
 
+use crate::filter::{Field, Filter};
 use crate::live::LiveMap;
 use crate::meta::Meta;
 use crate::model::{DateRange, Session, Sort};
 use crate::preview::{self, Turn};
 use crate::search;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
-use nucleo_matcher::{Config, Matcher, Utf32Str};
+use nucleo_matcher::{Config, Matcher};
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{Receiver, Sender};
 
@@ -663,58 +663,36 @@ impl App {
                 return false;
             }
         }
-        if !self.fuzzy.trim().is_empty() {
-            // The id is in here so you can paste one from a log or a
-            // `--resume` line and land on that session. A wsx workspace is
-            // in twice over: by the name the list shows, and by its repo's
-            // tag, so `/wsx/os-dev` finds what `T` would.
-            let wsx = s
-                .wsx
-                .as_ref()
-                .map(|w| format!("{} {}", w.label(), w.tag()))
-                .unwrap_or_default();
-            let hay = format!(
-                "{} {} {} {} {} {} {}",
-                s.title(),
-                crate::model::short_cwd(&s.cwd),
-                wsx,
-                s.git_branch,
-                tag_words(&s.tags),
-                s.last_prompt,
-                s.id
-            );
-            let pat = Pattern::parse(
-                self.fuzzy.trim(),
-                CaseMatching::Ignore,
-                Normalization::Smart,
-            );
-            let mut cbuf = Vec::new();
-            if pat
-                .score(Utf32Str::new(&hay, &mut cbuf), &mut self.matcher)
-                .is_none()
-            {
-                return false;
-            }
-        }
         true
     }
 
-    fn fuzzy_score(&mut self, i: usize) -> u32 {
-        if self.fuzzy.trim().is_empty() {
-            return 0;
-        }
+    /// How well a session answers the `/` filter, or `None` if it does not.
+    ///
+    /// The id is in here so you can paste one from a log or a `--resume`
+    /// line and land on that session. A wsx workspace is in twice over: by
+    /// the name the list shows, and by its repo's tag, so `/wsx/os-dev`
+    /// finds what `T` would. Tags are written as they are shown, `#perf`, so
+    /// typing what you see finds it.
+    fn filter_score(&mut self, f: &Filter, i: usize) -> Option<u32> {
         let s = &self.all[i];
-        // Tags count toward how good a match is too. Written as they are
-        // shown, `#perf`, so typing what you see finds it.
-        let hay = format!("{} {} {}", s.title(), s.folder(), tag_words(&s.tags));
-        let pat = Pattern::parse(
-            self.fuzzy.trim(),
-            CaseMatching::Ignore,
-            Normalization::Smart,
-        );
-        let mut cbuf = Vec::new();
-        pat.score(Utf32Str::new(&hay, &mut cbuf), &mut self.matcher)
-            .unwrap_or(0)
+        let folder = crate::model::short_cwd(&s.cwd);
+        let wsx = s
+            .wsx
+            .as_ref()
+            .map(|w| format!("{} {}", w.label(), w.tag()))
+            .unwrap_or_default();
+        let tags = tag_words(&s.tags);
+        let fields = [
+            (Field::Title, s.title()),
+            (Field::Folder, folder.as_str()),
+            (Field::Folder, wsx.as_str()),
+            (Field::Branch, s.git_branch.as_str()),
+            (Field::Tags, tags.as_str()),
+            (Field::Note, s.note.as_str()),
+            (Field::Prompt, s.last_prompt.as_str()),
+            (Field::Id, s.id.as_str()),
+        ];
+        f.score(&fields, &mut self.matcher)
     }
 
     pub fn rebuild(&mut self) {
@@ -724,23 +702,29 @@ impl App {
         // transcript is gone, when it has nowhere to be listed and was
         // nowhere at all: not in the list, not under `a`, not in a search.
         let orphans = self.orphans();
+        let filter = Filter::new(self.fuzzy.trim());
+        let filtering = !filter.is_empty();
         let mut idx: Vec<usize> = Vec::new();
+        let mut scores: HashMap<usize, u32> = HashMap::new();
         for i in 0..self.all.len() {
-            if self.passes(i, orphans.contains(&i)) {
-                idx.push(i);
+            if !self.passes(i, orphans.contains(&i)) {
+                continue;
             }
+            if filtering {
+                match self.filter_score(&filter, i) {
+                    Some(score) => {
+                        scores.insert(i, score);
+                    }
+                    None => continue,
+                }
+            }
+            idx.push(i);
         }
 
         // Favourites float to the top, then the chosen sort -- except while
         // a filter is being typed, when the best match comes first. Pinned
         // above it, a favourite that barely matched sat on top, and `/`, a
         // title, enter, enter resumed the favourite.
-        let filtering = !self.fuzzy.trim().is_empty();
-        let scores: HashMap<usize, u32> = if filtering {
-            idx.iter().map(|&i| (i, self.fuzzy_score(i))).collect()
-        } else {
-            HashMap::new()
-        };
         let sort = self.sort;
         let all = &self.all;
         idx.sort_by(|&a, &b| {
@@ -3614,6 +3598,62 @@ mod logic_tests {
         assert_cursor_valid(&a);
         a.do_action(Action::Clear);
         assert_eq!(a.item_count(), all);
+    }
+
+    #[test]
+    fn a_filter_word_has_to_be_in_the_session_not_spelt_across_it() {
+        // One fuzzy match over every field joined together kept anything
+        // whose letters turned up in order somewhere: on a real corpus
+        // `/nvenc` kept 123 of 436 sessions, none of which said it.
+        let mut a = app();
+        let titles = |a: &App| -> Vec<String> {
+            a.view
+                .iter()
+                .filter_map(|r| match r {
+                    Row::Item(i) => Some(a.all[*i].title().to_string()),
+                    _ => None,
+                })
+                .collect()
+        };
+        // p from "paging", a… and the rest from the worktree path
+        a.fuzzy = "pdaff".into();
+        a.rebuild();
+        assert!(titles(&a).is_empty(), "{:?}", titles(&a));
+        // every fixture's last prompt is "last thing said in …", which has
+        // the letters of `thingsaid` in order, and not the word
+        a.fuzzy = "thingsaid".into();
+        a.rebuild();
+        assert!(titles(&a).is_empty(), "{:?}", titles(&a));
+        // a word that is there is found, wherever it is
+        a.fuzzy = "daffodil".into();
+        a.rebuild();
+        assert_eq!(titles(&a), vec!["paging on x86"]);
+        a.fuzzy = "gpt disk".into();
+        a.rebuild();
+        assert_eq!(titles(&a), vec!["a GPT disk tool"]);
+    }
+
+    #[test]
+    fn a_title_match_comes_before_a_match_in_the_last_prompt() {
+        let mut a = app();
+        let i = a.all.iter().position(|s| s.id == "eeeeeeee-5").unwrap();
+        a.all[i].last_prompt = "check the paging code again".into();
+        a.fuzzy = "paging".into();
+        a.rebuild();
+        let first = a.current().unwrap();
+        assert_eq!(first.title(), "paging on x86");
+        assert_eq!(a.item_count(), 2);
+    }
+
+    #[test]
+    fn a_note_is_filtered_on() {
+        let mut a = app();
+        let i = a.all.iter().position(|s| s.id == "dddddddd-4").unwrap();
+        a.all[i].note = "the one with the raid rebuild".into();
+        a.fuzzy = "raid".into();
+        a.rebuild();
+        assert_eq!(a.current().unwrap().id, "dddddddd-4");
+        assert_eq!(a.item_count(), 1);
     }
 
     #[test]
