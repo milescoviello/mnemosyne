@@ -517,8 +517,14 @@ fn main() -> Result<()> {
         // Only when there is one to fill: a hit the prose lookup found came
         // with its excerpt, and for `c++` this pass would match nearly every
         // document just to throw the answer away.
-        if how == search::How::Indexed && hits.values().any(|h| h.excerpt.is_empty()) {
-            let expr = search::fts_expr(q);
+        let partial = how == search::How::Partial;
+        if (how == search::How::Indexed || partial) && hits.values().any(|h| h.excerpt.is_empty()) {
+            let query = search::Query::parse(q);
+            let expr = if partial {
+                query.fts_any()
+            } else {
+                query.fts()
+            };
             if let Ok(idx) = index::Index::open() {
                 if let Ok(all) = idx.excerpts(&expr, q) {
                     for (path, hit) in hits.iter_mut() {
@@ -598,19 +604,34 @@ fn main() -> Result<()> {
             .iter()
             .filter(|s| show_subs || !s.is_subagent || orphan(s))
             .count();
-        eprintln!(
-            "{} of {} sessions matched \"{}\" ({}, {}) in {:.3}s",
-            rows.len(),
-            listable,
-            q,
-            mode.label(),
-            if how == search::How::Indexed {
-                "indexed"
-            } else {
-                "scanned"
-            },
-            t.elapsed().as_secs_f64()
-        );
+        let engine = match how {
+            search::How::Indexed => "indexed",
+            search::How::Scanned => "scanned",
+            search::How::Partial => "indexed",
+        };
+        if partial {
+            // Said, since a script reading the rows would take them for
+            // sessions with every word.
+            eprintln!(
+                "no session has every word of \"{}\"; {} of {} have some ({}, {}) in {:.3}s",
+                q,
+                rows.len(),
+                listable,
+                mode.label(),
+                engine,
+                t.elapsed().as_secs_f64()
+            );
+        } else {
+            eprintln!(
+                "{} of {} sessions matched \"{}\" ({}, {}) in {:.3}s",
+                rows.len(),
+                listable,
+                q,
+                mode.label(),
+                engine,
+                t.elapsed().as_secs_f64()
+            );
+        }
         return Ok(());
     }
 

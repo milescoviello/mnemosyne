@@ -224,6 +224,7 @@ enum Claim {
 pub struct DeepResult {
     pub generation: u64,
     pub hits: search::Hits,
+    pub how: search::How,
 }
 
 pub struct App {
@@ -1895,8 +1896,12 @@ impl App {
         self.snippet_cache.clear();
         self.deep_busy = true;
         std::thread::spawn(move || {
-            let (hits, _how) = search::run(&sessions, &q, mode);
-            let _ = tx.send(DeepResult { generation, hits });
+            let (hits, how) = search::run(&sessions, &q, mode);
+            let _ = tx.send(DeepResult {
+                generation,
+                hits,
+                how,
+            });
         });
     }
 
@@ -1950,17 +1955,24 @@ impl App {
             // range also on, the two differ, and saying "3 match" over a
             // list of one leaves you unable to tell which number is wrong.
             let shown = self.session_count();
-            self.status = if shown == n {
-                format!(
+            self.status = match (r.how, shown == n) {
+                (search::How::Partial, true) => format!(
+                    "no session has every word of “{}” — {shown} have some",
+                    self.deep
+                ),
+                (search::How::Partial, false) => format!(
+                    "no session has every word of “{}” — {shown} of {n} with some shown, other filters are on",
+                    self.deep
+                ),
+                (_, true) => format!(
                     "{shown} session(s) match “{}” in {}",
                     self.deep,
                     self.deep_mode.label()
-                )
-            } else {
-                format!(
+                ),
+                (_, false) => format!(
                     "{shown} of {n} matching “{}” shown — other filters are on",
                     self.deep
-                )
+                ),
             };
         }
     }
@@ -2987,6 +2999,7 @@ mod logic_tests {
             .send(DeepResult {
                 generation: a.deep_generation,
                 hits,
+                how: search::How::Indexed,
             })
             .unwrap();
         a.absorb_deep();
@@ -3012,6 +3025,35 @@ mod logic_tests {
     }
 
     #[test]
+    fn a_search_with_only_some_of_its_words_found_says_so() {
+        let mut a = app();
+        a.deep = "zpool raidz rollback".into();
+        a.deep_generation += 1;
+        let mut hits = HashMap::new();
+        hits.insert(
+            "/p/bbbbbbbb-2.jsonl".to_string(),
+            search::Hit {
+                excerpt: "…".into(),
+                score: 2e6,
+            },
+        );
+        a.deep_tx
+            .send(DeepResult {
+                generation: a.deep_generation,
+                hits,
+                how: search::How::Partial,
+            })
+            .unwrap();
+        a.absorb_deep();
+        assert_eq!(a.item_count(), 1);
+        assert!(
+            a.status.contains("no session has every word"),
+            "{:?}",
+            a.status
+        );
+    }
+
+    #[test]
     fn a_session_counts_as_well_as_its_best_subagent() {
         let mut a = app();
         a.deep = "zpool".into();
@@ -3027,6 +3069,7 @@ mod logic_tests {
             .send(DeepResult {
                 generation: a.deep_generation,
                 hits,
+                how: search::How::Indexed,
             })
             .unwrap();
         a.absorb_deep();
@@ -3072,6 +3115,7 @@ mod logic_tests {
             .send(DeepResult {
                 generation: a.deep_generation,
                 hits,
+                how: search::How::Indexed,
             })
             .unwrap();
         a.absorb_deep();
@@ -3225,6 +3269,7 @@ mod logic_tests {
             .send(DeepResult {
                 generation: stale,
                 hits,
+                how: search::How::Indexed,
             })
             .unwrap();
         a.absorb_deep();
@@ -3252,6 +3297,7 @@ mod logic_tests {
             .send(DeepResult {
                 generation: stale,
                 hits,
+                how: search::How::Indexed,
             })
             .unwrap();
         a.absorb_deep();
@@ -3276,6 +3322,7 @@ mod logic_tests {
             .send(DeepResult {
                 generation: a.deep_generation,
                 hits,
+                how: search::How::Indexed,
             })
             .unwrap();
         a.absorb_deep();
@@ -3304,6 +3351,7 @@ mod logic_tests {
             .send(DeepResult {
                 generation: stale,
                 hits,
+                how: search::How::Indexed,
             })
             .unwrap();
         a.absorb_deep();
@@ -3332,6 +3380,7 @@ mod logic_tests {
             .send(DeepResult {
                 generation: first,
                 hits,
+                how: search::How::Indexed,
             })
             .unwrap();
         a.absorb_deep();
@@ -5087,6 +5136,7 @@ mod logic_tests {
             .send(DeepResult {
                 generation: a.deep_generation,
                 hits,
+                how: search::How::Indexed,
             })
             .unwrap();
         a.absorb_deep();

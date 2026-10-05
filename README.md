@@ -756,6 +756,14 @@ lift made every measure worse, so age only breaks ties. The exhaustive
 scan stops at the first match and cannot rank, so what it finds stays in
 the list's own order.
 
+**Some of the words is better than nothing.** With every word required, one
+word the session never used — what you remember it as, rather than what it
+said — leaves nothing at all. When neither the index nor the scan finds a
+session with every word, the ones with some of them are listed instead, the
+most of them first, and the status line says that is what they are:
+`no session has every word of “…” — 12 have some`. `--search` says it on
+stderr.
+
 **What the index cannot tokenise is looked for as written.** The index
 splits text on anything that is not a letter or a digit, and does not split
 Chinese, Japanese or Thai at all. So `c++` was a prefix search for "c" that

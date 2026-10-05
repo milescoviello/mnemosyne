@@ -487,6 +487,15 @@ impl Query {
         self.terms.is_empty()
     }
 
+    /// The FTS5 expression asking for any of the terms.
+    pub fn fts_any(&self) -> String {
+        self.terms
+            .iter()
+            .map(Term::fts)
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    }
+
     /// The FTS5 expression asking for every term.
     pub fn fts(&self) -> String {
         self.terms
@@ -516,6 +525,7 @@ impl Query {
 }
 
 /// The FTS5 expression for what was typed: every word, in any order.
+#[cfg(test)]
 pub fn fts_expr(query: &str) -> String {
     Query::parse(query).fts()
 }
@@ -892,6 +902,8 @@ fn scan_groups(query: &str, mode: Mode) -> Vec<Vec<Vec<u8>>> {
 pub enum How {
     Indexed,
     Scanned,
+    /// Nothing had every word, so these have some: the most of them first.
+    Partial,
 }
 
 /// Find sessions matching `query`.
@@ -900,55 +912,105 @@ pub enum How {
 /// the corpus that is actually prose and answers in milliseconds instead of
 /// re-reading gigabytes. The index tokenises, so it cannot match the middle of
 /// a word; when it finds nothing we fall back to the exhaustive scan rather
-/// than claiming there is nothing there. File and tool searches always scan,
-/// because they query structure rather than prose.
+/// than claiming there is nothing there, and when that finds nothing either,
+/// to the sessions with some of the words. File and tool searches always
+/// scan, because they query structure rather than prose.
 pub fn run(sessions: &[Session], query: &str, mode: Mode) -> (Hits, How) {
     if query.trim().is_empty() {
         return (HashMap::new(), How::Indexed);
     }
     let q = Query::parse(query);
-    if mode == Mode::Content && !q.is_empty() {
-        if let Ok(idx) = crate::index::Index::open() {
-            // What the tokenizer would lose is looked for as written, in
-            // the same prose: a tenth of the corpus rather than all of it,
-            // and it comes with its excerpts. Everything else goes to the
-            // index, whose excerpts are filled in one row at a time, on
-            // demand.
-            let found = if beyond_tokens(query) {
-                idx.prose_containing(&q.literals(), query.trim())
-            } else {
-                idx.search_text(&q.fts()).map(|found| {
-                    found
-                        .into_iter()
-                        .map(|(p, score)| {
-                            let hit = Hit {
-                                excerpt: String::new(),
-                                score,
-                            };
-                            (p, hit)
-                        })
-                        .collect()
-                })
-            };
-            if let Ok(found) = found {
-                let known: std::collections::HashSet<String> = sessions
-                    .iter()
-                    .map(|s| s.path.to_string_lossy().to_string())
-                    .collect();
-                let kept: Hits = found
+    let indexed = mode == Mode::Content && !q.is_empty();
+    let idx = indexed.then(crate::index::Index::open).and_then(Result::ok);
+    let known: std::collections::HashSet<String> = sessions
+        .iter()
+        .map(|s| s.path.to_string_lossy().to_string())
+        .collect();
+    if let Some(idx) = &idx {
+        // What the tokenizer would lose is looked for as written, in the
+        // same prose: a tenth of the corpus rather than all of it, and it
+        // comes with its excerpts. Everything else goes to the index, whose
+        // excerpts are filled in one row at a time, on demand.
+        let found = if beyond_tokens(query) {
+            idx.prose_containing(&q.literals(), query.trim())
+        } else {
+            idx.search_text(&q.fts()).map(|found| {
+                found
                     .into_iter()
-                    .filter(|(p, _)| known.contains(p))
-                    .collect();
-                if !kept.is_empty() {
-                    return (kept, How::Indexed);
-                }
+                    .map(|(p, score)| {
+                        let hit = Hit {
+                            excerpt: String::new(),
+                            score,
+                        };
+                        (p, hit)
+                    })
+                    .collect()
+            })
+        };
+        if let Ok(found) = found {
+            let kept: Hits = found
+                .into_iter()
+                .filter(|(p, _)| known.contains(p))
+                .collect();
+            if !kept.is_empty() {
+                return (kept, How::Indexed);
             }
         }
     }
-    (
-        brute(sessions, &scan_groups(query, mode), mode),
-        How::Scanned,
-    )
+    let hits = brute(sessions, &scan_groups(query, mode), mode);
+    if !hits.is_empty() || q.terms.len() < 2 || beyond_tokens(query) {
+        return (hits, How::Scanned);
+    }
+    match &idx {
+        Some(idx) => {
+            let some = some_of(idx, &q, &known);
+            let how = if some.is_empty() {
+                How::Scanned
+            } else {
+                How::Partial
+            };
+            (some, how)
+        }
+        None => (hits, How::Scanned),
+    }
+}
+
+/// The sessions with some of the terms, the most of them first and then by
+/// how well they have them.
+///
+/// Three words of which no session has all three found nothing at all,
+/// which said less than it knew: the one that has two of them is very
+/// often the one meant, the third word being what it was called in
+/// somebody's memory rather than in the session.
+fn some_of(
+    idx: &crate::index::Index,
+    q: &Query,
+    known: &std::collections::HashSet<String>,
+) -> Hits {
+    let mut tally: HashMap<String, (usize, f64)> = HashMap::new();
+    for t in &q.terms {
+        let Ok(found) = idx.search_text(&t.fts()) else {
+            continue;
+        };
+        for (p, score) in found {
+            if known.contains(&p) {
+                let e = tally.entry(p).or_default();
+                e.0 += 1;
+                e.1 += score;
+            }
+        }
+    }
+    tally
+        .into_iter()
+        .map(|(p, (n, score))| {
+            // bm25 is a few units at most; a term more outweighs any of it
+            let hit = Hit {
+                excerpt: String::new(),
+                score: n as f64 * 1e6 + score,
+            };
+            (p, hit)
+        })
+        .collect()
 }
 
 /// Would the full-text index lose what this query is about?
@@ -1252,6 +1314,30 @@ mod tests {
         );
         // a short word is matched whole: `a*` is most of the language
         assert_eq!(fts_expr("is it"), r#""is" AND "it""#);
+    }
+
+    #[test]
+    fn with_nothing_that_has_every_word_the_most_of_them_come_first() {
+        let d = tempfile::tempdir().unwrap();
+        let mut idx = crate::index::Index::open_at(&d.path().join("i.db")).unwrap();
+        idx.store_text(&[
+            ("/two".into(), "the zfs pool needed a snapshot".into()),
+            ("/one".into(), "zfs zfs zfs zfs zfs, all day".into()),
+            ("/none".into(), "nothing to see".into()),
+        ])
+        .unwrap();
+        let known = ["/two", "/one", "/none"].map(String::from).into();
+        let q = Query::parse("zfs snapshot rollback");
+        assert!(
+            idx.search_text(&q.fts()).unwrap().is_empty(),
+            "one has all three"
+        );
+        let some = some_of(&idx, &q, &known);
+        let mut order: Vec<(&String, &Hit)> = some.iter().collect();
+        order.sort_by(|a, b| b.1.score.total_cmp(&a.1.score));
+        let order: Vec<&str> = order.iter().map(|(p, _)| p.as_str()).collect();
+        // two words beat one said five times
+        assert_eq!(order, ["/two", "/one"]);
     }
 
     #[test]
