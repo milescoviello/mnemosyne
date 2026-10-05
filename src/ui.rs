@@ -995,11 +995,7 @@ fn draw_list(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
     let cursor = app.cursor;
     // What a search in the conversations found, drawn out where a title
     // says it too.
-    let deep = app
-        .deep_hits
-        .as_ref()
-        .map(|_| crate::search::Spotter::new(app.deep.trim()))
-        .filter(|f| !f.is_empty());
+    let deep = app.deep_spotter();
     // and what the `/` filter matched
     let filter = crate::filter::Filter::new(app.fuzzy.trim());
     let mut matcher = nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT);
@@ -1484,11 +1480,11 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
     const BODY: usize = 3;
     let mut body_lines: Vec<Line> = Vec::new();
     if let Some(sn) = snippet {
-        let find = crate::search::Spotter::new(app.deep.trim());
+        let find = app.deep_spotter();
         let mut line = vec![Span::raw(" ".repeat(MARGIN)), label("match")];
         line.extend(marked(
             fit(&sn, body),
-            Some(&find),
+            find.as_ref(),
             Style::default().fg(th().text),
         ));
         body_lines.push(Line::from(line));

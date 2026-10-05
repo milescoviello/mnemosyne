@@ -250,6 +250,9 @@ pub struct App {
     pub deep: String,
     pub deep_mode: search::Mode,
     pub deep_hits: Option<search::Hits>,
+    /// How those were found: the scan finds a word inside another, and
+    /// what it found is marked the same way.
+    pub deep_how: search::How,
     /// Parents of subagents that matched a deep search. Without this a hit
     /// inside a subagent is invisible whenever its parent did not also match,
     /// because only parents appear at the top level.
@@ -399,6 +402,7 @@ impl App {
             deep: String::new(),
             deep_mode: search::Mode::Content,
             deep_hits: None,
+            deep_how: search::How::Indexed,
             deep_parent_hits: HashSet::new(),
             snippet_cache: HashMap::new(),
             deep_busy: false,
@@ -1956,6 +1960,7 @@ impl App {
                 .count();
             let ranked = r.hits.values().any(|h| h.score != 0.0);
             self.deep_hits = Some(r.hits);
+            self.deep_how = r.how;
             self.deep_busy = false;
             self.rebuild();
             // To the best answer, as the filter does. Not for the scan's,
@@ -2390,6 +2395,17 @@ impl App {
         }
     }
 
+    /// What finds, in a text, what the search in the conversations found.
+    pub fn deep_spotter(&self) -> Option<search::Spotter> {
+        self.deep_hits.as_ref()?;
+        let q = self.deep.trim();
+        let f = match self.deep_how {
+            search::How::Scanned => search::Spotter::anywhere(q),
+            _ => search::Spotter::new(q),
+        };
+        (!f.is_empty()).then_some(f)
+    }
+
     /// Load the current session's conversation for reading.
     fn open_viewer(&mut self) {
         let Some(i) = self.current_idx() else { return };
@@ -2399,11 +2415,8 @@ impl App {
         // Not a file search: a path is in what a tool was given, which the
         // viewer does not show, and it would say the match was not there.
         let find = self
-            .deep_hits
-            .as_ref()
-            .filter(|_| self.deep_mode != search::Mode::File)
-            .map(|_| search::Spotter::new(self.deep.trim()))
-            .filter(|f| !f.is_empty());
+            .deep_spotter()
+            .filter(|_| self.deep_mode != search::Mode::File);
         // 8 MB covers almost every session whole; the biggest here is 400 MB,
         // where the recent end is what you want anyway.
         let (turns, more) = preview::load_turns(&self.all[i], 8 << 20, 400, find.as_ref());
@@ -5274,6 +5287,27 @@ mod logic_tests {
         // and closing it forgets them
         a.on_key(KeyEvent::from(KeyCode::Esc));
         assert!(a.viewer_marks.is_empty() && a.viewer_find.is_none());
+    }
+
+    #[test]
+    fn what_the_scan_found_inside_a_word_the_viewer_finds_too() {
+        // The index matches whole words, the scan any part of one; what
+        // the scan found in "zpool" for `pool`, the viewer would not mark.
+        let mut a = app();
+        let _d = on_disk(&mut a, "dddddddd-4", &["the zpool is degraded", "checking"]);
+        a.deep = "pool".into();
+        a.deep_hits = Some(HashMap::new());
+        a.deep_how = search::How::Scanned;
+        on(&mut a, "dddddddd-4");
+        a.do_action(Action::View);
+        assert_eq!(a.viewer_marks, vec![0]);
+        a.on_key(KeyEvent::from(KeyCode::Esc));
+        a.deep_how = search::How::Indexed;
+        a.do_action(Action::View);
+        assert!(
+            a.viewer_marks.is_empty(),
+            "the index would not have matched it"
+        );
     }
 
     #[test]

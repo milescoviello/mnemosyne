@@ -745,6 +745,9 @@ fn spot_needles(needle: &str) -> Vec<Vec<String>> {
 #[derive(Clone, Debug, Default)]
 pub struct Spotter {
     terms: Vec<Vec<String>>,
+    /// Found inside words too, as the scan finds them. Otherwise a word is
+    /// found where a word starts, as the index matched it.
+    anywhere: bool,
 }
 
 /// One place a term was found: its bytes, and which term it was.
@@ -759,6 +762,16 @@ impl Spotter {
     pub fn new(query: &str) -> Spotter {
         Spotter {
             terms: spot_needles(query),
+            anywhere: false,
+        }
+    }
+
+    /// One that finds a word inside another, for what the scan found: it
+    /// matched `pool` in "zpool", and would otherwise be shown nothing.
+    pub fn anywhere(query: &str) -> Spotter {
+        Spotter {
+            anywhere: true,
+            ..Spotter::new(query)
         }
     }
 
@@ -768,18 +781,12 @@ impl Spotter {
 
     /// Only the terms `text` does not have.
     pub fn missing_from(&self, text: &str) -> Spotter {
-        let mut has = vec![false; self.terms.len()];
-        for s in self.spots(text) {
-            has[s.term] = true;
-        }
         Spotter {
-            terms: self
-                .terms
-                .iter()
-                .zip(has)
-                .filter(|(_, h)| !h)
-                .map(|(t, _)| t.clone())
+            terms: (0..self.terms.len())
+                .filter(|&t| self.places(text, t, 1).is_empty())
+                .map(|t| self.terms[t].clone())
                 .collect(),
+            anywhere: self.anywhere,
         }
     }
 
@@ -788,33 +795,63 @@ impl Spotter {
         self.terms.len()
     }
 
+    /// Where term `t` is in `text`, as byte ranges, up to `most` of them.
+    ///
+    /// A word is found only where a word starts -- "pool", not "spool" --
+    /// as the index matched it. That is decided by the word, not by the
+    /// text: decided by whether this piece of text had it at a word start
+    /// anywhere, a line of the viewer with only "zpool" in it marked the
+    /// pool inside it. What starts with a symbol, `c++` or `__init__`, and
+    /// a script written without spaces, which has no word starts to go by,
+    /// are found wherever they are.
+    fn places(&self, text: &str, t: usize, most: usize) -> Vec<(usize, usize)> {
+        // Only ASCII is folded by `find_ci`. For the rest the text is
+        // lowercased whole, when that leaves every byte where it was --
+        // Cyrillic and Greek do -- so `москве` finds "Москве".
+        let folded = (!self.terms[t].iter().all(|w| w.is_ascii()))
+            .then(|| text.to_lowercase())
+            .filter(|l| l.len() == text.len());
+        let hay = folded.as_deref().unwrap_or(text).as_bytes();
+        let mut at: Vec<(usize, usize)> = Vec::new();
+        for w in &self.terms[t] {
+            let starts = !self.anywhere
+                && w.chars()
+                    .next()
+                    .is_some_and(|c| c.is_alphanumeric() && !unspaced(c));
+            let mut from = 0;
+            while at.len() < most && from < hay.len() {
+                let Some(rel) = find_ci(&hay[from..], w.as_bytes()) else {
+                    break;
+                };
+                let p = from + rel;
+                from = p + 1;
+                let e = p + w.len();
+                if !text.is_char_boundary(p) || !text.is_char_boundary(e) {
+                    continue;
+                }
+                if starts
+                    && text[..p]
+                        .chars()
+                        .next_back()
+                        .is_some_and(char::is_alphanumeric)
+                {
+                    continue;
+                }
+                at.push((p, e));
+            }
+        }
+        at.sort_unstable();
+        at
+    }
+
     /// Every place in `text` a term is, in order. A word is marked to its
     /// end, since the index matched the word: `pool` marks all of
     /// "pooling".
     pub fn spots(&self, text: &str) -> Vec<Spot> {
         const MOST: usize = 4096;
-        let hay = text.as_bytes();
         let mut out: Vec<Spot> = Vec::new();
-        for (t, ways) in self.terms.iter().enumerate() {
-            let mut at: Vec<(usize, usize)> = Vec::new();
-            for w in ways {
-                let mut from = 0;
-                while at.len() < MOST && from < hay.len() {
-                    let Some(rel) = find_ci(&hay[from..], w.as_bytes()) else {
-                        break;
-                    };
-                    at.push((from + rel, from + rel + w.len()));
-                    from += rel + 1;
-                }
-            }
-            // Where a word starts, as the index matched it -- "pool", not
-            // "spool" -- unless it never does, as in Japanese.
-            let starts = |&&(p, _): &&(usize, usize)| p == 0 || !hay[p - 1].is_ascii_alphanumeric();
-            let any_start = at.iter().any(|p| starts(&p));
-            for (p, e) in at {
-                if any_start && !starts(&&(p, e)) {
-                    continue;
-                }
+        for t in 0..self.terms.len() {
+            for (p, e) in self.places(text, t, MOST) {
                 // Only ASCII is folded, so a match begins and ends where
                 // a character does; and carries on to the end of its word.
                 let word_end = text[e..]
@@ -833,53 +870,56 @@ impl Spotter {
         out
     }
 
-    /// Where to centre an excerpt: the stretch holding the most of the
-    /// terms, the earliest of those that hold as many.
+    /// Where to centre an excerpt: where the most of the terms are close
+    /// together, the first of those that have as many.
     ///
     /// The first mention of the first word was where it went, and with
     /// several words that was usually somewhere only that one word was:
     /// "zfs snapshot" showed a line about zfs and nothing about a snapshot.
+    ///
+    /// Anchored on the term that is said least often, whose every place is
+    /// looked at, and each looked around for the others. Gathered in
+    /// order and capped instead, a word like "the" ran out of places in
+    /// the first few pages of a long session, and the excerpt for `the
+    /// zpool` came from where the zpool was not.
     pub fn best(&self, text: &str) -> Option<usize> {
-        let (_, from, to) = self.densest(&self.spots(text))?;
-        Some((from + to) / 2)
+        const NEAR: usize = 80;
+        const MOST: usize = 4096;
+        let per: Vec<Vec<(usize, usize)>> = (0..self.terms.len())
+            .map(|t| self.places(text, t, MOST))
+            .collect();
+        let anchor = (0..per.len())
+            .filter(|&t| !per[t].is_empty())
+            .min_by_key(|&t| per[t].len())?;
+        let boundary = |mut i: usize| {
+            while !text.is_char_boundary(i) {
+                i -= 1;
+            }
+            i
+        };
+        let mut best = (0usize, per[anchor][0].0);
+        for &(p, _) in &per[anchor] {
+            let around =
+                &text[boundary(p.saturating_sub(NEAR))..boundary((p + NEAR).min(text.len()))];
+            let held = 1
+                + (0..per.len())
+                    .filter(|&t| t != anchor && !self.places(around, t, 1).is_empty())
+                    .count();
+            if held > best.0 {
+                best = (held, p);
+                if held == per.len() {
+                    break;
+                }
+            }
+        }
+        Some(best.1)
     }
 
     /// How many of the terms `text` has.
     pub fn count(&self, text: &str) -> usize {
-        let mut seen = vec![false; self.terms.len()];
-        for s in self.spots(text) {
-            seen[s.term] = true;
-        }
-        seen.iter().filter(|s| **s).count()
-    }
-
-    fn densest(&self, spots: &[Spot]) -> Option<(usize, usize, usize)> {
-        const SPAN: usize = 150;
-        let first = spots.first()?.start;
-        let mut held = vec![0usize; self.terms.len()];
-        let (mut distinct, mut lo) = (0usize, 0usize);
-        let mut best = (0usize, first, first);
-        for hi in 0..spots.len() {
-            let Spot {
-                start: p, term: t, ..
-            } = spots[hi];
-            if held[t] == 0 {
-                distinct += 1;
-            }
-            held[t] += 1;
-            while spots[lo].start + SPAN < p {
-                let t0 = spots[lo].term;
-                held[t0] -= 1;
-                if held[t0] == 0 {
-                    distinct -= 1;
-                }
-                lo += 1;
-            }
-            if distinct > best.0 {
-                best = (distinct, spots[lo].start, p);
-            }
-        }
-        Some(best)
+        (0..self.terms.len())
+            .filter(|&t| !self.places(text, t, 1).is_empty())
+            .count()
     }
 }
 
@@ -1595,6 +1635,27 @@ mod tests {
         let text = "x ".repeat(200) + "we install hyprland next" + &" y".repeat(200);
         let e = excerpt(&text, "installation");
         assert!(e.contains("install hyprland"), "{e:?}");
+    }
+
+    #[test]
+    fn an_excerpt_finds_a_rare_word_past_a_common_one_said_thousands_of_times() {
+        let text = "the cat sat. ".repeat(5000) + "then the zpool degraded";
+        let e = excerpt(&text, "the zpool");
+        assert!(e.contains("zpool"), "{e:?}");
+    }
+
+    #[test]
+    fn a_word_inside_another_is_not_marked_however_short_the_text() {
+        let f = Spotter::new("pool");
+        assert!(f.spots("the zpool is full").is_empty());
+        assert_eq!(f.count("the zpool is full"), 0);
+        assert_eq!(f.count("the pool is full"), 1);
+        // but the scan's finds are, since it found them there
+        assert_eq!(Spotter::anywhere("pool").count("the zpool is full"), 1);
+        // and what starts with a symbol, or in Japanese, is found anywhere
+        assert_eq!(Spotter::new("++").count("in c++ it is"), 1);
+        assert_eq!(Spotter::new("テキスト").count("日本語のテキストです"), 1);
+        assert_eq!(Spotter::new("москве").count("в Москве"), 1);
     }
 
     #[test]
