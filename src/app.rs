@@ -264,6 +264,11 @@ pub struct App {
     /// typed, or a search that could rank its answers -- rather than the
     /// chosen sort.
     pub by_match: bool,
+    /// Whether a typed filter or a ranked search may put the list in match
+    /// order. Choosing a sort says otherwise, until the next is typed: the
+    /// best match always came first, so `s` said "sort: size" over a list
+    /// that did not move.
+    match_order: bool,
     pub input: String,
 
     pub sort: Sort,
@@ -408,6 +413,7 @@ impl App {
             deep_busy: false,
             deep_generation: 0,
             by_match: false,
+            match_order: true,
             input: String::new(),
             sort: Sort::Recency,
             group_by_dir: false,
@@ -746,7 +752,8 @@ impl App {
             Some(hits) => search::session_scores(&self.all, hits),
             None => HashMap::new(),
         };
-        let ranked = found.values().any(|v| *v != 0.0);
+        let ranked = self.match_order && found.values().any(|v| *v != 0.0);
+        let filtering = filtering && self.match_order;
         self.by_match = filtering || ranked;
 
         // Favourites float to the top, then the chosen sort -- except while
@@ -1891,6 +1898,7 @@ impl App {
 
     fn start_deep(&mut self) {
         let q = self.deep.trim().to_string();
+        self.match_order = true;
         // Bump first, and for an empty query too. The generation is what
         // says which answer belongs to what you asked; leaving it alone
         // when the box is cleared means a search already in flight still
@@ -2310,7 +2318,13 @@ impl App {
                 self.input_mode = InputMode::TagFilter;
             }
             Action::CycleSort => {
-                self.sort = self.sort.next();
+                // Out of match order into the sort that was chosen, before
+                // moving on from it.
+                if self.by_match {
+                    self.match_order = false;
+                } else {
+                    self.sort = self.sort.next();
+                }
                 self.status = format!("sort: {}", self.sort.label());
                 self.rebuild();
                 self.goto_top();
@@ -2495,6 +2509,7 @@ impl App {
     /// Set a specific sort (clicking a column header, rather than cycling).
     pub fn set_sort(&mut self, s: Sort) {
         self.sort = s;
+        self.match_order = false;
         self.status = format!("sort: {}", s.label());
         self.rebuild();
         self.goto_top();
@@ -2711,6 +2726,7 @@ impl App {
                     // happened to be on.
                     KeyCode::Backspace => {
                         self.fuzzy.pop();
+                        self.match_order = true;
                         self.rebuild();
                         self.goto_top();
                     }
@@ -2718,6 +2734,7 @@ impl App {
                     KeyCode::Down => self.move_by(1),
                     KeyCode::Char(c) if !ctrl => {
                         self.fuzzy.push(c);
+                        self.match_order = true;
                         self.rebuild();
                         self.goto_top();
                     }
@@ -3130,6 +3147,58 @@ mod logic_tests {
             "{:?}",
             a.status
         );
+    }
+
+    #[test]
+    fn choosing_a_sort_over_a_ranked_search_sorts_it() {
+        // The best match always came first, so `s` and a click on a
+        // heading said "sort: size" over a list that did not move.
+        let mut a = app();
+        let rank = |a: &mut App| {
+            a.deep = "zpool".into();
+            a.deep_generation += 1;
+            let mut hits = HashMap::new();
+            for (p, score) in [("/p/bbbbbbbb-2.jsonl", 1.0), ("/p/eeeeeeee-5.jsonl", 9.0)] {
+                let hit = search::Hit {
+                    excerpt: "…".into(),
+                    score,
+                };
+                hits.insert(p.to_string(), hit);
+            }
+            a.deep_tx
+                .send(DeepResult {
+                    generation: a.deep_generation,
+                    hits,
+                    how: search::How::Indexed,
+                })
+                .unwrap();
+            a.absorb_deep();
+        };
+        let order = |a: &App| -> Vec<String> {
+            a.view
+                .iter()
+                .filter_map(|r| match r {
+                    Row::Item(i) => Some(a.all[*i].id.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        rank(&mut a);
+        assert_eq!(order(&a), ["eeeeeeee-5", "bbbbbbbb-2"]);
+        // into the sort that was chosen -- recency -- not past it
+        a.do_action(Action::CycleSort);
+        assert_eq!(a.sort, Sort::Recency);
+        assert!(!a.by_match);
+        assert_eq!(order(&a), ["bbbbbbbb-2", "eeeeeeee-5"]);
+        a.set_sort(Sort::Size);
+        assert_eq!(order(&a), ["eeeeeeee-5", "bbbbbbbb-2"], "the bigger first");
+        a.set_sort(Sort::Recency);
+        assert_eq!(order(&a), ["bbbbbbbb-2", "eeeeeeee-5"]);
+        // and the next search is in match order again
+        a.start_deep();
+        rank(&mut a);
+        assert!(a.by_match);
+        assert_eq!(order(&a), ["eeeeeeee-5", "bbbbbbbb-2"]);
     }
 
     #[test]
