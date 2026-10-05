@@ -1711,7 +1711,7 @@ fn guide() -> Vec<H> {
         Say("Claude keeps them all; it just cannot show you across directories. This can."),
         Gap,
         Head("finding one"),
-        Key("/", "", "narrow the list by title, folder, branch, tag, note or id"),
+        Key("/", "", "narrow by title, folder, branch, tag, note, last prompt or id"),
         Key("F", "^f", "search inside the conversations themselves"),
         Key("m", "", "switch what that searches: what was said, a file it edited, a tool it ran, or everything"),
         Say("Content search is indexed and effectively instant. \"everything\" also reads tool"),

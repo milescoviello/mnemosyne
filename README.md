@@ -287,8 +287,10 @@ work too: `'exact`, `^start`, `end$` and `!not`.
 `F` searches *inside* the conversations.
 
 Several words find the sessions that have every one of them, anywhere in
-the conversation and in any form — `installation` finds "install". Put
-words in quotes to find them together, as a phrase.
+the conversation, and the index finds a word in its other forms —
+`installation` finds "install". Put words in quotes to find them together,
+as a phrase. What the index cannot take, and everything mode, is looked
+for as written.
 
 The best answer comes first, and `v` on it opens the conversation at the
 match rather than at its end; `n` and `N` step to the next match and back.
@@ -769,7 +771,7 @@ ones that said "installation" forty times and "hyprland" once. A hit's
 score is now raised by how much of the query its title says, up to double
 when it says all of it. Asked for two words of what was first asked in a
 session, the search now puts that session first 63% of the time, up from
-44%, and in the top five 86%. (The question by title words reads the title
+44%, and in the top five 87%. (The question by title words reads the title
 too, so it no longer says much.)
 
 **Some of the words is better than nothing.** With every word required, one
@@ -778,7 +780,9 @@ said — leaves nothing at all. When neither the index nor the scan finds a
 session with every word, the ones with some of them are listed instead, the
 most of them first, and the status line says that is what they are:
 `no session has every word of “…” — 12 have some`. `--search` says it on
-stderr.
+stderr. That is the index's to answer, so it is a content search's, of
+words it can take: not `c++` or Japanese, which are looked for as written,
+nor everything mode.
 
 **The viewer goes to the match.** A session found by what was said in it
 opened at its end, and the match was somewhere above, to be scrolled for by
@@ -975,7 +979,7 @@ worth keeping as a fallback if the binary is ever missing:
 ## Development
 
 ```sh
-cargo test          # 468 tests, no network and no fixtures on disk
+cargo test          # 509 tests, no network and no fixtures on disk
 cargo clippy --all-targets -- -D warnings
 tools/shell-selftest.sh           # the wrappers under bash, zsh and fish, 270 checks
 tools/install-selftest.sh         # install.sh into empty homes, then `mn` in each shell
