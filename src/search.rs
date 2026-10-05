@@ -756,6 +756,23 @@ impl Spotter {
         self.terms.is_empty()
     }
 
+    /// Only the terms `text` does not have.
+    pub fn missing_from(&self, text: &str) -> Spotter {
+        let mut has = vec![false; self.terms.len()];
+        for s in self.spots(text) {
+            has[s.term] = true;
+        }
+        Spotter {
+            terms: self
+                .terms
+                .iter()
+                .zip(has)
+                .filter(|(_, h)| !h)
+                .map(|(t, _)| t.clone())
+                .collect(),
+        }
+    }
+
     /// How many terms there are to find.
     pub fn len(&self) -> usize {
         self.terms.len()

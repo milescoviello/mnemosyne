@@ -24,13 +24,18 @@ fn shown(full: &str, find: Option<&crate::search::Spotter>) -> String {
     let Some(find) = find.filter(|f| !f.is_empty()) else {
         return text;
     };
-    if find.count(&text) > 0 || find.count(full) == 0 {
+    // Cut where it is when the cut has all the turn has: with any one of
+    // several words in its first 700 characters, the rest were past the
+    // end and never shown.
+    if find.count(&text) >= find.count(full) {
         return text;
     }
+    // The start, then the stretch around what the start does not have.
+    let head = crate::scan::squash(full, 300);
+    let after = full.char_indices().nth(300).map_or(full.len(), |(i, _)| i);
     format!(
-        "{} {}",
-        crate::scan::squash(full, 300),
-        crate::search::excerpt_by(full, find)
+        "{head} {}",
+        crate::search::excerpt_by(&full[after..], &find.missing_from(&head))
     )
 }
 
@@ -261,6 +266,16 @@ mod tests {
         // without a search it is cut as it was
         let (turns, _) = load_turns(&s, 1 << 20, 10, None);
         assert!(!turns[0].text.contains("zpool"));
+        // and with several words, the one past the cut is still brought in
+        let long = format!(
+            "hyprland is the compositor {} then it crashed",
+            "a ".repeat(600)
+        );
+        let (_d, s) = write_transcript(&[user(&long), asst("ok")]);
+        let find = crate::search::Spotter::new("hyprland crashed");
+        let (turns, _) = load_turns(&s, 1 << 20, 10, Some(&find));
+        assert!(turns[0].text.contains("crashed"), "{:?}", turns[0].text);
+        assert!(turns[0].text.starts_with("hyprland"));
     }
 
     #[test]
