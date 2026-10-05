@@ -286,6 +286,10 @@ work too: `'exact`, `^start`, `end$` and `!not`.
 
 `F` searches *inside* the conversations.
 
+Several words find the sessions that have every one of them, anywhere in
+the conversation and in any form — `installation` finds "install". Put
+words in quotes to find them together, as a phrase.
+
 Content search runs against a full-text index, so it answers in
 **milliseconds** rather than re-reading the corpus:
 
@@ -725,6 +729,18 @@ prefix query, so `pool` finds "pooling". A phrase was not, so
 "page faults" — the same search behaving two ways depending on its length.
 Both are prefix queries now: on this corpus `kernel patch` went from 7 hits
 to 17, `permission mode` from 6 to 13.
+
+**Several words mean all of them, in any order.** They were one phrase, so
+they had to sit side by side in the order typed. Given two of the rarest
+words of a session's own title, the search found that session 28% of the
+time; two words of what you first asked in it, 25%. Each word is now looked
+for on its own, anywhere in the session, and a phrase is what you put in
+quotes: `"page fault"`. A word also brings its other forms. A title says
+"installation" where the session said "install", and "optimization" where
+it said "optimize", so each word is asked for together with its root —
+`install`, `optimiz` — cut from a few plain English endings, and never
+shorter than four letters. The two questions now find their session 83% and
+100% of the time; `tools/search-eval.py` asks them of any binary.
 
 **What the index cannot tokenise is looked for as written.** The index
 splits text on anything that is not a letter or a digit, and does not split

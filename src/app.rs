@@ -253,9 +253,6 @@ pub struct App {
     /// inside a subagent is invisible whenever its parent did not also match,
     /// because only parents appear at the top level.
     deep_parent_hits: HashSet<String>,
-    /// The FTS expression behind the current results, if they came from the
-    /// index. Excerpts are fetched per row rather than for every hit.
-    deep_expr: Option<String>,
     snippet_cache: HashMap<String, String>,
     pub deep_busy: bool,
     pub deep_generation: u64,
@@ -389,7 +386,6 @@ impl App {
             deep_mode: search::Mode::Content,
             deep_hits: None,
             deep_parent_hits: HashSet::new(),
-            deep_expr: None,
             snippet_cache: HashMap::new(),
             deep_busy: false,
             deep_generation: 0,
@@ -1873,16 +1869,6 @@ impl App {
         // corpus, and excluding them by default meant the answer could sit in
         // a file the search never opened.
         let sessions: Vec<Session> = self.all.clone();
-        self.deep_expr = if mode == search::Mode::Content {
-            let e = search::fts_expr(&q);
-            if e.is_empty() {
-                None
-            } else {
-                Some(e)
-            }
-        } else {
-            None
-        };
         self.snippet_cache.clear();
         self.deep_busy = true;
         std::thread::spawn(move || {

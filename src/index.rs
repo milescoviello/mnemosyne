@@ -499,34 +499,47 @@ impl Index {
         Ok(rows.flatten().collect())
     }
 
-    /// Paths whose indexed prose contains `needle` as written, folded the
-    /// way the scan folds, each with an excerpt around it.
+    /// Paths whose indexed prose contains every one of `terms` as written,
+    /// folded the way the scan folds, each with an excerpt around `query`.
     ///
-    /// For the queries FTS5 cannot put to its tokens. Reads the stored prose
-    /// once, borrowing each row rather than copying it -- about a tenth of
-    /// what the exhaustive scan would read, and on the corpus here a small
-    /// fraction of a second.
-    pub fn prose_containing(&self, needle: &str) -> Result<HashMap<String, String>> {
-        let lowered = needle.to_ascii_lowercase();
-        // Each row lowercased into one buffer and searched with memmem, as the
-        // scan does: twice as fast as a case-insensitive search over it. And,
-        // as the scan does, the query lowercased in full as well, when that
-        // is different: a capital outside ASCII has no other way to its
-        // lowercase.
-        let finder = memchr::memmem::Finder::new(lowered.as_bytes());
-        let full = needle.to_lowercase();
-        let also = (full != lowered).then(|| memchr::memmem::Finder::new(full.as_bytes()));
+    /// For the queries FTS5 cannot put to its tokens. Each term is a list of
+    /// the ways it may be written, any one of which will do. Reads the
+    /// stored prose once, borrowing each row rather than copying it -- about
+    /// a tenth of what the exhaustive scan would read, and on the corpus here
+    /// a small fraction of a second.
+    pub fn prose_containing(
+        &self,
+        terms: &[Vec<String>],
+        query: &str,
+    ) -> Result<HashMap<String, String>> {
+        // Each row lowercased into one buffer and searched with memmem, as
+        // the scan does: twice as fast as a case-insensitive search over it.
+        let finders: Vec<Vec<memchr::memmem::Finder>> = terms
+            .iter()
+            .map(|ways| {
+                ways.iter()
+                    .map(|w| {
+                        memchr::memmem::Finder::new(w.to_ascii_lowercase().as_bytes()).into_owned()
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut out = HashMap::new();
+        if finders.is_empty() {
+            return Ok(out);
+        }
         let mut low: Vec<u8> = Vec::new();
         let mut st = self.conn.prepare("SELECT path, text FROM body")?;
         let mut rows = st.query([])?;
-        let mut out = HashMap::new();
         while let Some(r) = rows.next()? {
             let text = r.get_ref(1)?.as_str()?;
             low.clear();
             low.extend(text.bytes().map(|b| b.to_ascii_lowercase()));
-            if finder.find(&low).is_some() || also.as_ref().is_some_and(|f| f.find(&low).is_some())
+            if finders
+                .iter()
+                .all(|ways| ways.iter().any(|f| f.find(&low).is_some()))
             {
-                out.insert(r.get(0)?, crate::search::excerpt(text, needle));
+                out.insert(r.get(0)?, crate::search::excerpt(text, query));
             }
         }
         Ok(out)
@@ -1313,15 +1326,71 @@ mod pipeline_tests {
     }
 
     #[test]
-    fn a_phrase_matches_only_when_the_words_are_adjacent() {
+    fn words_in_quotes_match_only_when_they_are_adjacent() {
         let (_d, idx, key) = indexed(&[&said("user", "the page fault happened at boot")]);
-        assert_eq!(
-            idx.search_text(&crate::search::fts_expr("page fault"))
-                .unwrap(),
-            vec![key]
-        );
+        for q in ["page fault", "\"page fault\""] {
+            assert_eq!(
+                idx.search_text(&crate::search::fts_expr(q)).unwrap(),
+                vec![key.clone()],
+                "{q}"
+            );
+        }
         assert!(idx
-            .search_text(&crate::search::fts_expr("fault page"))
+            .search_text(&crate::search::fts_expr("\"fault page\""))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn several_words_match_wherever_they_are_said() {
+        // They were one phrase, so they had to sit side by side in the
+        // order typed. Two words of a session's own title found it one time
+        // in four, and the whole title one time in eleven.
+        let (_d, idx, key) = indexed(&[
+            &said("user", "the hyprland config has a typo somewhere"),
+            &said("assistant", "the installer left the old file behind"),
+        ]);
+        for q in [
+            "hyprland installer",
+            "installer hyprland",
+            "typo hyprland config",
+        ] {
+            assert_eq!(
+                idx.search_text(&crate::search::fts_expr(q)).unwrap(),
+                vec![key.clone()],
+                "{q}"
+            );
+        }
+        // every word still has to be there
+        assert!(idx
+            .search_text(&crate::search::fts_expr("hyprland wayland"))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_word_finds_the_other_forms_of_it() {
+        // A title says "installation" where the session said "install".
+        let (_d, idx, key) = indexed(&[
+            &said("user", "please install hyprland and configure it"),
+            &said("assistant", "debugged the reboot loop; it stopped"),
+        ]);
+        for q in [
+            "hyprland installation",
+            "configuration",
+            "debugging",
+            "reboots",
+            "stopping",
+        ] {
+            assert_eq!(
+                idx.search_text(&crate::search::fts_expr(q)).unwrap(),
+                vec![key.clone()],
+                "{q}"
+            );
+        }
+        // but what is in quotes is looked for as written
+        assert!(idx
+            .search_text(&crate::search::fts_expr("\"installation\""))
             .unwrap()
             .is_empty());
     }
@@ -1339,7 +1408,7 @@ mod pipeline_tests {
             &[(s.path.to_string_lossy().into(), TextUpdate::Replace(t))],
         )
         .unwrap();
-        let hits = idx.prose_containing("C++").unwrap();
+        let hits = idx.prose_containing(&[vec!["C++".into()]], "C++").unwrap();
         assert_eq!(hits.keys().collect::<Vec<_>>(), vec![&key]);
         assert!(hits[&key].contains("c++"), "{:?}", hits[&key]);
     }
@@ -1353,7 +1422,10 @@ mod pipeline_tests {
                 .is_empty(),
             "the tokenizer found it after all; this test is stale"
         );
-        assert!(idx.prose_containing("テキスト").unwrap().contains_key(&key));
+        assert!(idx
+            .prose_containing(&[vec!["テキスト".into()]], "テキスト")
+            .unwrap()
+            .contains_key(&key));
     }
 
     #[test]
