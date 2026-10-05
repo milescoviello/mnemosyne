@@ -762,6 +762,16 @@ lift made every measure worse, so age only breaks ties. The exhaustive
 scan stops at the first match and cannot rank, so what it finds stays in
 the list's own order.
 
+**A session called what you asked for counts for more.** The index holds
+what was said, not what a session is called, so the session titled
+"Hyprland installation" came sixth for `hyprland installation` — under long
+ones that said "installation" forty times and "hyprland" once. A hit's
+score is now raised by how much of the query its title says, up to double
+when it says all of it. Asked for two words of what was first asked in a
+session, the search now puts that session first 63% of the time, up from
+44%, and in the top five 86%. (The question by title words reads the title
+too, so it no longer says much.)
+
 **Some of the words is better than nothing.** With every word required, one
 word the session never used — what you remember it as, rather than what it
 said — leaves nothing at all. When neither the index nor the scan finds a

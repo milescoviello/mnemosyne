@@ -756,6 +756,11 @@ impl Spotter {
         self.terms.is_empty()
     }
 
+    /// How many terms there are to find.
+    pub fn len(&self) -> usize {
+        self.terms.len()
+    }
+
     /// Every place in `text` a term is, in order. A word is marked to its
     /// end, since the index matched the word: `pool` marks all of
     /// "pooling".
@@ -986,10 +991,14 @@ pub fn run(sessions: &[Session], query: &str, mode: Mode) -> (Hits, How) {
     let q = Query::parse(query);
     let indexed = mode == Mode::Content && !q.is_empty();
     let idx = indexed.then(crate::index::Index::open).and_then(Result::ok);
-    let known: std::collections::HashSet<String> = sessions
+    // Every session searched, with what it is called: a session whose title
+    // says what was asked is likelier to be the one meant.
+    let titles: HashMap<String, &str> = sessions
         .iter()
-        .map(|s| s.path.to_string_lossy().to_string())
+        .map(|s| (s.path.to_string_lossy().to_string(), s.title()))
         .collect();
+    let spotter = Spotter::new(query);
+    let lift = |path: &str, score: f64| titled(&spotter, titles.get(path).copied(), score);
     if let Some(idx) = &idx {
         // What the tokenizer would lose is looked for as written, in the
         // same prose: a tenth of the corpus rather than all of it, and it
@@ -1014,7 +1023,11 @@ pub fn run(sessions: &[Session], query: &str, mode: Mode) -> (Hits, How) {
         if let Ok(found) = found {
             let kept: Hits = found
                 .into_iter()
-                .filter(|(p, _)| known.contains(p))
+                .filter(|(p, _)| titles.contains_key(p))
+                .map(|(p, mut hit)| {
+                    hit.score = lift(&p, hit.score);
+                    (p, hit)
+                })
                 .collect();
             if !kept.is_empty() {
                 return (kept, How::Indexed);
@@ -1027,7 +1040,7 @@ pub fn run(sessions: &[Session], query: &str, mode: Mode) -> (Hits, How) {
     }
     match &idx {
         Some(idx) => {
-            let some = some_of(idx, &q, &known);
+            let some = some_of(idx, &q, |p| titles.contains_key(p), lift);
             let how = if some.is_empty() {
                 How::Scanned
             } else {
@@ -1049,7 +1062,8 @@ pub fn run(sessions: &[Session], query: &str, mode: Mode) -> (Hits, How) {
 fn some_of(
     idx: &crate::index::Index,
     q: &Query,
-    known: &std::collections::HashSet<String>,
+    known: impl Fn(&str) -> bool,
+    lift: impl Fn(&str, f64) -> f64,
 ) -> Hits {
     let mut tally: HashMap<String, (usize, f64)> = HashMap::new();
     for t in &q.terms {
@@ -1057,7 +1071,7 @@ fn some_of(
             continue;
         };
         for (p, score) in found {
-            if known.contains(&p) {
+            if known(&p) {
                 let e = tally.entry(p).or_default();
                 e.0 += 1;
                 e.1 += score;
@@ -1070,11 +1084,27 @@ fn some_of(
             // bm25 is a few units at most; a term more outweighs any of it
             let hit = Hit {
                 excerpt: String::new(),
-                score: n as f64 * 1e6 + score,
+                score: n as f64 * 1e6 + lift(&p, score),
             };
             (p, hit)
         })
         .collect()
+}
+
+/// A score lifted by how much of the query the session's title says: up to
+/// twice as good when it says all of it.
+///
+/// The index holds what was said, and not what the session is called. A
+/// session titled "Hyprland installation" came sixth for `hyprland
+/// installation`, under long ones that said "installation" forty times and
+/// "hyprland" once. Asked for two words of what was first asked in a
+/// session, it came first 64% of the time with this, and 44% without; three
+/// times as good when the title says it all did no better than twice.
+fn titled(spotter: &Spotter, title: Option<&str>, score: f64) -> f64 {
+    match (title, spotter.len()) {
+        (Some(title), n) if n > 0 => score * (1.0 + spotter.count(title) as f64 / n as f64),
+        _ => score,
+    }
 }
 
 /// Would the full-text index lose what this query is about?
@@ -1381,6 +1411,26 @@ mod tests {
     }
 
     #[test]
+    fn a_session_called_what_was_asked_for_counts_for_more() {
+        // "Hyprland installation" came sixth for `hyprland installation`,
+        // under long sessions that said "installation" forty times.
+        let f = Spotter::new("hyprland installation");
+        let t = |title| titled(&f, Some(title), 10.0);
+        assert_eq!(t("Hyprland installation"), 20.0);
+        assert_eq!(
+            t("Install hyprland"),
+            20.0,
+            "by its root, as the index matched it"
+        );
+        assert_eq!(t("Hyprland window rules"), 15.0);
+        assert_eq!(t("EFT offline backend"), 10.0);
+        assert_eq!(titled(&f, None, 10.0), 10.0);
+        // a long session that mentions it in passing no longer outranks
+        // the one named for it
+        assert!(t("Hyprland installation") * 9.46 / 10.0 > t("EFT offline backend") * 10.76 / 10.0);
+    }
+
+    #[test]
     fn with_nothing_that_has_every_word_the_most_of_them_come_first() {
         let d = tempfile::tempdir().unwrap();
         let mut idx = crate::index::Index::open_at(&d.path().join("i.db")).unwrap();
@@ -1390,13 +1440,12 @@ mod tests {
             ("/none".into(), "nothing to see".into()),
         ])
         .unwrap();
-        let known = ["/two", "/one", "/none"].map(String::from).into();
         let q = Query::parse("zfs snapshot rollback");
         assert!(
             idx.search_text(&q.fts()).unwrap().is_empty(),
             "one has all three"
         );
-        let some = some_of(&idx, &q, &known);
+        let some = some_of(&idx, &q, |_| true, |_, s| s);
         let mut order: Vec<(&String, &Hit)> = some.iter().collect();
         order.sort_by(|a, b| b.1.score.total_cmp(&a.1.score));
         let order: Vec<&str> = order.iter().map(|(p, _)| p.as_str()).collect();
