@@ -56,10 +56,18 @@ __mn_quote() {
 }
 
 # Run a command in a new terminal window; print which terminal was used.
+#
+# The terminals people install for themselves first, then the ones desktops
+# ship, then whatever the system calls its terminal, and xterm last. The
+# desktops' own were missing: GNOME's Ptyxis, MATE's, LXQt's and XFCE's
+# never opened, so a window from GNOME on Fedora or Ubuntu, MATE, LXQt or
+# i3 was "no terminal emulator found", and Debian's GNOME and XFCE got xterm.
 __mn_term_open() {
     local cwd="$1" inner="$2" term
     local -a cmd
-    for term in $MN_TERMINAL alacritty konsole kitty wezterm foot ghostty xterm; do
+    for term in $MN_TERMINAL alacritty konsole kitty wezterm foot ghostty \
+            ptyxis gnome-terminal kgx xfce4-terminal mate-terminal qterminal \
+            tilix terminator lxterminal urxvt xdg-terminal-exec x-terminal-emulator xterm; do
         command -v "$term" >/dev/null 2>&1 || continue
         case "$term" in
             alacritty) cmd=("$term" --working-directory "$cwd" -e bash -lc "$inner") ;;
@@ -68,6 +76,17 @@ __mn_term_open() {
             wezterm)   cmd=("$term" start --cwd "$cwd" -- bash -lc "$inner") ;;
             foot)      cmd=("$term" --working-directory="$cwd" bash -lc "$inner") ;;
             ghostty)   cmd=("$term" --working-directory="$cwd" -e bash -lc "$inner") ;;
+            ptyxis)    cmd=("$term" --new-window --working-directory="$cwd" -- bash -lc "$inner") ;;
+            gnome-terminal|kgx) cmd=("$term" --working-directory="$cwd" -- bash -lc "$inner") ;;
+            # -x, not -e: their -e takes one word, and `-lc` came back as
+            # an option they did not know
+            xfce4-terminal|mate-terminal|terminator) cmd=("$term" --working-directory="$cwd" -x bash -lc "$inner") ;;
+            tilix)     cmd=("$term" -w "$cwd" -x bash -lc "$inner") ;;
+            qterminal) cmd=("$term" --workdir "$cwd" -e bash -lc "$inner") ;;
+            lxterminal) cmd=("$term" --working-directory="$cwd" -e bash -lc "$inner") ;;
+            urxvt)     cmd=("$term" -cd "$cwd" -e bash -lc "$inner") ;;
+            # the desktop's own choice, whichever terminal that is
+            xdg-terminal-exec) cmd=("$term" bash -lc "$inner") ;;
             *)         cmd=("$term" -e bash -lc "$inner") ;;
         esac
         __mn_spawn "${cmd[@]}"

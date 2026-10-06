@@ -552,6 +552,13 @@ Windows opened for you are started with `setsid`, in a session of their own.
 the child keeps the shell's process group and session, and closing the
 terminal you ran `mn` in sent SIGHUP to every window it had just opened.
 
+A window opens in the first of these that is installed: `$MN_TERMINAL`,
+then alacritty, konsole, kitty, wezterm, foot and ghostty, then the
+terminals desktops ship — Ptyxis, GNOME Terminal and Console, xfce4-terminal,
+mate-terminal, QTerminal, Tilix, Terminator, LXTerminal and urxvt — then
+`xdg-terminal-exec`, `x-terminal-emulator`, and xterm last. Set
+`MN_TERMINAL` to the one you want; any terminal that takes `-e` works there.
+
 `--restore` skips anything already running or already in a tmux session, and
 anything whose directory has since been deleted. `--reopen` does the same,
 and works even after the offer has been dismissed — so it is the one to put

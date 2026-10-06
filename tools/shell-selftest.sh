@@ -276,6 +276,50 @@ run_shell() {
     out=$(PATH="$lim" MN_TERMINAL= "$runner" -c "$source_line; mn --restore" 2>&1)
     has "$shell_name: with no tmux and no terminal, it says so" "no terminal emulator found" "$out"
 
+    # --- a desktop's own terminal comes before xterm
+    # Debian's GNOME and XFCE have xterm as well, and that is what they got.
+    local lim2="$tmp/lim2" t
+    rm -rf "$lim2"
+    cp -R "$lim" "$lim2"
+    for t in mate-terminal xterm; do
+        printf '#!/bin/sh\necho "%s: $*" >> "$MN_TEST_LOG"\n' "$t" > "$lim2/$t"
+        chmod +x "$lim2/$t"
+    done
+    write_plan "$WINDOW_PLAN"
+    : > "$log"
+    PATH="$lim2" MN_TERMINAL= "$runner" -c "$source_line; mn" >/dev/null 2>&1
+    wait_for "terminal: " "$log"
+    has "$shell_name: a desktop's own terminal comes before xterm" "mate-terminal: " "$(cat "$log")"
+
+    # --- and each is told what to run the way it understands
+    # Ptyxis, GNOME's terminals, MATE's, XFCE's and LXQt's were not in the
+    # list at all; given `-e` the way xterm is, MATE's and XFCE's read `-lc`
+    # as an option of their own and opened nothing.
+    local spec want
+    rm -rf "$tmp/terms"
+    mkdir -p "$tmp/terms"
+    for spec in \
+        "ptyxis|--new-window --working-directory=$tmp/work-a -- $inner -lc cd" \
+        "gnome-terminal|--working-directory=$tmp/work-a -- $inner -lc cd" \
+        "kgx|--working-directory=$tmp/work-a -- $inner -lc cd" \
+        "xfce4-terminal|--working-directory=$tmp/work-a -x $inner -lc cd" \
+        "mate-terminal|--working-directory=$tmp/work-a -x $inner -lc cd" \
+        "terminator|--working-directory=$tmp/work-a -x $inner -lc cd" \
+        "tilix|-w $tmp/work-a -x $inner -lc cd" \
+        "qterminal|--workdir $tmp/work-a -e $inner -lc cd" \
+        "lxterminal|--working-directory=$tmp/work-a -e $inner -lc cd" \
+        "urxvt|-cd $tmp/work-a -e $inner -lc cd" \
+        "xdg-terminal-exec|$inner -lc cd"; do
+        t=${spec%%|*} want=${spec#*|}
+        printf '#!/bin/sh\necho "%s: $*" >> "$MN_TEST_LOG"\n' "$t" > "$tmp/terms/$t"
+        chmod +x "$tmp/terms/$t"
+        write_plan "$WINDOW_PLAN"
+        : > "$log"
+        PATH="$tmp/terms:$PATH" MN_TERMINAL=$t "$runner" -c "$source_line; mn" >/dev/null 2>&1
+        wait_for "$t: " "$log"
+        has "$shell_name: $t is told what to run its own way" "$t: $want" "$(cat "$log")"
+    done
+
     # --- a folder that is there but cannot be entered
     # fish printed the cd error and resumed where you were anyway.
     mkdir -p "$tmp/locked"

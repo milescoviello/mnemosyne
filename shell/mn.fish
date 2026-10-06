@@ -343,8 +343,16 @@ function __mn_term_open --description 'Run a command in a new terminal window; e
     set -l cwd $argv[1]
     set -l inner $argv[2]
 
+    # The terminals people install for themselves first, then the ones
+    # desktops ship, then whatever the system calls its terminal, and xterm
+    # last. The desktops' own were missing: GNOME's Ptyxis, MATE's, LXQt's
+    # and XFCE's never opened, so a window from GNOME on Fedora or Ubuntu,
+    # MATE, LXQt or i3 was "no terminal emulator found", and Debian's GNOME
+    # and XFCE got xterm.
     set -l cmd
-    for term in $MN_TERMINAL alacritty konsole kitty wezterm foot ghostty xterm
+    for term in $MN_TERMINAL alacritty konsole kitty wezterm foot ghostty \
+            ptyxis gnome-terminal kgx xfce4-terminal mate-terminal qterminal \
+            tilix terminator lxterminal urxvt xdg-terminal-exec x-terminal-emulator xterm
         test -z "$term"; and continue
         command -q $term; or continue
         switch $term
@@ -360,6 +368,25 @@ function __mn_term_open --description 'Run a command in a new terminal window; e
                 set cmd $term --working-directory="$cwd" fish -lc "$inner"
             case ghostty
                 set cmd $term --working-directory="$cwd" -e fish -lc "$inner"
+            case ptyxis
+                set cmd $term --new-window --working-directory="$cwd" -- fish -lc "$inner"
+            case gnome-terminal kgx
+                set cmd $term --working-directory="$cwd" -- fish -lc "$inner"
+            # -x, not -e: their -e takes one word, and `-lc` came back as an
+            # option they did not know
+            case xfce4-terminal mate-terminal terminator
+                set cmd $term --working-directory="$cwd" -x fish -lc "$inner"
+            case tilix
+                set cmd $term -w "$cwd" -x fish -lc "$inner"
+            case qterminal
+                set cmd $term --workdir "$cwd" -e fish -lc "$inner"
+            case lxterminal
+                set cmd $term --working-directory="$cwd" -e fish -lc "$inner"
+            case urxvt
+                set cmd $term -cd "$cwd" -e fish -lc "$inner"
+            # the desktop's own choice, whichever terminal that is
+            case xdg-terminal-exec
+                set cmd $term fish -lc "$inner"
             case '*'
                 set cmd $term -e fish -lc "$inner"
         end
