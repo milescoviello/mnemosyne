@@ -122,6 +122,19 @@ if [ -n "$real_tmux" ]; then
 exec "$real_tmux" -L mn-selftest "\$@"
 EOF
 fi
+
+# kill-server returns before the server has gone, and a server on its way
+# out closes every new connection it is handed. The new-session that set up
+# the next check then failed without a word, the chat it should have started
+# never ran, and mn -- rightly -- started one: "not started twice" failed
+# about one run in ten, on any distro and in every shell.
+kill_tmux() {
+    local pid i=0
+    pid=$("$bin/tmux" display-message -p '#{pid}' 2>/dev/null)
+    "$bin/tmux" kill-server 2>/dev/null
+    [ -n "$pid" ] || return 0
+    while kill -0 "$pid" 2>/dev/null && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+}
 chmod +x "$bin"/*
 
 # BusyBox's setsid, as Alpine has it: no -f. Plain, it forks when it has to
@@ -197,7 +210,7 @@ run_shell() {
     local inner="${4:-$1}"
     printf '\n%s\n' "$shell_name"
 
-    [ -n "$real_tmux" ] && "$bin/tmux" kill-server 2>/dev/null
+    [ -n "$real_tmux" ] && kill_tmux
 
     # --- a window each, with tmux underneath
     write_plan "$WINTMUX_PLAN"
@@ -229,7 +242,7 @@ run_shell() {
         seen=$(cat "$log")
         hasnt "$shell_name: a second run starts no second claude" "claude:" "$seen"
         has "$shell_name: it attaches to what is already there" "already running" "$out"
-        "$bin/tmux" kill-server 2>/dev/null
+        kill_tmux
     else
         skip "$shell_name: tmux checks" "tmux is not installed"
     fi
@@ -239,7 +252,7 @@ run_shell() {
     # name is whatever the chat already runs under. tmux allows spaces and
     # `$(...)` in one; unquoted, the first split it and the second ran.
     if [ -n "$real_tmux" ]; then
-        "$bin/tmux" kill-server 2>/dev/null
+        kill_tmux
         rm -f "$tmp/pwned"
         "$bin/tmux" new-session -d -s 'eft work $(touch pwned)' -c "$tmp/work-a" \
             "claude --resume 026bcdb5-8d88-4ad7-9f23-58649bf4f353"
@@ -257,7 +270,7 @@ run_shell() {
             ok "$shell_name: a tmux name is never run as a command"
         fi
         has "$shell_name: and the window still goes to it" "attach-session -t" "$(cat "$log")"
-        "$bin/tmux" kill-server 2>/dev/null
+        kill_tmux
     else
         skip "$shell_name: a tmux name that needs quoting" "tmux is not installed"
     fi
@@ -342,7 +355,7 @@ run_shell() {
     if [ -n "$real_tmux" ]; then
         local sid=026bcdb5-8d88-4ad7-9f23-58649bf4f353 form
         for form in "-r $sid" "--resume=$sid" "--session-id $sid"; do
-            "$bin/tmux" kill-server 2>/dev/null
+            kill_tmux
             : > "$log"
             "$bin/tmux" new-session -d -s work -c "$tmp/work-a" "claude $form"
             wait_for "claude: $form" "$log"
@@ -352,7 +365,7 @@ run_shell() {
             sleep 0.3
             hasnt "$shell_name: one started \`claude ${form%%[ =]*}\` is not started twice" "claude:" "$(cat "$log")"
         done
-        "$bin/tmux" kill-server 2>/dev/null
+        kill_tmux
     fi
 
     # --- nothing is drawn over the browser, and each window is said once
@@ -360,7 +373,7 @@ run_shell() {
     # printed then lands on top of it and vanishes with it -- which fish did
     # with every tmux session it created, and with "folder gone".
     if [ -n "$real_tmux" ]; then
-        "$bin/tmux" kill-server 2>/dev/null
+        kill_tmux
         write_plan "$WINTMUX_PLAN"
         out=$(MN_STUB_LINGER=1 "$runner" -c "$source_line; mn" 2>&1)
         local early="${out%%"-- browser closed --"*}"
@@ -377,14 +390,14 @@ run_shell() {
         else
             bad "$shell_name: each window is reported once" "reported $times times"
         fi
-        "$bin/tmux" kill-server 2>/dev/null
+        kill_tmux
     else
         skip "$shell_name: nothing printed over the browser" "tmux is not installed"
     fi
 
     # --- ctrl+t, into tmux in this terminal
     if [ -n "$real_tmux" ]; then
-        "$bin/tmux" kill-server 2>/dev/null
+        kill_tmux
         write_plan "$TMUX_PLAN"
         : > "$log"
         out=$("$runner" -c "$source_line; mn" 2>&1)
@@ -393,14 +406,14 @@ run_shell() {
         has "$shell_name: and says so" "straight into tmux  (tmux mn-66666666)" "$out"
         local tn; tn=$(grep -c "straight into tmux" <<< "$out")
         if [ "$tn" = 1 ]; then ok "$shell_name: once"; else bad "$shell_name: once" "said $tn times"; fi
-        "$bin/tmux" kill-server 2>/dev/null
+        kill_tmux
     else
         skip "$shell_name: ctrl+t" "tmux is not installed"
     fi
 
     # --- a tmux session named at the prompt
     if [ -n "$real_tmux" ]; then
-        "$bin/tmux" kill-server 2>/dev/null
+        kill_tmux
         write_plan "$NAMED_PLAN"
         : > "$log"
         out=$("$runner" -c "$source_line; mn" 2>&1)
@@ -415,7 +428,7 @@ run_shell() {
         seen=$(cat "$log")
         hasnt "$shell_name: a named session is still found again" "claude:" "$seen"
         has "$shell_name: and attached to by its real name" "tmux my-own-name, already running" "$out"
-        "$bin/tmux" kill-server 2>/dev/null
+        kill_tmux
     else
         skip "$shell_name: named tmux session" "tmux is not installed"
     fi
@@ -424,6 +437,7 @@ run_shell() {
     write_plan "$WINDOW_PLAN"
     : > "$log"
     out=$("$runner" -c "$source_line; mn; mysid" 2>&1)
+    wait_for "term-sid: " "$log"
     seen=$(cat "$log")
     local mine theirs
     mine=$(printf '%s' "$out" | sed -n 's/^my-sid: //p' | head -1)
@@ -459,15 +473,19 @@ run_shell() {
     fi
 
     # --- a plain window, and --ask
+    # The window is started detached, and may not have run yet when mn
+    # returns: read the log once it has.
     write_plan "$WINDOW_PLAN"
     : > "$log"
     out=$("$runner" -c "$source_line; mn" 2>&1)
+    wait_for "term: " "$log"
     seen=$(cat "$log")
     has "$shell_name: a window runs claude directly" "claude --resume 026bcdb5" "$seen"
     hasnt "$shell_name: an empty model adds no flag" "--model" "$seen"
 
     : > "$log"
     out=$("$runner" -c "$source_line; mn --ask" 2>&1)
+    wait_for "term: " "$log"
     seen=$(cat "$log")
     hasnt "$shell_name: --ask refuses to skip permissions" "--dangerously-skip-permissions" "$seen"
 
@@ -488,7 +506,7 @@ run_shell() {
 
     # --- one name, several chats
     if [ -n "$real_tmux" ]; then
-        "$bin/tmux" kill-server 2>/dev/null
+        kill_tmux
         write_plan "$CLASH_PLAN"
         : > "$log"
         out=$("$runner" -c "$source_line; mn" 2>&1)
@@ -504,7 +522,7 @@ run_shell() {
         fi
         has "$shell_name: the first takes the name" "batch" "$names"
         has "$shell_name: the second gets its own" "batch-2" "$names"
-        "$bin/tmux" kill-server 2>/dev/null
+        kill_tmux
     else
         skip "$shell_name: one name several chats" "tmux is not installed"
     fi
@@ -570,7 +588,7 @@ run_shell() {
     rm -f "$tmp/ran-it"
 
     if [ -n "$real_tmux" ]; then
-        "$bin/tmux" kill-server 2>/dev/null
+        kill_tmux
         write_plan "wintmux\t$odd\t44444444-5555-6666-7777-888888888888\t\tdefault\todd one\n"
         : > "$log"
         "$runner" -c "$source_line; mn $fwd_args" >/dev/null 2>&1
@@ -578,7 +596,7 @@ run_shell() {
         seen=$(cat "$log")
         has "$shell_name: under tmux, an argument with a space stays one" "$want_args" "$seen"
         has "$shell_name: under tmux, the odd folder is where it starts" "claude-pwd: $odd" "$seen"
-        "$bin/tmux" kill-server 2>/dev/null
+        kill_tmux
     else
         skip "$shell_name: arguments under tmux" "tmux is not installed"
     fi
