@@ -178,7 +178,12 @@ function __mn_tmux_ensure --description 'Make sure a tmux session exists for thi
         | string match -r '^[^\t]+\t.*[\s\x22\x27](--resume|-r|--session-id)[\x22\x27]?[ =][\x22\x27]?'$sid'.*$' \
         | string match -v -- '*--fork-session*' | head -1)
     if test -n "$running"
-        string split \t -- $running | head -1
+        # Both lines from builtins. The name came out of `head`, and fish
+        # collects an outside command's output on its own time: now and then
+        # `running` arrived first, and the window was told to attach to a
+        # tmux session called "running".
+        set -l fields (string split \t -- $running)
+        echo $fields[1]
         echo running
         return 0
     end
