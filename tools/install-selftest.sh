@@ -135,6 +135,25 @@ now=$(printf '%s\n' "$said" | sed -n '/use it now/,$p' | tail -n +2 | sed 's/^ *
 works=$(env -i HOME="$home" PATH="$base_path" TERM=dumb bash -c "$now
 mn -V" 2>&1)
 has "bash: and in this one, doing what it said" "$version" "$works"
+# An SSH login: bash reads a profile there, not .bashrc. This home has no
+# profile at all, which is how Alpine and NixOS make a new user, and `mn`
+# was missing from every SSH login on both.
+works=$(env -i HOME="$home" PATH="$base_path" TERM=dumb bash -l -i -c 'mn -V' 2>&1)
+has "bash: and in a login shell" "$version" "$works"
+
+# A profile that is already there is somebody's own, and bash reads only the
+# first one it finds: making a .profile next to it would change nothing, and
+# writing into theirs is not the installer's business.
+home="$tmp/home-bash-profile"
+mkdir -p "$home"
+printf '# my own\n' > "$home/.bash_profile"
+: > "$home/.bashrc"
+install_into bash-profile bash >/dev/null
+if [ -e "$home/.profile" ] || [ "$(cat "$home/.bash_profile")" != "# my own" ]; then
+    bad "bash: a profile already there is left alone" "$(ls -a "$home")"
+else
+    ok "bash: a profile already there is left alone"
+fi
 
 # ---- fish, before fish has ever been started --------------------------
 printf '\nfish, never started\n'

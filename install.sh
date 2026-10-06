@@ -190,6 +190,17 @@ for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
     wired="yes"
 done
 
+# A login bash -- an SSH session, a Mac's Terminal -- reads a profile and not
+# .bashrc, unless the profile sources it. Most distros give a new user one
+# that does; Alpine and NixOS give them none at all, and `mn` was missing
+# from every SSH login there. Only when there is none: a profile that is
+# already there is somebody's own, and bash reads just the first it finds.
+if [ "${SHELL##*/}" = bash ] && [ -f "$HOME/.bashrc" ] && [ ! -e "$HOME/.bash_profile" ] \
+    && [ ! -e "$HOME/.bash_login" ] && [ ! -e "$HOME/.profile" ]; then
+    printf '%s\n' '# mnemosyne: a login bash reads this file and not ~/.bashrc, so read that too' \
+        'if [ -n "$BASH_VERSION" ] && [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi' > "$HOME/.profile"
+    say "made ~/.profile, so a login bash reads ~/.bashrc too"
+fi
 
 # A path as fish reads it: in single quotes, where only \\ and \' mean
 # anything. Unquoted, a folder with a space in its name went to
