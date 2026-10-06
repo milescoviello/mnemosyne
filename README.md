@@ -832,9 +832,9 @@ worth keeping as a fallback if the binary is ever missing:
 ## Development
 
 ```sh
-cargo test          # 465 tests, no network and no fixtures on disk
+cargo test          # 468 tests, no network and no fixtures on disk
 cargo clippy --all-targets -- -D warnings
-tools/shell-selftest.sh           # the wrappers under bash, zsh and fish, 225 checks
+tools/shell-selftest.sh           # the wrappers under bash, zsh and fish, 267 checks
 tools/install-selftest.sh         # install.sh into empty homes, then `mn` in each shell
 MNEMOSYNE_WRITE_LOGOS=1 cargo test logos   # redraw docs/logo-*.svg from the mark
 python3 tools/demo-corpus.py /tmp/demo-home        # invented sessions
