@@ -284,17 +284,7 @@ pub fn install_latest() -> Result<String> {
         return Err(anyhow!("checksum did not match — refusing to install"));
     }
 
-    let status = Command::new("tar")
-        .args([
-            "-C",
-            &dir.to_string_lossy(),
-            "-xzf",
-            &tarball.to_string_lossy(),
-        ])
-        .status()?;
-    if !status.success() {
-        return Err(anyhow!("could not unpack the release"));
-    }
+    unpack(&tarball, &dir, "tar", "python3")?;
 
     let me = own_path()?;
     let new = dir.join("mnemosyne");
@@ -326,6 +316,46 @@ pub fn install_latest() -> Result<String> {
 
     touch_stamp();
     Ok(tag.trim_start_matches('v').to_string())
+}
+
+/// What python3 unpacks a tarball with, where there is no tar. The `data`
+/// filter refuses links and paths that leave the directory, where this
+/// python has it.
+const PY_UNTAR: &str = "import sys, tarfile
+f = {'filter': 'data'} if hasattr(tarfile, 'data_filter') else {}
+with tarfile.open(sys.argv[1]) as t:
+    t.extractall(sys.argv[2], **f)";
+
+/// Unpack a .tar.gz into `into` with `tar`, or with `python` where there is
+/// no tar. AlmaLinux and RHEL minimal images come without one -- install.sh
+/// died there on "tar: command not found" -- and dnf brings python with it.
+fn unpack(tarball: &Path, into: &Path, tar: &str, python: &str) -> Result<()> {
+    let missing = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+    match Command::new(tar)
+        .arg("-C")
+        .arg(into)
+        .arg("-xzf")
+        .arg(tarball)
+        .status()
+    {
+        Ok(s) if s.success() => return Ok(()),
+        Ok(_) => return Err(anyhow!("could not unpack the release")),
+        Err(e) if !missing(&e) => return Err(e.into()),
+        Err(_) => {}
+    }
+    match Command::new(python)
+        .args(["-c", PY_UNTAR])
+        .arg(tarball)
+        .arg(into)
+        .status()
+    {
+        Ok(s) if s.success() => Ok(()),
+        Ok(_) => Err(anyhow!("could not unpack the release")),
+        Err(e) if missing(&e) => Err(anyhow!(
+            "there is no tar to unpack the release with (install tar, or python3)"
+        )),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Update the installed shell functions, but only where one already exists —
@@ -419,6 +449,62 @@ mod tests {
         assert_ne!(other.0, p, "two updates shared a directory");
         drop(s);
         assert!(!p.exists(), "left behind");
+    }
+
+    /// A release as the workflow packs one, `tar -C dist -czf`; None where
+    /// there is no tar to pack it with.
+    fn packed(dir: &Path) -> Option<PathBuf> {
+        let dist = dir.join("dist");
+        std::fs::create_dir_all(&dist).unwrap();
+        std::fs::write(dist.join("mnemosyne"), b"the binary").unwrap();
+        let t = dir.join("m.tar.gz");
+        let packed = Command::new("tar")
+            .arg("-C")
+            .arg(&dist)
+            .arg("-czf")
+            .arg(&t)
+            .arg(".")
+            .status();
+        packed.ok()?.success().then_some(t)
+    }
+
+    #[test]
+    fn an_update_unpacks_with_tar() {
+        let d = tempfile::tempdir().unwrap();
+        let Some(t) = packed(d.path()) else { return };
+        let out = d.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        unpack(&t, &out, "tar", "mn-test-no-such-python").unwrap();
+        assert_eq!(std::fs::read(out.join("mnemosyne")).unwrap(), b"the binary");
+    }
+
+    #[test]
+    fn with_no_tar_an_update_unpacks_with_python() {
+        // AlmaLinux and RHEL minimal images have python, and no tar.
+        let d = tempfile::tempdir().unwrap();
+        let Some(t) = packed(d.path()) else { return };
+        if Command::new("python3").arg("-V").output().is_err() {
+            return;
+        }
+        let out = d.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        unpack(&t, &out, "mn-test-no-such-tar", "python3").unwrap();
+        assert_eq!(std::fs::read(out.join("mnemosyne")).unwrap(), b"the binary");
+    }
+
+    #[test]
+    fn with_neither_an_update_says_tar_is_what_is_missing() {
+        let d = tempfile::tempdir().unwrap();
+        let t = d.path().join("m.tar.gz");
+        std::fs::write(&t, b"").unwrap();
+        let e = unpack(
+            &t,
+            d.path(),
+            "mn-test-no-such-tar",
+            "mn-test-no-such-python",
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("no tar to unpack"), "{e}");
     }
 
     #[test]
