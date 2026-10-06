@@ -61,33 +61,59 @@ sha256_of() {
     fi
 }
 
+# Unpack a .tar.gz into a directory. AlmaLinux and RHEL minimal images come
+# without tar, and every install there ended in "tar: command not found".
+# dnf brings python with it, and python reads tarballs.
+unpack() {
+    if have tar; then
+        tar -C "$2" -xzf "$1"
+    elif have python3; then
+        python3 -c 'import sys, tarfile
+f = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+with tarfile.open(sys.argv[1]) as t:
+    t.extractall(sys.argv[2], **f)' "$1" "$2"
+    else
+        return 1
+    fi
+}
+
+# Why there is no prebuilt binary, for whoever has to say so. Anything going
+# wrong in here -- no tar, a download cut short -- used to come out as "no
+# prebuilt binary to install", which sent you off to clone and build for a
+# missing tar.
+why=""
+
 fetch_prebuilt() {
-    have curl || return 1
+    have curl || { why="there is no curl to download it with"; return 1; }
     local url tmp name
-    name="$(asset_for_platform)" || return 1
+    name="$(asset_for_platform)" || { why="there is no prebuilt binary for $(uname -s) $(uname -m)"; return 1; }
     url="https://github.com/$REPO/releases/latest/download/$name"
-    tmp="$(mktemp -d)"
+    tmp="$(mktemp -d)" || { why="could not make a temporary directory to download into"; return 1; }
     KEEP="$tmp"
     say "fetching the latest release for $(uname -s) $(uname -m)…"
-    curl -fsSL "$url" -o "$tmp/m.tar.gz" || return 1
+    curl -fsSL "$url" -o "$tmp/m.tar.gz" || { why="could not download $url"; return 1; }
     # Verified, or not installed. A checksum that was not published, or no
     # tool to check one with, used to skip the check and install whatever
     # arrived -- where the updater has always refused both.
     if ! curl -fsSL "$url.sha256" -o "$tmp/m.sha256" 2>/dev/null; then
-        say "no checksum was published for it — not installing it"
+        why="no checksum was published for it, so it was not installed"
         return 1
     fi
     want="$(awk '{print $1}' "$tmp/m.sha256")"
     got="$(sha256_of "$tmp/m.tar.gz")"
     if [ -z "$got" ]; then
-        say "there is no sha256sum or shasum to check it with — not installing it"
+        why="there is no sha256sum or shasum to check it with, so it was not installed"
         return 1
     fi
     if [ -z "$want" ] || [ "$want" != "$got" ]; then
-        say "checksum did not match — not installing it"
+        why="its checksum did not match, so it was not installed"
         return 1
     fi
-    tar -C "$tmp" -xzf "$tmp/m.tar.gz" || return 1
+    if ! have tar && ! have python3; then
+        why="there is no tar to unpack it with (install tar, or python3)"
+        return 1
+    fi
+    unpack "$tmp/m.tar.gz" "$tmp" || { why="could not unpack it"; return 1; }
     # From here a failure is the destination's, which building would not
     # get round. Called as the condition of an `if`, this function runs
     # without `set -e`: a failed install went unnoticed, and the script
@@ -105,15 +131,16 @@ build_from_source() {
     # Only a checkout of this project. Piped from curl, `here` is the
     # current directory, and whatever Cargo.toml was in it got built --
     # build scripts and all.
+    [ -n "$why" ] && say "$why."
     is_checkout || {
-        say "no prebuilt binary to install, and building one needs a clone:"
+        say "building it from source${why:+ instead} needs a clone:"
         say "  git clone https://github.com/$REPO && cd mnemosyne && ./install.sh --build"
         exit 1
     }
     have cargo || {
-        say "no prebuilt binary for $(uname -s) $(uname -m), and no cargo to build with."
-        say "install rust from https://rustup.rs and re-run, or open an issue"
-        say "asking for this platform to be added to the release build."
+        say "building it from source${why:+ instead} needs cargo: install rust from"
+        say "https://rustup.rs and re-run, or open an issue asking for this"
+        say "platform to be added to the release build."
         exit 1
     }
     say "building…"
@@ -162,6 +189,7 @@ for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
     say "added to $(basename "$rc"):  $line"
     wired="yes"
 done
+
 
 # A path as fish reads it: in single quotes, where only \\ and \' mean
 # anything. Unquoted, a folder with a space in its name went to

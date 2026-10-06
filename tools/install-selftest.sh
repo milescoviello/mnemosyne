@@ -32,6 +32,7 @@ bad() {
 }
 skip() { skips=$((skips + 1)); printf '  skip %s (%s)\n' "$1" "$2"; }
 has() { case "$3" in *"$2"*) ok "$1" ;; *) bad "$1" "expected to find: $2" ;; esac; }
+hasnt() { case "$3" in *"$2"*) bad "$1" "should not contain: $2" ;; *) ok "$1" ;; esac; }
 
 # ---- what the release would have served --------------------------------
 mkdir -p "$tmp/dist" "$tmp/stub"
@@ -187,6 +188,34 @@ if [ "$code" -ne 0 ] && [ ! -e "$home/.local/bin/mnemosyne" ]; then
 else
     bad "a release with no checksum is not installed" "exit $code: $said"
 fi
+
+# ---- no tar to unpack it with -----------------------------------------
+# AlmaLinux and RHEL minimal images have no tar, and the install died with
+# "tar: command not found", then advised cloning the repository to build.
+# Everything the installer uses, but tar; piped in, as from curl.
+notar="$tmp/notar"
+mkdir -p "$notar"
+for t in $tools; do
+    [ "$t" = tar ] && continue
+    p=$(command -v "$t" 2>/dev/null) && ln -sf "$p" "$notar/$t"
+done
+if [ -e "$notar/python3" ]; then
+    home="$tmp/home-notar"
+    mkdir -p "$home"
+    said=$(cd "$home" && env -i HOME="$home" SHELL=/bin/bash PATH="$tmp/stub:$notar" TERM=dumb \
+        bash < "$root/install.sh" 2>&1)
+    v=$("$home/.local/bin/mnemosyne" -V 2>&1)
+    has "with no tar, python3 unpacks it" "$version" "$v"
+else
+    skip "with no tar, python3 unpacks it" "python3 is not installed"
+fi
+rm -f "$notar/python3"
+home="$tmp/home-notar-nopy"
+mkdir -p "$home"
+said=$(cd "$home" && env -i HOME="$home" SHELL=/bin/bash PATH="$tmp/stub:$notar" TERM=dumb \
+    bash < "$root/install.sh" 2>&1)
+has "with neither, it says tar is what is missing" "no tar to unpack it with" "$said"
+hasnt "and not that there is no prebuilt binary" "no prebuilt binary" "$said"
 
 # ---- somewhere it cannot write ----------------------------------------
 home="$tmp/home-ro"
