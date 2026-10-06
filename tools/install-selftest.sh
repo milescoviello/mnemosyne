@@ -74,8 +74,17 @@ exit 1
 EOF
 chmod +x "$tmp/stub/cargo"
 
-# A minimal PATH, like a fresh machine's: no ~/.local/bin on it.
+# A minimal PATH, like a fresh machine's: no ~/.local/bin on it. Plus
+# wherever this system keeps the tools the installer and `mn` use, if that
+# is not one of those: NixOS has nothing in /usr/bin but env, and every
+# check failed there with bash itself not found.
 base_path="$tmp/stub:/usr/local/bin:/usr/bin:/bin"
+tools="bash sh env cat cp rm mkdir install chmod dirname basename uname grep sed awk tr head tail cut mktemp tar sha256sum shasum python3"
+for t in $tools; do
+    (PATH=$base_path; command -v "$t") >/dev/null 2>&1 && continue
+    p=$(command -v "$t" 2>/dev/null) || continue
+    case ":$base_path:" in *":${p%/*}:"*) ;; *) base_path="$base_path:${p%/*}" ;; esac
+done
 # the shells themselves, wherever they live on this machine
 for s in zsh fish; do
     p=$(command -v "$s" 2>/dev/null) && ln -sf "$p" "$tmp/stub/$s"
