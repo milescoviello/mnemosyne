@@ -322,6 +322,7 @@ run_shell() {
         "qterminal|--workdir $tmp/work-a -e $inner -lc cd" \
         "lxterminal|--working-directory=$tmp/work-a -e $inner -lc cd" \
         "urxvt|-cd $tmp/work-a -e $inner -lc cd" \
+        "cosmic-term|-e $inner -lc cd" \
         "xdg-terminal-exec|$inner -lc cd"; do
         t=${spec%%|*} want=${spec#*|}
         printf '#!/bin/sh\necho "%s: $*" >> "$MN_TEST_LOG"\n' "$t" > "$tmp/terms/$t"

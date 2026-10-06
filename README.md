@@ -555,7 +555,7 @@ terminal you ran `mn` in sent SIGHUP to every window it had just opened.
 A window opens in the first of these that is installed: `$MN_TERMINAL`,
 then alacritty, konsole, kitty, wezterm, foot and ghostty, then the
 terminals desktops ship — Ptyxis, GNOME Terminal and Console, xfce4-terminal,
-mate-terminal, QTerminal, Tilix, Terminator, LXTerminal and urxvt — then
+mate-terminal, QTerminal, Tilix, Terminator, LXTerminal, urxvt and COSMIC's — then
 `xdg-terminal-exec`, `x-terminal-emulator`, and xterm last. Set
 `MN_TERMINAL` to the one you want; any terminal that takes `-e` works there.
 
@@ -834,7 +834,7 @@ worth keeping as a fallback if the binary is ever missing:
 ```sh
 cargo test          # 468 tests, no network and no fixtures on disk
 cargo clippy --all-targets -- -D warnings
-tools/shell-selftest.sh           # the wrappers under bash, zsh and fish, 267 checks
+tools/shell-selftest.sh           # the wrappers under bash, zsh and fish, 270 checks
 tools/install-selftest.sh         # install.sh into empty homes, then `mn` in each shell
 MNEMOSYNE_WRITE_LOGOS=1 cargo test logos   # redraw docs/logo-*.svg from the mark
 python3 tools/demo-corpus.py /tmp/demo-home        # invented sessions

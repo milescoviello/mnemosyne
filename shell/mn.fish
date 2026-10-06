@@ -352,12 +352,13 @@ function __mn_term_open --description 'Run a command in a new terminal window; e
     # desktops ship, then whatever the system calls its terminal, and xterm
     # last. The desktops' own were missing: GNOME's Ptyxis, MATE's, LXQt's
     # and XFCE's never opened, so a window from GNOME on Fedora or Ubuntu,
-    # MATE, LXQt or i3 was "no terminal emulator found", and Debian's GNOME
-    # and XFCE got xterm.
+    # MATE, LXQt, i3 or COSMIC was "no terminal emulator found", and Debian's
+    # GNOME and XFCE got xterm.
     set -l cmd
     for term in $MN_TERMINAL alacritty konsole kitty wezterm foot ghostty \
             ptyxis gnome-terminal kgx xfce4-terminal mate-terminal qterminal \
-            tilix terminator lxterminal urxvt xdg-terminal-exec x-terminal-emulator xterm
+            tilix terminator lxterminal urxvt cosmic-term \
+            xdg-terminal-exec x-terminal-emulator xterm
         test -z "$term"; and continue
         command -q $term; or continue
         switch $term
