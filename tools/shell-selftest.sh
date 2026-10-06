@@ -130,6 +130,11 @@ export MN_TERMINAL=faketerm
 # picks switch-client over attach-session. The result should not depend on
 # where the test happens to be run from.
 unset TMUX TMUX_PANE
+# fish reads its config, and its universal variables, from here. The conf.d
+# file the installer writes puts ~/.local/bin -- and the real mnemosyne --
+# in front of the stubs, so on any machine where mn was installed for fish,
+# about fifty fish checks failed. An empty one: nothing of yours is read.
+export XDG_CONFIG_HOME="$tmp/config"
 export MN_TEST_LOG="$log"
 
 write_plan() { printf '%b' "$1" > "$plan_file"; }
