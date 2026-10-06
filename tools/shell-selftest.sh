@@ -463,10 +463,13 @@ run_shell() {
         has "$shell_name: with BusyBox's setsid, the window still opens" "term: -e" "$seen"
         mine=$(printf '%s' "$out" | sed -n 's/^my-sid: //p' | head -1)
         theirs=$(printf '%s' "$seen" | sed -n 's/^term-sid: //p' | head -1)
-        if [ -n "$mine" ] && [ -n "$theirs" ] && [ "$mine" != "$theirs" ]; then
-            ok "$shell_name: and outlives its parent"
+        if [ -z "$mine" ] || [ -z "$theirs" ]; then
+            # BusyBox's ps, Alpine's, has no `-o sid=`
+            skip "$shell_name: and outlives its parent" "could not read session ids"
+        elif [ "$mine" = "$theirs" ]; then
+            bad "$shell_name: and outlives its parent" "opened in the caller's session ($mine)"
         else
-            bad "$shell_name: and outlives its parent" "caller's session ${mine:-?}, window's ${theirs:-?}"
+            ok "$shell_name: and outlives its parent"
         fi
     else
         skip "$shell_name: BusyBox's setsid" "there is no setsid here"
