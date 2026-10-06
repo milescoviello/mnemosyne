@@ -399,8 +399,17 @@ function __mn_spawn --description 'Start a window that outlives the terminal tha
     # gives it a session of its own. `-f` always forks, which matters because
     # a backgrounded job is already a group leader and plain setsid would
     # refuse.
+    #
+    # BusyBox's setsid -- Alpine's -- has no `-f`, and refused it where
+    # nobody saw: no window ever opened there. It forks by itself when it
+    # must, so it is run plain, in the background, where it never holds this
+    # shell up.
     if command -q setsid
         command setsid -f $argv >/dev/null 2>&1
+        or begin
+            command setsid $argv >/dev/null 2>&1 &
+            disown
+        end
     else
         command $argv >/dev/null 2>&1 &
         disown

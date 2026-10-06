@@ -124,6 +124,19 @@ EOF
 fi
 chmod +x "$bin"/*
 
+# BusyBox's setsid, as Alpine has it: no -f. Plain, it forks when it has to
+# and otherwise runs the command where it stands, as util-linux's does.
+real_setsid=$(command -v setsid 2>/dev/null)
+if [ -n "$real_setsid" ]; then
+    mkdir -p "$tmp/busybox"
+    cat > "$tmp/busybox/setsid" <<EOF
+#!/bin/sh
+case "\$1" in -*) echo "setsid: unrecognized option: \${1#-}" >&2; exit 1 ;; esac
+exec "$real_setsid" "\$@"
+EOF
+    chmod +x "$tmp/busybox/setsid"
+fi
+
 export PATH="$bin:$PATH"
 export MN_TERMINAL=faketerm
 # Run from inside tmux, these would say so, and the wrappers read them: it
@@ -378,6 +391,27 @@ run_shell() {
             "opened in the caller's session ($mine) — closing the terminal would kill it"
     else
         ok "$shell_name: window outlives its parent"
+    fi
+
+    # --- with BusyBox's setsid, which has no -f
+    # Alpine's. `setsid -f` was refused with a message nobody saw, and no
+    # window ever opened.
+    if [ -n "$real_setsid" ]; then
+        write_plan "$WINDOW_PLAN"
+        : > "$log"
+        out=$(PATH="$tmp/busybox:$PATH" "$runner" -c "$source_line; mn; mysid" 2>&1)
+        wait_for "term-sid:" "$log"
+        seen=$(cat "$log")
+        has "$shell_name: with BusyBox's setsid, the window still opens" "term: -e" "$seen"
+        mine=$(printf '%s' "$out" | sed -n 's/^my-sid: //p' | head -1)
+        theirs=$(printf '%s' "$seen" | sed -n 's/^term-sid: //p' | head -1)
+        if [ -n "$mine" ] && [ -n "$theirs" ] && [ "$mine" != "$theirs" ]; then
+            ok "$shell_name: and outlives its parent"
+        else
+            bad "$shell_name: and outlives its parent" "caller's session ${mine:-?}, window's ${theirs:-?}"
+        fi
+    else
+        skip "$shell_name: BusyBox's setsid" "there is no setsid here"
     fi
 
     # --- a plain window, and --ask

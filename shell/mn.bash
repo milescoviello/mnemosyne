@@ -98,9 +98,13 @@ __mn_term_open() {
 # SIGHUP and every window we just opened disappears with it. setsid gives it a
 # session of its own; `-f` always forks, which matters because a backgrounded
 # job is already a group leader and plain setsid would refuse.
+#
+# BusyBox's setsid -- Alpine's -- has no `-f`, and refused it where nobody
+# saw: no window ever opened there. It forks by itself when it must, so it
+# is run plain, in the background, where it never holds this shell up.
 __mn_spawn() {
     if command -v setsid >/dev/null 2>&1; then
-        setsid -f "$@" >/dev/null 2>&1
+        setsid -f "$@" >/dev/null 2>&1 || { setsid "$@" >/dev/null 2>&1 & disown 2>/dev/null; }
     else
         "$@" >/dev/null 2>&1 &
         disown 2>/dev/null
