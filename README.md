@@ -189,6 +189,62 @@ working directory — no child process can. The binary draws the interface on
 performs the `cd` plus `claude --resume` itself. It is a few lines long and
 you can read all of it in `shell/mn.fish`.
 
+## Where it is tested
+
+Each of these was installed fresh, with the one-liner above, and used the way
+you would use it. Everything below passed.
+
+**Distributions.** Install; `mn` in a new terminal and after an SSH login;
+the index; the browser drawing and quitting; and both selftests
+(`tools/shell-selftest.sh`, `tools/install-selftest.sh`) on that distro's own
+shells and tmux:
+
+- Debian 12 and 13
+- Ubuntu 22.04, 24.04 and 26.04
+- Fedora 44
+- AlmaLinux 9 and 10
+- Arch Linux
+- Alpine Linux (BusyBox)
+- openSUSE Tumbleweed
+- Void Linux
+- NixOS 26.05
+
+Under bash and zsh on every one of them, and under fish on all but AlmaLinux
+(fish is not in its repositories) and NixOS (fish is set up declaratively
+there, with `programs.fish.enable`).
+
+**Desktops.** A real installed desktop each, driven at its own keyboard. Its
+terminal opened with its own shortcut, or its launcher where it ships
+without one; `mn` typed there and the browser taking over; enter resuming
+the session in that same terminal and leaving the shell in the session's
+folder; ctrl+n resuming it in a new window; and `mn --restore` opening a
+window onto the session's own tmux session, which kept running when the
+window was closed:
+
+| Desktop | Distribution | Session | Terminal |
+| --- | --- | --- | --- |
+| KDE Plasma 6 | Fedora 44, Fedora 43, Debian 13, Arch, Kubuntu 26.04, AlmaLinux 10, openSUSE Tumbleweed | Wayland | Konsole |
+| KDE Plasma 6 | Arch | X11 | Konsole |
+| KDE Plasma 5.27 | Debian 12 | Wayland | Konsole |
+| KDE Plasma 5.27 | Kubuntu 24.04 | X11 | Konsole |
+| GNOME | Fedora 44, Ubuntu 26.04 | Wayland | Ptyxis |
+| GNOME | Debian 13 | Wayland | GNOME Terminal |
+| Cinnamon | Fedora 44 | X11 | GNOME Terminal |
+| XFCE | Debian 13 | X11 | xfce4-terminal |
+| MATE | Fedora 44 | X11 | MATE Terminal |
+| LXQt | Fedora 44 | X11 | QTerminal |
+| Budgie | Fedora 44 | Wayland | Konsole |
+| COSMIC | Fedora 44 | Wayland | COSMIC Terminal |
+| Sway | Fedora 44 | Wayland | foot |
+| Hyprland | Arch | Wayland | kitty |
+| i3 | Fedora 44 | X11 | xfce4-terminal |
+
+**Terminals.** Besides those, each terminal mn knows how to open a window in
+was run for real, from bash and from fish, and opened in a folder with a
+space and an apostrophe in its name: Ptyxis, GNOME Terminal, GNOME Console,
+xfce4-terminal, MATE Terminal, QTerminal, Tilix, Terminator, LXTerminal,
+urxvt, `xdg-terminal-exec` and xterm.
+
 ## Staying current
 
 It updates itself. Every interactive start asks GitHub for the latest release
