@@ -85,12 +85,21 @@ why=""
 
 fetch_prebuilt() {
     have curl || { why="there is no curl to download it with"; return 1; }
-    local url tmp name
+    local url tmp name tag
     name="$(asset_for_platform)" || { why="there is no prebuilt binary for $(uname -s) $(uname -m)"; return 1; }
-    url="https://github.com/$REPO/releases/latest/download/$name"
+    # Which release is the latest, asked once, and both files from that one.
+    # Each asked of releases/latest, a release published in between answered
+    # the second: "its checksum did not match", on Fedora 43 as v0.6.1 went
+    # out. releases/latest redirects to its tag's page, no API call needed.
+    tag="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest" 2>/dev/null)" || tag=""
+    tag="${tag##*/releases/tag/}"
+    case "$tag" in
+        v[0-9]*) url="https://github.com/$REPO/releases/download/$tag/$name" ;;
+        *) tag=""; url="https://github.com/$REPO/releases/latest/download/$name" ;;
+    esac
     tmp="$(mktemp -d)" || { why="could not make a temporary directory to download into"; return 1; }
     KEEP="$tmp"
-    say "fetching the latest release for $(uname -s) $(uname -m)…"
+    say "fetching ${tag:-the latest release} for $(uname -s) $(uname -m)…"
     curl -fsSL "$url" -o "$tmp/m.tar.gz" || { why="could not download $url"; return 1; }
     # Verified, or not installed. A checksum that was not published, or no
     # tool to check one with, used to skip the check and install whatever

@@ -46,23 +46,46 @@ tar -C "$tmp/dist" -czf "$tmp/asset.tar.gz" .
 # coreutils calls it sha256sum; macOS calls it shasum
 if command -v sha256sum >/dev/null 2>&1; then sum() { sha256sum "$1"; }; else sum() { shasum -a 256 "$1"; }; fi
 sum "$tmp/asset.tar.gz" | awk '{print $1 "  asset.tar.gz"}' > "$tmp/asset.sha256"
+# The release after it: other bytes, so another checksum.
+echo "the next release" >> "$tmp/dist/README.md"
+tar -C "$tmp/dist" -czf "$tmp/asset-next.tar.gz" .
+sum "$tmp/asset-next.tar.gz" | awk '{print $1 "  asset.tar.gz"}' > "$tmp/asset-next.sha256"
 
-# curl, as the installer calls it: `curl -fsSL <url> -o <file>`
+# curl, as the installer calls it: `curl -fsSL <url> -o <file>`, and
+# `-w '%{url_effective}'` for where a redirect ends up. GitHub's
+# releases/latest redirects to the latest release's tag.
 cat > "$tmp/stub/curl" <<EOF
 #!/bin/sh
-url= out=
+url= out= w=
 while [ \$# -gt 0 ]; do
     case "\$1" in
         -o) out=\$2; shift ;;
+        -w) w=\$2; shift ;;
         http*) url=\$1 ;;
     esac
     shift
 done
+# MN_STUB_MOVES: a release goes out between two requests. The first one
+# sees v1.0.0 as the latest, every one after it v1.1.0.
+latest=v1.0.0
+if [ -n "\${MN_STUB_MOVES:-}" ]; then
+    [ -e "$tmp/moved" ] && latest=v1.1.0
+    : > "$tmp/moved"
+fi
+case "\$url" in
+    */releases/latest)
+        [ -n "\$w" ] && printf '%s' "https://github.com/x/mnemosyne/releases/tag/\$latest"
+        exit 0 ;;
+    */releases/latest/download/*) rel=\$latest ;;
+    */releases/download/*) rel=\${url#*/releases/download/}; rel=\${rel%%/*} ;;
+    *) exit 22 ;;
+esac
+a=asset; [ "\$rel" = v1.1.0 ] && a=asset-next
 # MN_STUB_NO_SUM and MN_STUB_NO_ASSET stand for a release missing one or
 # the other.
 case "\$url" in
-    *.tar.gz) [ -n "\${MN_STUB_NO_ASSET:-}" ] && exit 22; cp "$tmp/asset.tar.gz" "\$out" ;;
-    *.tar.gz.sha256) [ -n "\${MN_STUB_NO_SUM:-}" ] && exit 22; cp "$tmp/asset.sha256" "\$out" ;;
+    *.tar.gz) [ -n "\${MN_STUB_NO_ASSET:-}" ] && exit 22; cp "$tmp/\$a.tar.gz" "\$out" ;;
+    *.tar.gz.sha256) [ -n "\${MN_STUB_NO_SUM:-}" ] && exit 22; cp "$tmp/\$a.sha256" "\$out" ;;
     *) exit 22 ;;
 esac
 EOF
@@ -207,6 +230,19 @@ if [ "$code" -ne 0 ] && [ ! -e "$home/.local/bin/mnemosyne" ]; then
 else
     bad "a release with no checksum is not installed" "exit $code: $said"
 fi
+
+# ---- a release going out while it installs ----------------------------
+# The tarball and its checksum were both asked of releases/latest, one after
+# the other. A release published in between answered the second: "its
+# checksum did not match", on Fedora 43 as v0.6.1 went out.
+home="$tmp/home-moves"
+mkdir -p "$home"
+rm -f "$tmp/moved"
+said=$(env -i HOME="$home" SHELL=/bin/bash PATH="$base_path" TERM=dumb MN_STUB_MOVES=1 \
+    bash "$root/install.sh" 2>&1)
+v=$("$home/.local/bin/mnemosyne" -V 2>&1)
+has "a release published mid-install: both files come from one release" "$version" "$v"
+hasnt "and its checksum matches" "did not match" "$said"
 
 # ---- no tar to unpack it with -----------------------------------------
 # AlmaLinux and RHEL minimal images have no tar, and the install died with

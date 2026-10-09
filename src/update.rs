@@ -250,6 +250,19 @@ impl std::fmt::Display for UpToDate {
 
 impl std::error::Error for UpToDate {}
 
+/// Where a release's asset for this platform is: the release that was
+/// found newer, by its tag. Through releases/latest, the tarball and then
+/// its checksum were each whatever was latest by the time they were asked
+/// for, and a release published in between answered one of them -- a
+/// checksum that did not match, or a version installed that was not the
+/// one reported.
+fn release_url(tag: &str) -> String {
+    format!(
+        "https://github.com/{REPO}/releases/download/{tag}/{}",
+        asset()
+    )
+}
+
 /// Download the latest release and put it in place.
 ///
 /// Returns the version installed. The running process keeps its own image;
@@ -263,10 +276,7 @@ pub fn install_latest() -> Result<String> {
     let staging = Staging::new()?;
     let dir = staging.0.clone();
     let tarball = dir.join(asset());
-    let base = format!(
-        "https://github.com/{REPO}/releases/latest/download/{}",
-        asset()
-    );
+    let base = release_url(&tag);
 
     let bytes = curl(&[&base])?;
     std::fs::write(&tarball, &bytes)?;
@@ -437,6 +447,15 @@ pub fn auto_full(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_update_downloads_the_release_it_found_newer() {
+        let u = release_url("v9.9.9");
+        assert!(
+            u.ends_with(&format!("/releases/download/v9.9.9/{}", asset())),
+            "{u}"
+        );
+    }
 
     #[test]
     fn an_update_unpacks_somewhere_private_that_does_not_outlive_it() {
