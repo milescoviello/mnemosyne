@@ -383,12 +383,18 @@ fn unpack(tarball: &Path, into: &Path, tar: &str, python: &str) -> Result<()> {
 /// Update the installed shell functions, but only where one already exists —
 /// an update should not start installing things you did not have.
 fn refresh_shell_files(from: &Path) {
-    refresh_shell_files_in(from, &crate::paths::home());
+    let xdg = std::env::var_os("XDG_CONFIG_HOME").filter(|x| !x.is_empty());
+    refresh_shell_files_in(from, &crate::paths::home(), xdg.as_deref().map(Path::new));
 }
 
-fn refresh_shell_files_in(from: &Path, home: &Path) {
+/// Where the installer puts them: fish's under `$XDG_CONFIG_HOME` where that
+/// is set -- only ~/.config's was refreshed -- and the copy of it beside
+/// mn.bash, made where fish's own folder could not be written.
+fn refresh_shell_files_in(from: &Path, home: &Path, xdg_config: Option<&Path>) {
+    let config = xdg_config.map_or_else(|| home.join(".config"), Path::to_path_buf);
     for (src, dst) in [
-        ("mn.fish", home.join(".config/fish/functions/mn.fish")),
+        ("mn.fish", config.join("fish/functions/mn.fish")),
+        ("mn.fish", home.join(".local/share/mnemosyne/mn.fish")),
         ("mn.bash", home.join(".local/share/mnemosyne/mn.bash")),
     ] {
         let s = from.join(src);
@@ -604,12 +610,38 @@ mod tests {
         std::fs::write(from.join("mn.fish"), "released mn.fish").unwrap();
         std::fs::write(from.join("mn.bash"), "released mn.bash").unwrap();
 
-        refresh_shell_files_in(&from, &home);
+        refresh_shell_files_in(&from, &home, None);
         assert_eq!(std::fs::read_to_string(&mine).unwrap(), "my own mn.fish");
         assert_eq!(
             std::fs::read_to_string(bash_dir.join("mn.bash")).unwrap(),
             "released mn.bash"
         );
+    }
+
+    #[test]
+    fn an_update_refreshes_the_shell_files_where_the_installer_put_them() {
+        // fish's under $XDG_CONFIG_HOME, and the copy beside mn.bash made
+        // where fish's own folder could not be written
+        let d = tempfile::tempdir().unwrap();
+        let (home, from) = (d.path().join("home"), d.path().join("release"));
+        let xdg = d.path().join("dotfiles");
+        let fish_dir = xdg.join("fish/functions");
+        let share = home.join(".local/share/mnemosyne");
+        for dir in [&fish_dir, &share, &from] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(fish_dir.join("mn.fish"), "old").unwrap();
+        std::fs::write(share.join("mn.fish"), "old").unwrap();
+        std::fs::write(from.join("mn.fish"), "released mn.fish").unwrap();
+
+        refresh_shell_files_in(&from, &home, Some(&xdg));
+        for f in [fish_dir.join("mn.fish"), share.join("mn.fish")] {
+            assert_eq!(
+                std::fs::read_to_string(&f).unwrap(),
+                "released mn.fish",
+                "{f:?}"
+            );
+        }
     }
 
     #[test]
