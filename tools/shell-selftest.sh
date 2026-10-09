@@ -27,6 +27,9 @@ skips=0
 
 cleanup() {
     [ -x "$bin/tmux" ] && "$bin/tmux" kill-server 2>/dev/null
+    # the server's socket, named for this run (see the tmux stub), which
+    # tmux leaves behind
+    rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/mn-selftest-$$"
     rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -118,8 +121,11 @@ real_tmux=$(command -v tmux 2>/dev/null)
 if [ -n "$real_tmux" ]; then
     cat > "$bin/tmux" <<EOF
 #!/bin/sh
-# a private server, so this can never touch the user's own sessions
-exec "$real_tmux" -L mn-selftest "\$@"
+# a private server, so this can never touch the user's own sessions --
+# nor another run's: under one fixed name, two runs at once (two checkouts,
+# two sessions working on mnemosyne) killed each other's servers, and
+# checks failed at random in both
+exec "$real_tmux" -L mn-selftest-$$ "\$@"
 EOF
 fi
 
