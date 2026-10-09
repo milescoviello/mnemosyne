@@ -218,6 +218,54 @@ else
     skip "fish" "fish is not installed"
 fi
 
+# ---- config kept somewhere else ----------------------------------------
+# zsh reads $ZDOTDIR/.zshrc, not ~/.zshrc, and fish reads
+# $XDG_CONFIG_HOME/fish. The installer wired up ~/.zshrc and ~/.config/fish
+# all the same, said "done", and a new shell had no mn.
+printf '\nconfig kept elsewhere\n'
+if command -v zsh >/dev/null 2>&1; then
+    home="$tmp/home-zdotdir"
+    mkdir -p "$home/.config/zsh"
+    printf 'export ZDOTDIR="$HOME/.config/zsh"\n' > "$home/.zshenv"
+    printf '# mine\n' > "$home/.config/zsh/.zshrc"
+    env -i HOME="$home" ZDOTDIR="$home/.config/zsh" SHELL=/bin/zsh PATH="$base_path" TERM=dumb \
+        bash "$root/install.sh" >/dev/null 2>&1
+    works=$(env -i HOME="$home" PATH="$base_path" TERM=dumb zsh -i -c 'mn -V' 2>&1)
+    has "zsh with ZDOTDIR: mn works in a new shell" "$version" "$works"
+    if [ -e "$home/.zshrc" ]; then bad "and no ~/.zshrc is made beside it" "$(cat "$home/.zshrc")"
+    else ok "and no ~/.zshrc is made beside it"; fi
+else
+    skip "zsh with ZDOTDIR" "zsh is not installed"
+fi
+if command -v fish >/dev/null 2>&1; then
+    home="$tmp/home-xdg-fish"
+    mkdir -p "$home/dotfiles"
+    env -i HOME="$home" XDG_CONFIG_HOME="$home/dotfiles" SHELL=/bin/fish PATH="$base_path" TERM=dumb \
+        bash "$root/install.sh" >/dev/null 2>&1
+    works=$(env -i HOME="$home" XDG_CONFIG_HOME="$home/dotfiles" PATH="$base_path" TERM=dumb fish -c 'mn -V' 2>&1)
+    has "fish with XDG_CONFIG_HOME: mn works in a new shell" "$version" "$works"
+else
+    skip "fish with XDG_CONFIG_HOME" "fish is not installed"
+fi
+
+# ---- a .bashrc it may not write ---------------------------------------
+# home-manager (NixOS) makes ~/.bashrc a link into the read-only store. The
+# install died there with a bare "Permission denied", the binary in place
+# but no index built and nothing said about what to add by hand.
+home="$tmp/home-ro-rc"
+mkdir -p "$home/store"
+printf '# managed by home-manager\n' > "$home/store/bashrc"
+chmod 444 "$home/store/bashrc"
+ln -s "$home/store/bashrc" "$home/.bashrc"
+said=$(env -i HOME="$home" SHELL=/bin/bash PATH="$base_path" TERM=dumb bash "$root/install.sh" 2>&1)
+code=$?
+if [ "$code" -eq 0 ]; then ok "a read-only .bashrc does not stop the install"
+else bad "a read-only .bashrc does not stop the install" "exit $code: $(printf '%s\n' "$said" | tail -2)"; fi
+has "and the index is still built" "building the index" "$said"
+has "and it says what to add yourself" "source ~/.local/share/mnemosyne/mn.bash" "$said"
+has "and why" "read-only" "$said"
+hasnt "and not that there was no .bashrc" "no .bashrc or .zshrc found" "$said"
+
 # ---- a release it cannot verify ---------------------------------------
 printf '\nwhat it must refuse\n'
 home="$tmp/home-nosum"

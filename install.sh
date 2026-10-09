@@ -163,40 +163,63 @@ if [ "$force_build" = 1 ] || ! fetch_prebuilt; then
 fi
 say "installed $bindir/mnemosyne"
 
+# Where each shell reads its config. zsh reads $ZDOTDIR/.zshrc when that is
+# set, and fish $XDG_CONFIG_HOME/fish: ~/.zshrc and ~/.config/fish were
+# wired up regardless, the install said "done", and the next shell had no mn.
+zshrc="${ZDOTDIR:-$HOME}/.zshrc"
+fishdir="${XDG_CONFIG_HOME:-$HOME/.config}/fish"
+# A path as it is shown: under ~ when it is in the home directory.
+tilde() { case "$1" in "$HOME"/*) printf '~/%s' "${1#"$HOME"/}" ;; *) printf '%s' "$1" ;; esac; }
+
 # A shell nobody has configured yet has nothing to add to. A fresh Mac runs
 # zsh and has no ~/.zshrc; fish that has never been started has no
 # ~/.config/fish. Only touching what already existed left those machines
 # with nothing wired up at all, so make it for the shell you actually use.
 case "${SHELL##*/}" in
-    zsh) [ -f "$HOME/.zshrc" ] || : > "$HOME/.zshrc" ;;
-    bash) [ -f "$HOME/.bashrc" ] || : > "$HOME/.bashrc" ;;
-    fish) mkdir -p "$HOME/.config/fish" ;;
+    zsh) [ -f "$zshrc" ] || { mkdir -p "${zshrc%/*}" && : > "$zshrc"; } 2>/dev/null || true ;;
+    bash) [ -f "$HOME/.bashrc" ] || { : > "$HOME/.bashrc"; } 2>/dev/null || true ;;
+    fish) mkdir -p "$fishdir" 2>/dev/null || true ;;
 esac
 
-# fish autoloads functions from this directory
-if [ -d "$HOME/.config/fish" ]; then
-    mkdir -p "$HOME/.config/fish/functions"
-    install -m644 "$SHELLSRC/mn.fish" "$HOME/.config/fish/functions/mn.fish"
-    say "installed ~/.config/fish/functions/mn.fish   -> type: mn"
+# Config that cannot be written to, and what to add to it instead.
+# home-manager (NixOS) makes these links into its read-only store, and the
+# install died at the first one on a bare "Permission denied": the binary
+# in place, no index built, nothing said about what to add by hand.
+readonly_rc=""
+# $1 the file, $2 the text to append. Fails, quietly, where it may not.
+append() { { printf '%s' "$2" >> "$1"; } 2>/dev/null; }
+
+mkdir -p "$HOME/.local/share/mnemosyne"
+# fish autoloads functions from this directory. Where it may not be
+# written, a copy beside mn.bash, for your own config to source.
+if [ -d "$fishdir" ]; then
+    if { mkdir -p "$fishdir/functions" && install -m644 "$SHELLSRC/mn.fish" "$fishdir/functions/mn.fish"; } 2>/dev/null; then
+        say "installed $(tilde "$fishdir")/functions/mn.fish   -> type: mn"
+    else
+        readonly_rc="$readonly_rc $(tilde "$fishdir")/functions"
+        install -m644 "$SHELLSRC/mn.fish" "$HOME/.local/share/mnemosyne/mn.fish"
+    fi
 fi
 
 # bash/zsh must source it, because the cd has to happen in your shell.
 # Wiring it up is the install; printing homework and then announcing success
 # leaves you with a command that does not exist.
-mkdir -p "$HOME/.local/share/mnemosyne"
 install -m644 "$SHELLSRC/mn.bash" "$HOME/.local/share/mnemosyne/mn.bash"
 line='source ~/.local/share/mnemosyne/mn.bash'
 wired=""
-for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+for rc in "$HOME/.bashrc" "$zshrc"; do
     [ -f "$rc" ] || continue
     if grep -qF "$line" "$rc"; then
         wired="yes"
         continue
     fi
-    printf '\n# mnemosyne: the mn function, which has to run in your shell to cd\n%s\n' \
-        "$line" >> "$rc"
-    say "added to $(basename "$rc"):  $line"
-    wired="yes"
+    if append "$rc" "$(printf '\n# mnemosyne: the mn function, which has to run in your shell to cd\n%s\n' "$line")
+"; then
+        say "added to $(tilde "$rc"):  $line"
+        wired="yes"
+    else
+        readonly_rc="$readonly_rc $(tilde "$rc")"
+    fi
 done
 
 # A login bash -- an SSH session, a Mac's Terminal -- reads a profile and not
@@ -204,11 +227,13 @@ done
 # that does; Alpine and NixOS give them none at all, and `mn` was missing
 # from every SSH login there. Only when there is none: a profile that is
 # already there is somebody's own, and bash reads just the first it finds.
-if [ "${SHELL##*/}" = bash ] && [ -f "$HOME/.bashrc" ] && [ ! -e "$HOME/.bash_profile" ] \
-    && [ ! -e "$HOME/.bash_login" ] && [ ! -e "$HOME/.profile" ]; then
-    printf '%s\n' '# mnemosyne: a login bash reads this file and not ~/.bashrc, so read that too' \
-        'if [ -n "$BASH_VERSION" ] && [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi' > "$HOME/.profile"
-    say "made ~/.profile, so a login bash reads ~/.bashrc too"
+if [ "${SHELL##*/}" = bash ] && [ -f "$HOME/.bashrc" ] && grep -qF "$line" "$HOME/.bashrc" \
+    && [ ! -e "$HOME/.bash_profile" ] && [ ! -e "$HOME/.bash_login" ] && [ ! -e "$HOME/.profile" ]; then
+    if append "$HOME/.profile" "$(printf '%s\n' '# mnemosyne: a login bash reads this file and not ~/.bashrc, so read that too' \
+        'if [ -n "$BASH_VERSION" ] && [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi')
+"; then
+        say "made ~/.profile, so a login bash reads ~/.bashrc too"
+    fi
 fi
 
 # A path as fish reads it: in single quotes, where only \\ and \' mean
@@ -220,31 +245,32 @@ fish_quote() {
 
 # An installed binary that is not on PATH is not installed. Warning about it
 # and carrying on leaves `mn` calling a command the shell cannot find.
-path_added=""
+path_added="" on_path=yes
 case ":$PATH:" in
     *":$bindir:"*) ;;
     *)
+        on_path=""
         pathline="export PATH=\"$bindir:\$PATH\""
         added=""
-        for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+        for rc in "$HOME/.bashrc" "$zshrc"; do
             [ -f "$rc" ] || continue
             grep -qF "$bindir" "$rc" && continue
-            printf '\n# mnemosyne: so the binary it installed can be found\n%s\n' \
-                "$pathline" >> "$rc"
-            say "added to $(basename "$rc"):  $pathline"
-            added="yes"
+            if append "$rc" "$(printf '\n# mnemosyne: so the binary it installed can be found\n%s\n' "$pathline")
+"; then
+                say "added to $(tilde "$rc"):  $pathline"
+                added="yes"
+            fi
         done
-        if [ -d "$HOME/.config/fish" ]; then
-            mkdir -p "$HOME/.config/fish/conf.d"
-            fishpath="$HOME/.config/fish/conf.d/mnemosyne-path.fish"
-            if [ ! -f "$fishpath" ]; then
-                printf '# mnemosyne: so the binary it installed can be found\nfish_add_path %s\n' \
-                    "$(fish_quote "$bindir")" > "$fishpath"
+        if [ -d "$fishdir" ]; then
+            fishpath="$fishdir/conf.d/mnemosyne-path.fish"
+            if [ ! -f "$fishpath" ] && { mkdir -p "$fishdir/conf.d"; } 2>/dev/null \
+                && append "$fishpath" "$(printf '# mnemosyne: so the binary it installed can be found\nfish_add_path %s\n' "$(fish_quote "$bindir")")
+"; then
                 say "added $bindir to fish's PATH"
                 added="yes"
             fi
         fi
-        [ -z "$added" ] && say "note: $bindir is not on your PATH and no shell config was found"
+        [ -z "$added" ] && [ -z "$readonly_rc" ] && say "note: $bindir is not on your PATH and no shell config was found"
         path_added="$added"
         ;;
 esac
@@ -259,9 +285,24 @@ say ""
 # read its config before any of this happened, so a PATH added above is not
 # in it yet: "run this once" has to include that, or following it exactly
 # ends in "command not found".
+if [ -n "$readonly_rc" ]; then
+    say "done, but this could not be written to (read-only):$readonly_rc"
+    say "add these to wherever it comes from (home-manager, say):"
+    case "${SHELL##*/}" in
+        fish)
+            [ -n "$on_path" ] || say "    fish_add_path $(fish_quote "$bindir")"
+            say "    source ~/.local/share/mnemosyne/mn.fish"
+            ;;
+        *)
+            [ -n "$on_path" ] || say "    export PATH=\"$bindir:\$PATH\""
+            say "    $line"
+            ;;
+    esac
+    exit 0
+fi
 case "${SHELL##*/}" in
     fish)
-        if [ ! -f "$HOME/.config/fish/functions/mn.fish" ]; then
+        if [ ! -f "$fishdir/functions/mn.fish" ]; then
             say "done, but the fish function could not be installed"
         elif [ -n "$path_added" ]; then
             say "done — open a new shell, or run this once to use it now:"
@@ -282,7 +323,7 @@ case "${SHELL##*/}" in
         ;;
     *)
         say "done. mn is a shell function; source the one for your shell:"
-        say "    fish: ~/.config/fish/functions/mn.fish"
+        say "    fish: $(tilde "$fishdir")/functions/mn.fish"
         say "    bash/zsh: $line"
         ;;
 esac

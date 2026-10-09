@@ -165,8 +165,10 @@ That fetches a prebuilt static binary (checksum verified), installs it to
 `~/.local/bin/mnemosyne`, and wires up the `mn` shell function — dropping it
 into `~/.config/fish/functions/` for fish, and appending one `source` line to
 `.bashrc` / `.zshrc` for bash and zsh, since those have to source it for the
-`cd` to happen in your shell. Re-running is safe; the line is added once. No
-Rust needed.
+`cd` to happen in your shell (`$ZDOTDIR` and `$XDG_CONFIG_HOME` are followed
+where you set them). Re-running is safe; the line is added once. Config it
+may not write — home-manager's, linked into the read-only store — is left
+alone, and it prints the lines to add there instead. No Rust needed.
 
 From a clone, or to build it yourself:
 
