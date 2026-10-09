@@ -1,14 +1,59 @@
 //! Shared data types.
 //!
-//! A `Session` is one Claude Code transcript (`~/.claude/projects/<enc>/<uuid>.jsonl`)
-//! plus everything we could cheaply learn about it, plus the user's own
+//! A `Session` is one conversation with a coding agent -- most often a Claude
+//! Code transcript (`~/.claude/projects/<enc>/<uuid>.jsonl`) -- plus
+//! everything we could cheaply learn about it, plus the user's own
 //! favourite/tag overlay and whether it is running right now.
 
 use std::path::PathBuf;
 
+/// Which coding agent a session belongs to: the ones wsx drives.
+///
+/// Claude's are the default and go unmarked. The others carry a symbol in
+/// the list and are resumed with their own command.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub enum Harness {
+    #[default]
+    Claude,
+    Pi,
+    /// oh-my-pi: pi's file format, its own binary and its own sessions.
+    Omp,
+    Codex,
+    Hermes,
+}
+
+impl Harness {
+    pub const ALL: [Harness; 5] = [
+        Harness::Claude,
+        Harness::Pi,
+        Harness::Omp,
+        Harness::Codex,
+        Harness::Hermes,
+    ];
+
+    /// Its command, which is also how the index and the plan name it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Harness::Claude => "claude",
+            Harness::Pi => "pi",
+            Harness::Omp => "omp",
+            Harness::Codex => "codex",
+            Harness::Hermes => "hermes",
+        }
+    }
+
+    /// Read back what `name` wrote. Anything else -- a row from a newer
+    /// mnemosyne naming an agent this one has not heard of -- is `None`.
+    pub fn from_name(s: &str) -> Option<Harness> {
+        Harness::ALL.into_iter().find(|h| h.name() == s)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Session {
     // identity / location
+    /// Which agent it is, and so how it is read and resumed.
+    pub harness: Harness,
     pub id: String,
     pub path: PathBuf,
     pub project_dir: String,

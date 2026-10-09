@@ -5,7 +5,7 @@
 //! an unchanged transcript costs one `stat()` and a transcript that merely grew
 //! costs only its new tail.
 
-use crate::model::Session;
+use crate::model::{Harness, Session};
 use crate::scan;
 use anyhow::Result;
 use rayon::prelude::*;
@@ -45,7 +45,8 @@ pub fn db_path() -> PathBuf {
 ///   11 an IDE block before the first prompt no longer hides it
 ///   12 an escaped quote or backslash in a cwd is decoded
 ///   13 a line with half an emoji in it is read, not dropped
-pub const SCANNER_VERSION: u32 = 13;
+///   14 which harness wrote a session is recorded
+pub const SCANNER_VERSION: u32 = 14;
 
 /// Every column the loader expects. Compared against what the database
 /// actually has, so drift is detected rather than assumed away.
@@ -78,6 +79,7 @@ const EXPECTED_COLUMNS: &[&str] = &[
     "agent_id",
     "last_msg_id",
     "custom_title",
+    "harness",
 ];
 
 /// Columns added after the table was first made, and how to add them.
@@ -91,6 +93,7 @@ const EXPECTED_COLUMNS: &[&str] = &[
 const ADDED_COLUMNS: &[(&str, &str)] = &[
     ("last_msg_id", "TEXT NOT NULL DEFAULT ''"),
     ("custom_title", "TEXT NOT NULL DEFAULT ''"),
+    ("harness", "TEXT NOT NULL DEFAULT 'claude'"),
 ];
 
 fn add_missing_columns(conn: &Connection) {
@@ -333,7 +336,8 @@ impl Index {
                 parent          TEXT,
                 agent_id        TEXT NOT NULL DEFAULT '',
                 last_msg_id     TEXT NOT NULL DEFAULT '',
-                custom_title    TEXT NOT NULL DEFAULT ''
+                custom_title    TEXT NOT NULL DEFAULT '',
+                harness         TEXT NOT NULL DEFAULT 'claude'
             );
             CREATE INDEX IF NOT EXISTS idx_mtime  ON sessions(mtime DESC);
             CREATE INDEX IF NOT EXISTS idx_parent ON sessions(parent);
@@ -381,12 +385,18 @@ impl Index {
             "SELECT path,id,project_dir,cwd,git_branch,ai_title,first_prompt,last_prompt,
                     model,permission_mode,version,size,mtime,first_ts,last_ts,entries,
                     user_msgs,assistant_msgs,scanned_len,is_subagent,parent,agent_id,
-                    in_tokens,out_tokens,cache_read,cache_write,last_msg_id,custom_title
+                    in_tokens,out_tokens,cache_read,cache_write,last_msg_id,custom_title,
+                    harness
              FROM sessions",
         )?;
         let rows = st.query_map([], |r| {
             let path: String = r.get(0)?;
-            Ok(Session {
+            // A harness this build has not heard of: a newer mnemosyne's
+            // row, which this one could neither read again nor resume.
+            let Some(harness) = Harness::from_name(&r.get::<_, String>(28)?) else {
+                return Ok(None);
+            };
+            Ok(Some(Session {
                 path: PathBuf::from(&path),
                 id: r.get(1)?,
                 project_dir: r.get(2)?,
@@ -415,11 +425,12 @@ impl Index {
                 cache_write: r.get::<_, i64>(25)? as u64,
                 last_msg_id: r.get(26)?,
                 custom_title: r.get(27)?,
+                harness,
                 ..Default::default()
-            })
+            }))
         })?;
         let mut map = HashMap::new();
-        for s in rows.flatten() {
+        for s in rows.flatten().flatten() {
             map.insert(s.path.to_string_lossy().to_string(), s);
         }
         Ok(map)
@@ -769,16 +780,16 @@ fn write_sessions<'a>(
         "INSERT INTO sessions (path,id,project_dir,cwd,git_branch,ai_title,first_prompt,
                 last_prompt,model,permission_mode,version,size,mtime,first_ts,last_ts,entries,
                 user_msgs,assistant_msgs,scanned_len,is_subagent,parent,agent_id,
-                in_tokens,out_tokens,cache_read,cache_write,last_msg_id,custom_title)
+                in_tokens,out_tokens,cache_read,cache_write,last_msg_id,custom_title,harness)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,
-                     ?21,?22,?23,?24,?25,?26,?27,?28)
+                     ?21,?22,?23,?24,?25,?26,?27,?28,?29)
              ON CONFLICT(path) DO UPDATE SET
                 id=?2,project_dir=?3,cwd=?4,git_branch=?5,ai_title=?6,first_prompt=?7,
                 last_prompt=?8,model=?9,permission_mode=?10,version=?11,size=?12,mtime=?13,
                 first_ts=?14,last_ts=?15,entries=?16,user_msgs=?17,assistant_msgs=?18,
                 scanned_len=?19,is_subagent=?20,parent=?21,agent_id=?22,
                 in_tokens=?23,out_tokens=?24,cache_read=?25,cache_write=?26,
-                last_msg_id=?27,custom_title=?28",
+                last_msg_id=?27,custom_title=?28,harness=?29",
     )?;
     for s in sessions {
         st.execute(params![
@@ -810,6 +821,7 @@ fn write_sessions<'a>(
             s.cache_write as i64,
             s.last_msg_id,
             s.custom_title,
+            s.harness.name(),
         ])?;
     }
     Ok(())
@@ -981,7 +993,6 @@ fn refresh_in(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Session;
 
     fn sample(path: &str, title: &str) -> Session {
         Session {
@@ -1014,6 +1025,74 @@ mod tests {
         assert_eq!(got.scanned_len, 1234);
         assert_eq!(got.last_msg_id, "msg_1");
         assert_eq!(got.custom_title, "named");
+        assert_eq!(got.harness, Harness::Claude);
+    }
+
+    #[test]
+    fn which_harness_wrote_a_session_is_kept() {
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("i.db");
+        let mut idx = Index::open_at(&db).unwrap();
+        for (path, h) in [
+            ("/p.jsonl", Harness::Pi),
+            ("/o.jsonl", Harness::Omp),
+            ("/c.jsonl", Harness::Codex),
+            ("/h.db#1", Harness::Hermes),
+        ] {
+            idx.store(&[Session {
+                harness: h,
+                ..sample(path, "t")
+            }])
+            .unwrap();
+        }
+        let loaded = Index::open_at(&db).unwrap().load().unwrap();
+        assert_eq!(loaded["/p.jsonl"].harness, Harness::Pi);
+        assert_eq!(loaded["/o.jsonl"].harness, Harness::Omp);
+        assert_eq!(loaded["/c.jsonl"].harness, Harness::Codex);
+        assert_eq!(loaded["/h.db#1"].harness, Harness::Hermes);
+    }
+
+    #[test]
+    fn a_harness_this_build_does_not_know_is_not_taken_for_claude() {
+        // Written by a newer mnemosyne. Read as Claude's, Enter would run
+        // `claude --resume` on an id Claude has never seen.
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("i.db");
+        let mut idx = Index::open_at(&db).unwrap();
+        idx.store(&[sample("/a.jsonl", "a"), sample("/b.jsonl", "b")])
+            .unwrap();
+        idx.conn
+            .execute_batch("UPDATE sessions SET harness='gemini' WHERE path='/b.jsonl'")
+            .unwrap();
+        let loaded = idx.load().unwrap();
+        assert!(loaded.contains_key("/a.jsonl"));
+        assert!(!loaded.contains_key("/b.jsonl"));
+    }
+
+    #[test]
+    fn a_table_from_before_harnesses_reads_as_claude() {
+        // Every row written before there was a column for it is Claude's:
+        // nothing else was read.
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("i.db");
+        {
+            let mut idx = Index::open_at(&db).unwrap();
+            idx.store(&[sample("/a.jsonl", "hello")]).unwrap();
+            idx.conn
+                .execute_batch(
+                    "ALTER TABLE sessions DROP COLUMN harness;
+                     UPDATE meta SET value='13' WHERE key='scanner_version';",
+                )
+                .unwrap();
+        }
+        let idx = Index::open_at(&db).unwrap();
+        assert!(idx.stale);
+        let loaded = idx.load().unwrap();
+        assert_eq!(
+            loaded["/a.jsonl"].ai_title, "hello",
+            "the rows were dropped"
+        );
+        assert_eq!(loaded["/a.jsonl"].harness, Harness::Claude);
     }
 
     #[test]
