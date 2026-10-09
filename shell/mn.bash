@@ -91,7 +91,7 @@ __mn_term_open() {
     # interpreter is only on yours -- npm's under nvm is
     # `#!/usr/bin/env node` -- died there at once.
     inner="export PATH=$(printf %q "$PATH"); $inner"
-    for term in $MN_TERMINAL alacritty konsole kitty wezterm foot ghostty \
+    for term in ${MN_TERMINAL:-} alacritty konsole kitty wezterm foot ghostty \
             ptyxis gnome-terminal kgx xfce4-terminal mate-terminal qterminal \
             tilix terminator lxterminal urxvt cosmic-term \
             xdg-terminal-exec x-terminal-emulator xterm; do
@@ -138,7 +138,7 @@ __mn_term_open() {
     # detached from this shell.
     if command -v osascript >/dev/null 2>&1; then
         local tmp; tmp="$(mktemp -t mn-open)" || return 1
-        printf '#!/bin/sh\nrm -f %q\ncd %q\n%s\n' "$tmp" "$cwd" "$inner" > "$tmp"
+        printf '#!/bin/sh\nrm -f %q\ncd %q\n%s\n' "$tmp" "$cwd" "$inner" >| "$tmp"
         chmod +x "$tmp"
         osascript -e "tell application \"Terminal\" to do script \"$tmp\"" \
                   -e 'tell application "Terminal" to activate' >/dev/null
@@ -241,7 +241,7 @@ __mn_opened() {
 # attach-session fails when already inside tmux; switch-client is the in-tmux
 # equivalent.
 __mn_tmux_attach() {
-    if [ -n "$TMUX" ]; then tmux switch-client -t "=$1"; else tmux attach-session -t "=$1"; fi
+    if [ -n "${TMUX:-}" ]; then tmux switch-client -t "=$1"; else tmux attach-session -t "=$1"; fi
 }
 
 # Split one plan line into its six fields.
@@ -382,7 +382,9 @@ mn() {
                 notes+="$line"$'\n'
                 ;;
         esac; } </dev/null
-    done 3< <(mnemosyne "${mine[@]}"; echo "$?" > "$stf")
+    # `>|`: the file is there already (mktemp made it), and under your
+    # noclobber a plain `>` was refused and the status lost
+    done 3< <(mnemosyne "${mine[@]}"; echo "$?" >| "$stf")
 
     local st; st="$(cat "$stf")"; rm -f "$stf"
     notes="$(cat "$errf")"$'\n'"$notes"; rm -f "$errf"

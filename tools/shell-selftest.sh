@@ -835,6 +835,36 @@ EOF
     out=$("$runner" -c "$source_line; mn && echo success-came-through" 2>&1)
     has "$shell_name: and quitting the browser is still success" "success-came-through" "$out"
 
+    # --- your shell's options are yours: noclobber and nounset
+    # With noclobber (bash's set -o, zsh's setopt; bash-sensible turns it
+    # on) the status was written over a file that already existed: "cannot
+    # overwrite existing file" on every mn, and the failure was lost. With
+    # nounset, an MN_TERMINAL you never set stopped every window: "unbound
+    # variable", then "no terminal emulator found".
+    local opts=""
+    case $shell_name in
+        bash) opts="set -o noclobber -o nounset" ;;
+        zsh) opts="setopt noclobber no_unset" ;;
+    esac
+    if [ -n "$opts" ]; then
+        write_plan ""
+        out=$(MN_STUB_EXIT=2 "$runner" -c "$source_line; $opts; mn --restore abc || echo failure-came-through" 2>&1)
+        has "$shell_name: under noclobber and nounset, a failure still fails" "failure-came-through" "$out"
+        hasnt "$shell_name: and nothing complains" "overwrite" "$out"
+        write_plan "$WINDOW_PLAN"
+        : > "$log"
+        out=$(env -u MN_TERMINAL PATH="$lim2" "$runner" -c "$source_line; $opts; mn" 2>&1)
+        wait_for "terminal: " "$log"
+        has "$shell_name: and a window still opens" "mate-terminal: " "$(cat "$log")"
+        if [ -n "$real_tmux" ]; then
+            write_plan "$TMUX_PLAN"
+            out="$out$("$runner" -c "$source_line; $opts; mn" 2>&1)"
+            kill_tmux
+        fi
+        hasnt "$shell_name: with nothing unset complained of" "unbound" "$out"
+        hasnt "$shell_name: (as zsh says it)" "parameter not set" "$out"
+    fi
+
     # --- a line that is not a plan is shown, not acted on
     # A newer mnemosyne could say something this wrapper does not know
     # about; treating it as a window to open is the one thing not to do.
