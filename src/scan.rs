@@ -60,6 +60,11 @@ pub fn discover(include_subagents: bool) -> Vec<Found> {
     for h in [Harness::Pi, Harness::Omp] {
         out.extend(crate::pi::discover(h).into_iter().map(|p| Found::new(p, h)));
     }
+    out.extend(
+        crate::codex::discover()
+            .into_iter()
+            .map(|p| Found::new(p, Harness::Codex)),
+    );
     out
 }
 
@@ -207,7 +212,7 @@ fn raw_num(hay: &[u8], key: &str) -> Option<u64> {
     std::str::from_utf8(&digits).ok()?.parse().ok()
 }
 
-fn iso_to_epoch(s: &str) -> i64 {
+pub(crate) fn iso_to_epoch(s: &str) -> i64 {
     chrono::DateTime::parse_from_rfc3339(s)
         .map(|d| d.timestamp())
         .unwrap_or(0)
@@ -295,7 +300,7 @@ pub fn squash(s: &str, max: usize) -> String {
 /// skipped these lines and the index harvested them, so the same query
 /// answered differently depending on which engine ran.
 /// How much prose one session may contribute to the index.
-const HARVEST_CAP: usize = 64 << 20;
+pub(crate) const HARVEST_CAP: usize = 64 << 20;
 
 pub fn is_injected_meta(line: &[u8]) -> bool {
     memmem::find(line, b"\"isMeta\":true").is_some()
@@ -470,14 +475,19 @@ pub(crate) fn harvest_capped(s: &Session, line: &[u8], text: &mut Option<&mut St
     if sink.len() < HARVEST_CAP {
         harvest_text(line, sink);
         if sink.len() >= HARVEST_CAP {
-            eprintln!(
-                "mnemosyne: {} is larger than the {}MB index limit — \
-                 the rest of it will not be searchable",
-                s.path.display(),
-                HARVEST_CAP >> 20
-            );
+            say_over_cap(s);
         }
     }
+}
+
+/// Say that a session reached the limit on what one may index.
+pub(crate) fn say_over_cap(s: &Session) {
+    eprintln!(
+        "mnemosyne: {} is larger than the {}MB index limit — \
+         the rest of it will not be searchable",
+        s.path.display(),
+        HARVEST_CAP >> 20
+    );
 }
 
 fn process_line(s: &mut Session, line: &[u8], text: &mut Option<&mut String>) {
@@ -776,8 +786,9 @@ fn scan_inner(
         match harness {
             Harness::Claude => process_line(&mut s, line, &mut text),
             Harness::Pi | Harness::Omp => crate::pi::process_line(&mut s, line, &mut text),
-            // Not found by `discover` yet.
-            Harness::Codex | Harness::Hermes => {}
+            Harness::Codex => crate::codex::process_line(&mut s, line, &mut text),
+            // Not a file of lines: read from its database instead.
+            Harness::Hermes => {}
         }
         if buf.capacity() > (1 << 20) {
             buf = Vec::with_capacity(1 << 14);

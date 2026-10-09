@@ -718,6 +718,7 @@ mod tests {
             "art.rs",
             "wsx.rs",
             "pi.rs",
+            "codex.rs",
         ] {
             let src = std::fs::read_to_string(format!("{}/src/{f}", env!("CARGO_MANIFEST_DIR")))
                 .unwrap_or_default();

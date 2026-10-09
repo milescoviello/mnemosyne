@@ -7,6 +7,7 @@
 
 mod app;
 mod art;
+mod codex;
 mod config;
 mod filter;
 mod index;
