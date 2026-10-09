@@ -107,7 +107,11 @@ __mn_term_open() {
             gnome-terminal|kgx) cmd=("$term" --working-directory="$cwd" -- bash -lc "$inner") ;;
             # -x, not -e: their -e takes one word, and `-lc` came back as
             # an option they did not know
-            xfce4-terminal|mate-terminal|terminator) cmd=("$term" --working-directory="$cwd" -x bash -lc "$inner") ;;
+            xfce4-terminal|mate-terminal) cmd=("$term" --working-directory="$cwd" -x bash -lc "$inner") ;;
+            # -u: with a Terminator already open, a new one hands its
+            # command to that one over D-Bus, joined into one string on the
+            # way, and the window opened and closed at once
+            terminator) cmd=("$term" -u --working-directory="$cwd" -x bash -lc "$inner") ;;
             tilix)     cmd=("$term" -w "$cwd" -x bash -lc "$inner") ;;
             qterminal) cmd=("$term" --workdir "$cwd" -e bash -lc "$inner") ;;
             lxterminal) cmd=("$term" --working-directory="$cwd" -e bash -lc "$inner") ;;

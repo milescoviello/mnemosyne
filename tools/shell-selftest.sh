@@ -425,7 +425,7 @@ EOF
         "kgx|--working-directory=$tmp/work-a -- $inner -lc " \
         "xfce4-terminal|--working-directory=$tmp/work-a -x $inner -lc " \
         "mate-terminal|--working-directory=$tmp/work-a -x $inner -lc " \
-        "terminator|--working-directory=$tmp/work-a -x $inner -lc " \
+        "terminator|-u --working-directory=$tmp/work-a -x $inner -lc " \
         "tilix|-w $tmp/work-a -x $inner -lc " \
         "qterminal|--workdir $tmp/work-a -e $inner -lc " \
         "lxterminal|--working-directory=$tmp/work-a -e $inner -lc " \

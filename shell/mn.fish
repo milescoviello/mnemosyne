@@ -412,8 +412,13 @@ function __mn_term_open --description 'Run a command in a new terminal window; e
                 set cmd $term --working-directory="$cwd" -- fish -lc "$inner"
             # -x, not -e: their -e takes one word, and `-lc` came back as an
             # option they did not know
-            case xfce4-terminal mate-terminal terminator
+            case xfce4-terminal mate-terminal
                 set cmd $term --working-directory="$cwd" -x fish -lc "$inner"
+            # -u: with a Terminator already open, a new one hands its
+            # command to that one over D-Bus, joined into one string on the
+            # way, and the window opened and closed at once
+            case terminator
+                set cmd $term -u --working-directory="$cwd" -x fish -lc "$inner"
             case tilix
                 set cmd $term -w "$cwd" -x fish -lc "$inner"
             case qterminal
