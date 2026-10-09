@@ -58,19 +58,60 @@ impl Entry {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(from = "SnapshotFile", into = "SnapshotFile")]
 pub struct Snapshot {
     /// Which boot these were seen in. Empty when the platform would not say.
-    #[serde(default)]
     pub boot: String,
-    #[serde(default)]
     pub saved_at: i64,
-    #[serde(default)]
     pub sessions: Vec<Entry>,
     /// Waved away, so the offer stops appearing on its own. The list is kept
     /// rather than deleted: `--reopen` is still allowed to act on it, which
     /// is what makes dismissing it a safe thing to do.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dismissed: bool,
+}
+
+/// A snapshot as it is written. Claude's sessions are in `sessions`, as
+/// every entry was before there were other agents, and the others' in
+/// `others`, which an older mnemosyne does not read: it knows nothing of
+/// `harness`, and would put a Codex thread back with `claude --resume`.
+#[derive(Serialize, Deserialize)]
+struct SnapshotFile {
+    #[serde(default)]
+    boot: String,
+    #[serde(default)]
+    saved_at: i64,
+    #[serde(default)]
+    sessions: Vec<Entry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    others: Vec<Entry>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    dismissed: bool,
+}
+
+impl From<SnapshotFile> for Snapshot {
+    fn from(f: SnapshotFile) -> Snapshot {
+        let mut sessions = f.sessions;
+        sessions.extend(f.others);
+        Snapshot {
+            boot: f.boot,
+            saved_at: f.saved_at,
+            sessions,
+            dismissed: f.dismissed,
+        }
+    }
+}
+
+impl From<Snapshot> for SnapshotFile {
+    fn from(s: Snapshot) -> SnapshotFile {
+        let (sessions, others) = s.sessions.into_iter().partition(|e| e.harness.is_empty());
+        SnapshotFile {
+            boot: s.boot,
+            saved_at: s.saved_at,
+            sessions,
+            others,
+            dismissed: s.dismissed,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -355,6 +396,59 @@ pub fn clear_previous_at(p: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_older_mnemosyne_does_not_see_another_agents_session() {
+        // It reads `sessions` and knows nothing of `harness`: given a Codex
+        // thread there, it would resume it with `claude --resume`.
+        let w = fold(
+            Workspace::default(),
+            vec![
+                Entry {
+                    id: "c".into(),
+                    cwd: "/w".into(),
+                    ..Default::default()
+                },
+                Entry {
+                    id: "x".into(),
+                    cwd: "/w".into(),
+                    harness: "codex".into(),
+                    ..Default::default()
+                },
+            ],
+            "A",
+            true,
+        );
+        let v: serde_json::Value = serde_json::to_value(&w).unwrap();
+        let ids = |list: &serde_json::Value| -> Vec<String> {
+            list.as_array()
+                .into_iter()
+                .flatten()
+                .map(|e| e["id"].as_str().unwrap().to_string())
+                .collect()
+        };
+        assert_eq!(ids(&v["current"]["sessions"]), ["c"]);
+        assert_eq!(ids(&v["current"]["others"]), ["x"]);
+        // and this one reads both back as one list
+        let back: Workspace = serde_json::from_value(v).unwrap();
+        let mut got: Vec<&str> = back
+            .current
+            .sessions
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect();
+        got.sort();
+        assert_eq!(got, ["c", "x"]);
+        assert_eq!(
+            back.current
+                .sessions
+                .iter()
+                .find(|e| e.id == "x")
+                .unwrap()
+                .harness,
+            "codex"
+        );
+    }
 
     #[test]
     fn an_entry_says_whose_session_it_is() {
