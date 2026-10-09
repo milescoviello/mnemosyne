@@ -179,6 +179,11 @@ cd mnemosyne
 ./install.sh --build    # always build from source
 ```
 
+Building needs Rust 1.85 or newer. Debian 13's, Ubuntu 26.04's and Alpine 3.22's own are
+new enough, as are Fedora's, Arch's, openSUSE's, Void's, NixOS's and
+AlmaLinux's; Debian 12's and Ubuntu 22.04's and 24.04's are older, and
+there [rustup](https://rustup.rs) gives you a current one.
+
 Then:
 
 ```sh

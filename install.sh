@@ -136,6 +136,18 @@ fetch_prebuilt() {
     return 0
 }
 
+# Is version $1 at least $2? Dotted numbers; anything after them ignored.
+version_ge() {
+    local a b i
+    IFS=. read -r -a a <<< "${1%%[!0-9.]*}"
+    IFS=. read -r -a b <<< "${2%%[!0-9.]*}"
+    for i in 0 1 2; do
+        [ "${a[i]:-0}" -gt "${b[i]:-0}" ] && return 0
+        [ "${a[i]:-0}" -lt "${b[i]:-0}" ] && return 1
+    done
+    return 0
+}
+
 build_from_source() {
     # Only a checkout of this project. Piped from curl, `here` is the
     # current directory, and whatever Cargo.toml was in it got built --
@@ -152,6 +164,18 @@ build_from_source() {
         say "platform to be added to the release build."
         exit 1
     }
+    # The oldest Rust it builds with, from Cargo.toml. A distribution's own
+    # can be older -- Debian 12's 1.63, Ubuntu 24.04's 1.75 -- and cargo then
+    # stopped at "failed to parse lock file" or a list of crates, and said
+    # nothing about what to do.
+    local need found
+    need="$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' "$here/Cargo.toml" | head -1)"
+    found="$(rustc -V 2>/dev/null | awk '{print $2}')"
+    if [ -n "$need" ] && [ -n "$found" ] && ! version_ge "$found" "$need"; then
+        say "building it needs Rust $need or newer, and this rustc is $found:"
+        say "install a current one from https://rustup.rs and re-run."
+        exit 1
+    fi
     say "building…"
     cargo build --release --manifest-path "$here/Cargo.toml"
     mkdir -p "$bindir"

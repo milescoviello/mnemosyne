@@ -43,3 +43,13 @@ jobs:
       # breaks resuming without breaking a single test.
       - name: the plan on stdout stays machine-readable
         run: python3 tools/plan-smoke.py
+
+  # The rust-version in Cargo.toml, held to: Debian 13 and Alpine build mn
+  # with their own Rust, and a dependency that wants a newer one should
+  # fail here rather than there.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85
+      - run: cargo build --locked

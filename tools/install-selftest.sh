@@ -336,6 +336,24 @@ esac
     || ok "nor wires up a binary that is not there"
 chmod 755 "$home/ro"
 
+# ---- building, with a Rust too old for it ------------------------------
+# A distribution's own can be: Debian 12's 1.63, Ubuntu 24.04's 1.75. cargo
+# then stopped at "failed to parse lock file", or a list of crates and
+# versions, and nothing said what to do about it.
+mkdir -p "$tmp/oldrust"
+printf '#!/bin/sh\necho "rustc 1.75.0 (82e1608df 2023-12-21) (built from a source tarball)"\n' > "$tmp/oldrust/rustc"
+chmod +x "$tmp/oldrust/rustc"
+home="$tmp/home-oldrust"
+mkdir -p "$home"
+: > "$tmp/cargo.log"
+said=$(env -i HOME="$home" SHELL=/bin/bash PATH="$tmp/oldrust:$base_path" TERM=dumb \
+    bash "$root/install.sh" --build 2>&1)
+code=$?
+if [ "$code" -ne 0 ] && [ ! -s "$tmp/cargo.log" ]; then ok "a Rust too old to build it is not tried"
+else bad "a Rust too old to build it is not tried" "exit $code, cargo: $(cat "$tmp/cargo.log")"; fi
+has "and it says which Rust it needs" "needs Rust $(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' "$root/Cargo.toml")" "$said"
+has "and which it found" "1.75.0" "$said"
+
 # ---- piped from curl, standing in some other project ------------------
 home="$tmp/home-pipe"
 mkdir -p "$home/elsewhere"
