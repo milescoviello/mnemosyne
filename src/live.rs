@@ -108,6 +108,193 @@ pub fn agent_of(args: &[String]) -> Option<(Harness, usize)> {
     }
 }
 
+/// Whether an agent's command line is a conversation, rather than one of
+/// its other jobs: an MCP server, an app server, a gateway, a login, a
+/// one-off run for a script. `args` begins with the program.
+///
+/// Claude's are its own to say. The others' subcommands are the ones each
+/// lists in its `--help`; a word that is none of them is a prompt.
+pub fn is_agent_chat(h: Harness, args: &[String]) -> bool {
+    const CODEX_JOBS: &[&str] = &[
+        "agents",
+        "exec",
+        "e",
+        "review",
+        "login",
+        "logout",
+        "mcp",
+        "plugin",
+        "mcp-server",
+        "app-server",
+        "remote-control",
+        "completion",
+        "update",
+        "doctor",
+        "sandbox",
+        "debug",
+        "apply",
+        "a",
+        "queue",
+        "archive",
+        "delete",
+        "migrate-rollouts",
+        "unarchive",
+        "cloud",
+        "exec-server",
+        "features",
+        "help",
+    ];
+    const OMP_JOBS: &[&str] = &[
+        "acp",
+        "agents",
+        "auth-broker",
+        "auth-gateway",
+        "bench",
+        "browser-relay",
+        "cleanse",
+        "clip",
+        "collab",
+        "commit",
+        "completions",
+        "compress",
+        "config",
+        "dry-balance",
+        "find",
+        "gallery",
+        "gc",
+        "git",
+        "grep",
+        "grievances",
+        "if-bench",
+        "images",
+        "install",
+        "join",
+        "login",
+        "models",
+        "play",
+        "plugin",
+        "predict",
+        "ps",
+        "read",
+        "render",
+        "say",
+        "search",
+        "setup",
+        "share",
+        "shell",
+        "skill",
+        "ssh",
+        "stats",
+        "stream",
+        "tiny-models",
+        "token",
+        "toks",
+        "ttsr",
+        "update",
+        "usage",
+        "worktree",
+    ];
+    const PI_JOBS: &[&str] = &[
+        "install",
+        "remove",
+        "uninstall",
+        "update",
+        "list",
+        "config",
+        "auth",
+    ];
+    // The flags whose value is the next word, which is not a subcommand.
+    let takes_value: &[&str] = match h {
+        Harness::Codex => &[
+            "-c",
+            "--config",
+            "-m",
+            "--model",
+            "-i",
+            "--image",
+            "-p",
+            "--profile",
+            "-s",
+            "--sandbox",
+            "-a",
+            "--ask-for-approval",
+            "-C",
+            "--cd",
+            "--enable",
+            "--disable",
+            "--remote",
+            "--remote-auth-token-env",
+            "--local-provider",
+            "--add-dir",
+        ],
+        Harness::Hermes => &[
+            "-z",
+            "--oneshot",
+            "--usage-file",
+            "-m",
+            "--model",
+            "--provider",
+            "-t",
+            "--toolsets",
+            "-r",
+            "--resume",
+            "-c",
+            "--continue",
+            "-s",
+            "--skills",
+        ],
+        Harness::Omp => &[
+            "-r",
+            "--resume",
+            "--model",
+            "--plan",
+            "--session-dir",
+            "--profile",
+            "--cwd",
+            "--thinking",
+            "--models",
+            "--approval-mode",
+            "--mode",
+            "--max-time",
+        ],
+        Harness::Pi => &[
+            "--session",
+            "--session-id",
+            "--fork",
+            "--session-dir",
+            "--name",
+            "-n",
+            "--model",
+            "--models",
+            "--provider",
+        ],
+        Harness::Claude => &[],
+    };
+    let rest = args.get(1..).unwrap_or_default();
+    let first = {
+        let mut skip = false;
+        rest.iter().find(|a| {
+            if std::mem::take(&mut skip) {
+                return false;
+            }
+            if a.starts_with('-') {
+                skip = takes_value.contains(&a.as_str());
+                return false;
+            }
+            true
+        })
+    };
+    let job = |jobs: &[&str]| first.is_some_and(|w| jobs.contains(&w.as_str()));
+    let print = rest.iter().any(|a| a == "-p" || a == "--print");
+    match h {
+        Harness::Claude => is_claude_session(args),
+        Harness::Codex => !job(CODEX_JOBS),
+        Harness::Hermes => first.is_none_or(|w| w == "chat"),
+        Harness::Omp => !print && !job(OMP_JOBS),
+        Harness::Pi => !print && !job(PI_JOBS),
+    }
+}
+
 /// The session an agent's command line names, and for Claude the model.
 pub fn resume_of(h: Harness, args: &[String]) -> (Option<String>, Option<String>) {
     match h {
@@ -300,8 +487,9 @@ pub fn scan_procs() -> Vec<Proc> {
         let Some((harness, at)) = agent_of(&args) else {
             continue;
         };
-        // `claude -p`, `claude mcp serve` and the rest are not chats.
-        if harness == Harness::Claude && !is_claude_session(&args[at..]) {
+        // `claude -p`, `codex mcp-server`, `hermes gateway` and the rest
+        // are not chats.
+        if !is_agent_chat(harness, &args[at..]) {
             continue;
         }
 
@@ -474,10 +662,12 @@ pub fn resume_id_in(cmd: &str) -> Option<String> {
         .filter(|w| !w.is_empty())
         .map(|w| w.to_string())
         .collect();
-    match (0..words.len()).find_map(|i| agent_of(&words[i..]).map(|(h, at)| (h, i + at))) {
-        Some((h, at)) => resume_of(h, &words[at..]).0,
-        None => parse_claude_args(&words).0,
-    }
+    // The agent that names a session, not the first word that happens to
+    // be an agent's name: `cd ~/src/codex && claude --resume ID` is Claude's.
+    (0..words.len())
+        .filter_map(|i| agent_of(&words[i..]).map(|(h, at)| (h, i + at)))
+        .find_map(|(h, at)| resume_of(h, &words[at..]).0)
+        .or_else(|| parse_claude_args(&words).0)
 }
 
 /// tmux treats `:` and `.` as target syntax, so a name carrying either
@@ -699,6 +889,64 @@ mod tests {
             Some(HERMES_ID)
         );
         assert_eq!(id(Harness::Hermes, "hermes --continue"), None);
+    }
+
+    #[test]
+    fn an_agents_other_jobs_are_not_chats() {
+        // `codex mcp-server` started by Claude Code, the VS Code
+        // extension's app-server, Hermes's gateway: running in a folder,
+        // they were taken for its newest session.
+        let chat = |h: Harness, cmd: &str| is_agent_chat(h, &words(cmd));
+        for cmd in [
+            "codex mcp-server",
+            "codex -c a=b app-server",
+            "codex login",
+            "codex exec fix-the-build",
+        ] {
+            assert!(!chat(Harness::Codex, cmd), "{cmd}");
+        }
+        for cmd in [
+            "codex",
+            &format!("codex resume {CODEX_ID}"),
+            "codex fix-the-build",
+        ] {
+            assert!(chat(Harness::Codex, cmd), "{cmd}");
+        }
+        for cmd in [
+            "hermes gateway run",
+            "hermes cron tick",
+            "hermes -m x setup",
+        ] {
+            assert!(!chat(Harness::Hermes, cmd), "{cmd}");
+        }
+        for cmd in [
+            "hermes".to_string(),
+            format!("hermes --resume {HERMES_ID}"),
+            "hermes -z find-the-lecture".to_string(),
+            "hermes chat".to_string(),
+        ] {
+            assert!(chat(Harness::Hermes, &cmd), "{cmd}");
+        }
+        assert!(!chat(Harness::Omp, "omp acp"));
+        assert!(!chat(Harness::Omp, "omp -p list-the-files"));
+        assert!(chat(Harness::Omp, &format!("omp --resume={PI_ID}")));
+        assert!(!chat(Harness::Pi, "pi install npm:x"));
+        assert!(!chat(Harness::Pi, "pi --print hi"));
+        assert!(chat(Harness::Pi, "pi"));
+        assert!(!chat(Harness::Claude, "claude mcp serve"));
+        assert!(chat(Harness::Claude, "claude --resume x"));
+    }
+
+    #[test]
+    fn a_folder_named_for_an_agent_does_not_hide_the_one_running() {
+        let cmd = format!(
+            "cd /home/u/src/codex && claude --resume {}",
+            "026bcdb5-8d88-4ad7-9f23-58649bf4f353"
+        );
+        assert_eq!(
+            resume_id_in(&cmd).as_deref(),
+            Some("026bcdb5-8d88-4ad7-9f23-58649bf4f353")
+        );
     }
 
     #[test]
