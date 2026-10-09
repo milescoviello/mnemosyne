@@ -100,6 +100,8 @@ n=$(basename "$0")
 echo "$n: $*" >> "$MN_TEST_LOG"
 { printf '%s-args:' "$n"; printf ' [%s]' "$@"; echo; } >> "$MN_TEST_LOG"
 echo "$n-pwd: $(pwd)" >> "$MN_TEST_LOG"
+# what mn told mnemosyne, which is no business of the agent's
+echo "$n-plan: ${MNEMOSYNE_PLAN:-}" >> "$MN_TEST_LOG"
 [ -n "$TMUX" ] && sleep 20
 exit 0
 EOF
@@ -935,6 +937,10 @@ EOF
         wait_for "hermes-args:" "$log"
         has "$shell_name: a hermes chat runs under tmux, in hermes" \
             "hermes-args: [--resume] [20260910_004421_837570]" "$(cat "$log")"
+        # Set for mnemosyne alone. Left in the tmux server's environment, an
+        # older mn sourced in one of its panes would say it reads plans it
+        # cannot carry out.
+        hasnt "$shell_name: and the plan version stays with mnemosyne" "hermes-plan: 2" "$(cat "$log")"
         : > "$log"
         out=$("$runner" -c "$source_line; mn" 2>&1)
         has "$shell_name: and is found there again" "already running" "$out"

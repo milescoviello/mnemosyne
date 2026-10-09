@@ -75,9 +75,10 @@ function mn --description 'Browse, search, tag and resume Claude Code sessions (
     # half-exited. It all comes out once the screen is ours again.
     set -l notes
     # Says this function resumes every agent, not only claude: one sourced
-    # before there were others is never handed one.
-    set -lx MNEMOSYNE_PLAN 2
-    mnemosyne $mine | while read -l line
+    # before there were others is never handed one. Said to mnemosyne
+    # alone: exported here, it went on into tmux and every agent started
+    # from this loop, and an older mn in one of their panes said it too.
+    MNEMOSYNE_PLAN=2 mnemosyne $mine | while read -l line
         test -z "$line"; and continue
         set -l p (string split \t -- $line)
         # The agent, when it is not claude, is an eighth field.
