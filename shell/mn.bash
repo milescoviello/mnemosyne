@@ -76,6 +76,11 @@ __mn_term_open() {
         && [ "$(uname -s)" != Darwin ]; then
         return 2
     fi
+    # The window runs with your PATH. A login shell on Debian, Ubuntu and
+    # Alpine starts again from /etc/profile's, and a claude whose
+    # interpreter is only on yours -- npm's under nvm is
+    # `#!/usr/bin/env node` -- died there at once.
+    inner="export PATH=$(printf %q "$PATH"); $inner"
     for term in $MN_TERMINAL alacritty konsole kitty wezterm foot ghostty \
             ptyxis gnome-terminal kgx xfce4-terminal mate-terminal qterminal \
             tilix terminator lxterminal urxvt cosmic-term \

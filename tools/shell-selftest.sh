@@ -239,8 +239,8 @@ run_shell() {
     hasnt "$shell_name: and nothing is started for it" "22222222" "$seen"
 
     if [ -n "$real_tmux" ]; then
-        has "$shell_name: a window is opened onto the tmux session" \
-            "term: -e $inner -lc exec tmux attach-session -t =mn-026bcdb5" "$seen"
+        has "$shell_name: a window is opened onto the tmux session" "term: -e $inner -lc " "$seen"
+        has "$shell_name: and attaches it" "; exec tmux attach-session -t =mn-026bcdb5" "$seen"
         local sessions; sessions=$("$bin/tmux" list-sessions -F '#{session_name}' 2>/dev/null)
         has "$shell_name: the session is named for the chat" "mn-026bcdb5" "$sessions"
         has "$shell_name: and so is the second one" "mn-11111111" "$sessions"
@@ -358,6 +358,34 @@ run_shell() {
         has "$shell_name: with no display, MN_TERMINAL is still used" "term: " "$(cat "$log")"
     fi
 
+    # --- a new window runs claude with the PATH mn was run with
+    # A login shell on Debian, Ubuntu and Alpine starts from /etc/profile's
+    # PATH, not yours. A claude installed with npm under nvm is
+    # `#!/usr/bin/env node`, node is only on your PATH, and every window
+    # died with "env: 'node': No such file or directory". Played here by a
+    # terminal that starts the window's shell from a bare PATH, and a claude
+    # whose interpreter is only on the caller's.
+    local nvm="$tmp/nvm-bin"
+    rm -rf "$nvm"
+    mkdir -p "$nvm"
+    printf '#!/bin/sh\nexec sh "$@"\n' > "$nvm/mn-test-node"
+    printf '#!/usr/bin/env mn-test-node\necho "claude-nvm: $*" >> "$MN_TEST_LOG"\n' > "$nvm/claude"
+    cat > "$nvm/pathterm" <<'EOF'
+#!/bin/sh
+while [ $# -gt 0 ] && [ "$1" != -e ]; do shift; done
+sh_=$(command -v "$2") cmd_=$4
+case "$2" in
+    fish) exec env PATH=/usr/bin:/bin "$sh_" --no-config -c "$cmd_" ;;
+    *) exec env PATH=/usr/bin:/bin "$sh_" -c "$cmd_" ;;
+esac
+EOF
+    chmod +x "$nvm"/*
+    write_plan "$WINDOW_PLAN"
+    : > "$log"
+    PATH="$nvm:$PATH" MN_TERMINAL=pathterm "$runner" -c "$source_line; mn" >/dev/null 2>&1
+    wait_for "claude-nvm: " "$log"
+    has "$shell_name: a new window has your PATH (claude under nvm runs)" "claude-nvm: --resume 026bcdb5" "$(cat "$log")"
+
     # --- and each is told what to run the way it understands
     # Ptyxis, GNOME's terminals, MATE's, XFCE's and LXQt's were not in the
     # list at all; given `-e` the way xterm is, MATE's and XFCE's read `-lc`
@@ -366,18 +394,18 @@ run_shell() {
     rm -rf "$tmp/terms"
     mkdir -p "$tmp/terms"
     for spec in \
-        "ptyxis|--new-window --working-directory=$tmp/work-a -- $inner -lc cd" \
-        "gnome-terminal|--working-directory=$tmp/work-a -- $inner -lc cd" \
-        "kgx|--working-directory=$tmp/work-a -- $inner -lc cd" \
-        "xfce4-terminal|--working-directory=$tmp/work-a -x $inner -lc cd" \
-        "mate-terminal|--working-directory=$tmp/work-a -x $inner -lc cd" \
-        "terminator|--working-directory=$tmp/work-a -x $inner -lc cd" \
-        "tilix|-w $tmp/work-a -x $inner -lc cd" \
-        "qterminal|--workdir $tmp/work-a -e $inner -lc cd" \
-        "lxterminal|--working-directory=$tmp/work-a -e $inner -lc cd" \
-        "urxvt|-cd $tmp/work-a -e $inner -lc cd" \
-        "cosmic-term|-e $inner -lc cd" \
-        "xdg-terminal-exec|$inner -lc cd"; do
+        "ptyxis|--new-window --working-directory=$tmp/work-a -- $inner -lc " \
+        "gnome-terminal|--working-directory=$tmp/work-a -- $inner -lc " \
+        "kgx|--working-directory=$tmp/work-a -- $inner -lc " \
+        "xfce4-terminal|--working-directory=$tmp/work-a -x $inner -lc " \
+        "mate-terminal|--working-directory=$tmp/work-a -x $inner -lc " \
+        "terminator|--working-directory=$tmp/work-a -x $inner -lc " \
+        "tilix|-w $tmp/work-a -x $inner -lc " \
+        "qterminal|--workdir $tmp/work-a -e $inner -lc " \
+        "lxterminal|--working-directory=$tmp/work-a -e $inner -lc " \
+        "urxvt|-cd $tmp/work-a -e $inner -lc " \
+        "cosmic-term|-e $inner -lc " \
+        "xdg-terminal-exec|$inner -lc "; do
         t=${spec%%|*} want=${spec#*|}
         printf '#!/bin/sh\necho "%s: $*" >> "$MN_TEST_LOG"\n' "$t" > "$tmp/terms/$t"
         chmod +x "$tmp/terms/$t"

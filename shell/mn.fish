@@ -367,6 +367,11 @@ function __mn_term_open --description 'Run a command in a new terminal window; e
     if test -z "$MN_TERMINAL$DISPLAY$WAYLAND_DISPLAY"; and test "$os" != Darwin
         return 2
     end
+    # The window runs with your PATH. A login shell on Debian, Ubuntu and
+    # Alpine starts again from /etc/profile's, and a claude whose
+    # interpreter is only on yours -- npm's under nvm is
+    # `#!/usr/bin/env node` -- died there at once.
+    set inner "set -gx PATH "(string join ' ' -- (string escape -- $PATH))"; $inner"
 
     # The terminals people install for themselves first, then the ones
     # desktops ship, then whatever the system calls its terminal, and xterm
