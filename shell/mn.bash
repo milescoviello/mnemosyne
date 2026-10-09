@@ -96,7 +96,8 @@ __mn_term_open() {
             tilix terminator lxterminal urxvt cosmic-term \
             xdg-terminal-exec x-terminal-emulator xterm; do
         command -v "$term" >/dev/null 2>&1 || continue
-        case "$term" in
+        # by its name: an MN_TERMINAL given as a path fell to the generic -e
+        case "${term##*/}" in
             alacritty) cmd=("$term" --working-directory "$cwd" -e bash -lc "$inner") ;;
             konsole)   cmd=("$term" --workdir "$cwd" -e bash -lc "$inner") ;;
             kitty)     cmd=("$term" --directory "$cwd" bash -lc "$inner") ;;

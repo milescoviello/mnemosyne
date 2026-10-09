@@ -393,7 +393,8 @@ function __mn_term_open --description 'Run a command in a new terminal window; e
             xdg-terminal-exec x-terminal-emulator xterm
         test -z "$term"; and continue
         command -q $term; or continue
-        switch $term
+        # by its name: an MN_TERMINAL given as a path fell to the generic -e
+        switch (string replace -r '.*/' '' -- $term)
             case alacritty
                 set cmd $term --working-directory "$cwd" -e fish -lc "$inner"
             case konsole

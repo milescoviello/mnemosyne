@@ -441,6 +441,14 @@ EOF
         wait_for "$t: " "$log"
         has "$shell_name: $t is told what to run its own way" "$t: $want" "$(cat "$log")"
     done
+    # MN_TERMINAL as a path: matched as the bare name, it fell to the
+    # generic `-e`, which gnome-terminal, ptyxis and xfce4-terminal refuse
+    write_plan "$WINDOW_PLAN"
+    : > "$log"
+    MN_TERMINAL="$tmp/terms/gnome-terminal" "$runner" -c "$source_line; mn" >/dev/null 2>&1
+    wait_for "gnome-terminal: " "$log"
+    has "$shell_name: MN_TERMINAL as a path is still told its own way" \
+        "gnome-terminal: --working-directory=$tmp/work-a -- $inner -lc " "$(cat "$log")"
 
     # --- QTerminal before 1.2 splits what it is to run at every space
     # Ubuntu 22.04's 0.17 (Lubuntu) joins -e's words into one line and
