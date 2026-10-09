@@ -35,7 +35,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
 
-def run(binary, home, keys, rows=24, cols=130, timeout=40, extra_env=None, signal=None):
+def run(binary, home, keys, rows=24, cols=130, timeout=40, extra_env=None, signal=None,
+        hangup=False, ctty=False):
     """Drive the TUI, returning (stdout, what it drew, exit code).
 
     Waiting a fixed second and hoping was enough on a laptop and was not on
@@ -53,10 +54,13 @@ def run(binary, home, keys, rows=24, cols=130, timeout=40, extra_env=None, signa
     env = dict(os.environ, HOME=home, TERM="xterm-256color")
     if extra_env:
         env.update(extra_env)
+    # ctty: the pty is its controlling terminal, as a terminal window's is,
+    # so closing it sends SIGHUP; without, closing it only hangs it up
     proc = subprocess.Popen(
         [binary, "--no-splash", "--no-update"],
         stdin=worker, stderr=worker, stdout=subprocess.PIPE,
-        close_fds=True, env=env,
+        close_fds=True, env=env, start_new_session=ctty,
+        preexec_fn=(lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 0)) if ctty else None,
     )
     os.close(worker)
 
@@ -96,6 +100,13 @@ def run(binary, home, keys, rows=24, cols=130, timeout=40, extra_env=None, signa
         time.sleep(0.5)
     if signal is not None:
         proc.send_signal(signal)
+    if hangup:
+        # the terminal goes away, as when its window is closed
+        done.set()
+        reader.join(timeout=2)
+        os.close(main_fd)
+        main_fd = None
+        timeout = 5
 
     try:
         out, _ = proc.communicate(timeout=timeout)
@@ -106,7 +117,8 @@ def run(binary, home, keys, rows=24, cols=130, timeout=40, extra_env=None, signa
         code = -1
     done.set()
     reader.join(timeout=2)
-    os.close(main_fd)
+    if main_fd is not None:
+        os.close(main_fd)
 
     screen = bytes(drew).decode(errors="replace")
     if not appeared:
@@ -194,6 +206,17 @@ def main():
         _, screen, code = run(binary, home, [], timeout=30, signal=s)
         check(f"{name} exits with its signal's status", code == 128 + s, f"exit {code}")
         check(f"and {name} leaves the alternate screen", "\x1b[?1049l" in screen, "not found")
+
+    # Its terminal closed under it -- the window, an ssh connection, a tmux
+    # pane killed. crossterm went on reading the hung-up tty forever: mn
+    # stayed behind at full CPU, its parent gone, and SIGTERM could not end
+    # it either, since the loop that looks at signals never came round.
+    _, _, code = run(binary, home, [], timeout=30, hangup=True, ctty=True)
+    check("its terminal closing ends it (SIGHUP)", code == 128 + sig.SIGHUP,
+          "still running 5s later" if code == -1 else f"exit {code}")
+    _, _, code = run(binary, home, [], timeout=30, hangup=True)
+    check("and so does a hangup that comes with no signal", code != -1,
+          "still running 5s later")
 
     # A panic on a rayon worker reaches the main thread by resume_unwind,
     # which never calls the hook: what a scanner panic during `R` does.

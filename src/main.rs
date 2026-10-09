@@ -1082,6 +1082,9 @@ extern "C" fn on_signal(sig: libc::c_int) {
 }
 
 fn catch_signals() {
+    // SAFETY: isatty only looks at the descriptor.
+    let tty = unsafe { libc::isatty(libc::STDIN_FILENO) } == 1;
+    STDIN_TTY.store(tty, std::sync::atomic::Ordering::Relaxed);
     for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGQUIT] {
         // SAFETY: the handler only stores to an atomic.
         unsafe {
@@ -1095,6 +1098,45 @@ fn signalled() -> Option<i32> {
         0 => None,
         s => Some(s),
     }
+}
+
+/// Is stdin a terminal? Asked once, at the start: a terminal that has hung
+/// up no longer answers isatty.
+static STDIN_TTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Has the terminal gone -- its window closed, the ssh connection dropped,
+/// the tmux pane killed? Said by the terminal itself, so it is seen when no
+/// SIGHUP comes to say so (mn outside the terminal's session), and taken as
+/// one: the browser leaves the ordinary way. Before, a hung-up terminal kept
+/// it reading for ever, at full CPU, its parent gone.
+///
+/// Not on macOS, whose poll does not support devices: every terminal looks
+/// invalid there, at once. Its terminals send SIGHUP when a window closes.
+pub fn hung_up() -> bool {
+    let hup = |fd: libc::c_int| {
+        if cfg!(target_os = "macos") {
+            return false;
+        }
+        let mut p = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: poll only looks at the one descriptor, without waiting.
+        let n = unsafe { libc::poll(&mut p, 1, 0) };
+        n > 0 && p.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
+    };
+    let gone = hup(libc::STDERR_FILENO)
+        || (STDIN_TTY.load(std::sync::atomic::Ordering::Relaxed) && hup(libc::STDIN_FILENO));
+    if gone {
+        let _ = SIGNALLED.compare_exchange(
+            0,
+            libc::SIGHUP,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+    gone
 }
 
 /// The terminal as the browser found it, put back when this is dropped --
@@ -1147,7 +1189,7 @@ fn run<B: ratatui::backend::Backend>(
     let mut asking_wsx: Option<std::thread::JoinHandle<wsx::State>> = None;
     let mut rebuilding = false;
     loop {
-        if signalled().is_some() {
+        if signalled().is_some() || hung_up() {
             return Ok(());
         }
         // wsx, asked off this thread and folded in when it answers. Asked
@@ -1157,15 +1199,28 @@ fn run<B: ratatui::backend::Backend>(
             app.want_wsx = false;
             asking_wsx = Some(std::thread::spawn(wsx::load));
         }
-        term.draw(|f| ui::draw(f, app))?;
-
-        if event::poll(Duration::from_millis(120))? {
-            match event::read()? {
-                Event::Key(k) if k.kind == event::KeyEventKind::Press => app.on_key(k),
-                Event::Mouse(m) => app.on_mouse(m),
-                Event::Resize(_, _) => {}
-                _ => {}
+        // A terminal that has gone fails what is written to it and read
+        // from it; that is the hangup, left the ordinary way, not an error.
+        let gone = |e: std::io::Error| -> Result<()> {
+            if hung_up() || signalled().is_some() {
+                Ok(())
+            } else {
+                Err(e.into())
             }
+        };
+        if let Err(e) = term.draw(|f| ui::draw(f, app)) {
+            return gone(e);
+        }
+
+        match event::poll(Duration::from_millis(120)) {
+            Ok(true) => match event::read() {
+                Ok(Event::Key(k)) if k.kind == event::KeyEventKind::Press => app.on_key(k),
+                Ok(Event::Mouse(m)) => app.on_mouse(m),
+                Ok(_) => {}
+                Err(e) => return gone(e),
+            },
+            Ok(false) => {}
+            Err(e) => return gone(e),
         }
 
         // Fault injection, so the terminal-restoring panic hook can be

@@ -249,12 +249,23 @@ pub fn run<B: Backend>(term: &mut Terminal<B>, p: &Progress, must_wait: bool) ->
             );
         })?;
 
-        // A signal leaves the way ctrl+c does, so the terminal is put back.
-        if crate::SIGNALLED.load(Ordering::SeqCst) != 0 {
+        // A signal leaves the way ctrl+c does, so the terminal is put back;
+        // so does the terminal hanging up, and what failed for want of it.
+        if crate::SIGNALLED.load(Ordering::SeqCst) != 0 || crate::hung_up() {
             return Ok(End::Aborted);
         }
-        if event::poll(FRAME)? {
-            if let Event::Key(k) = event::read()? {
+        let ready = match event::poll(FRAME) {
+            Ok(r) => r,
+            Err(_) if crate::hung_up() => return Ok(End::Aborted),
+            Err(e) => return Err(e.into()),
+        };
+        if ready {
+            let read = match event::read() {
+                Ok(e) => e,
+                Err(_) if crate::hung_up() => return Ok(End::Aborted),
+                Err(e) => return Err(e.into()),
+            };
+            if let Event::Key(k) = read {
                 if k.kind == KeyEventKind::Press {
                     if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) {
                         return Ok(End::Aborted);
