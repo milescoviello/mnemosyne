@@ -14,7 +14,7 @@
 //! * Transcripts are append-only, so we remember how many bytes we already
 //!   consumed (`scanned_len`) and on later runs read only the new tail.
 
-use crate::model::Session;
+use crate::model::{Harness, Session};
 use anyhow::Result;
 use memchr::memmem;
 use std::fs::{self, File};
@@ -25,8 +25,46 @@ pub fn projects_dir() -> PathBuf {
     crate::paths::claude_dir().join("projects")
 }
 
-/// Every transcript on disk: `(path, is_subagent, parent_session_id)`.
-pub fn discover(include_subagents: bool) -> Vec<(PathBuf, bool, Option<String>)> {
+/// A session file on disk, and which agent wrote it.
+#[derive(Clone, Debug)]
+pub struct Found {
+    pub path: PathBuf,
+    pub harness: Harness,
+    pub is_subagent: bool,
+    /// For a Claude subagent: the session that started it.
+    pub parent: Option<String>,
+}
+
+impl Found {
+    pub fn new(path: PathBuf, harness: Harness) -> Found {
+        Found {
+            path,
+            harness,
+            is_subagent: false,
+            parent: None,
+        }
+    }
+}
+
+/// Every session file on disk, Claude's and the other agents'.
+pub fn discover(include_subagents: bool) -> Vec<Found> {
+    let mut out: Vec<Found> = discover_claude(include_subagents)
+        .into_iter()
+        .map(|(path, is_subagent, parent)| Found {
+            path,
+            harness: Harness::Claude,
+            is_subagent,
+            parent,
+        })
+        .collect();
+    for h in [Harness::Pi, Harness::Omp] {
+        out.extend(crate::pi::discover(h).into_iter().map(|p| Found::new(p, h)));
+    }
+    out
+}
+
+/// Every Claude transcript: `(path, is_subagent, parent_session_id)`.
+fn discover_claude(include_subagents: bool) -> Vec<(PathBuf, bool, Option<String>)> {
     let root = projects_dir();
     let mut out = Vec::new();
     let Ok(projects) = fs::read_dir(&root) else {
@@ -70,7 +108,7 @@ pub fn discover(include_subagents: bool) -> Vec<(PathBuf, bool, Option<String>)>
 /// matters: it is where resuming goes. Cut at the first quote, a folder
 /// named `a "b" c` came back as `a \`, and one with a backslash kept both
 /// of the backslashes JSON writes -- either way, a folder that is not there.
-fn raw_str(hay: &[u8], key: &str) -> Option<String> {
+pub(crate) fn raw_str(hay: &[u8], key: &str) -> Option<String> {
     let needle = format!("\"{key}\":\"");
     let i = memmem::find(hay, needle.as_bytes())? + needle.len();
     let rest = &hay[i..];
@@ -182,7 +220,7 @@ fn iso_to_epoch(s: &str) -> i64 {
 /// `<ide_opened_file>` block and then the words, and joined before being
 /// judged the whole of it looked like an envelope: the session lost its
 /// opening prompt, and with no AI title, its title.
-fn content_text(v: &serde_json::Value) -> String {
+pub(crate) fn content_text(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Array(a) => {
@@ -386,11 +424,11 @@ fn strip_reminders(s: &str) -> String {
     out
 }
 
-const BIG_LINE: usize = 1 << 23; // 8 MiB: base64 attachments live up here
+pub(crate) const BIG_LINE: usize = 1 << 23; // 8 MiB: base64 attachments live up here
 const FRONT: usize = 1 << 16;
 const TAIL: usize = 1 << 13;
 
-fn front(line: &[u8]) -> &[u8] {
+pub(crate) fn front(line: &[u8]) -> &[u8] {
     if line.len() > BIG_LINE {
         &line[..FRONT]
     } else {
@@ -405,6 +443,43 @@ fn tail(line: &[u8]) -> &[u8] {
     }
 }
 
+/// An ISO time seen on a line: the first is when the session began, the
+/// latest when it was last touched.
+pub(crate) fn note_time(s: &mut Session, iso: &str) {
+    let e = iso_to_epoch(iso);
+    if e > 0 {
+        if s.first_ts == 0 {
+            s.first_ts = e;
+        }
+        if e > s.last_ts {
+            s.last_ts = e;
+        }
+    }
+}
+
+/// Add a line's prose to what the search will index.
+///
+/// Bounded, so one pathological session cannot eat the index. Raised well
+/// clear of the largest real session (4.5MB here) and no longer silent:
+/// losing half a transcript's searchable text should not be something you
+/// have to measure to discover.
+pub(crate) fn harvest_capped(s: &Session, line: &[u8], text: &mut Option<&mut String>) {
+    let Some(sink) = text.as_deref_mut() else {
+        return;
+    };
+    if sink.len() < HARVEST_CAP {
+        harvest_text(line, sink);
+        if sink.len() >= HARVEST_CAP {
+            eprintln!(
+                "mnemosyne: {} is larger than the {}MB index limit — \
+                 the rest of it will not be searchable",
+                s.path.display(),
+                HARVEST_CAP >> 20
+            );
+        }
+    }
+}
+
 fn process_line(s: &mut Session, line: &[u8], text: &mut Option<&mut String>) {
     if line.is_empty() {
         return;
@@ -414,15 +489,7 @@ fn process_line(s: &mut Session, line: &[u8], text: &mut Option<&mut String>) {
     // --- timestamps: a late key, so look at the tail of huge lines first ---
     if let Some(ts) = raw_str(tail(line), "timestamp").or_else(|| raw_str(front(line), "timestamp"))
     {
-        let e = iso_to_epoch(&ts);
-        if e > 0 {
-            if s.first_ts == 0 {
-                s.first_ts = e;
-            }
-            if e > s.last_ts {
-                s.last_ts = e;
-            }
-        }
+        note_time(s, &ts);
     }
 
     let f = front(line);
@@ -513,23 +580,7 @@ fn process_line(s: &mut Session, line: &[u8], text: &mut Option<&mut String>) {
     // output into an index that exists to leave it out. Across 99,853 such
     // lines here not one also carried anything the user wrote.
     if (is_user || is_asst) && !is_injected_meta(line) && !carries_tool_result(line) {
-        if let Some(sink) = text.as_deref_mut() {
-            // Bounded, so one pathological session cannot eat the index.
-            // Raised well clear of the largest real session (4.5MB here) and
-            // no longer silent: losing half a transcript's searchable text
-            // should not be something you have to measure to discover.
-            if sink.len() < HARVEST_CAP {
-                harvest_text(line, sink);
-                if sink.len() >= HARVEST_CAP {
-                    eprintln!(
-                        "mnemosyne: {} is larger than the {}MB index limit — \
-                         the rest of it will not be searchable",
-                        s.path.display(),
-                        HARVEST_CAP >> 20
-                    );
-                }
-            }
-        }
+        harvest_capped(s, line, text);
     }
 
     if is_user {
@@ -586,10 +637,12 @@ pub fn scan(
     parent: Option<String>,
     prev: Option<&Session>,
 ) -> Result<Session> {
-    scan_inner(path, is_subagent, parent, prev, None)
+    scan_inner(path, Harness::Claude, is_subagent, parent, prev, None)
 }
 
-/// Scan, and also collect the conversation prose for the search index.
+/// Scan a Claude transcript, and also collect the conversation prose for
+/// the search index.
+#[cfg(test)]
 pub fn scan_with_text(
     path: &Path,
     is_subagent: bool,
@@ -597,7 +650,19 @@ pub fn scan_with_text(
     prev: Option<&Session>,
     text: &mut String,
 ) -> Result<Session> {
-    scan_inner(path, is_subagent, parent, prev, Some(text))
+    scan_inner(path, Harness::Claude, is_subagent, parent, prev, Some(text))
+}
+
+/// Scan any agent's session file, collecting its prose for the search.
+pub fn scan_found(f: &Found, prev: Option<&Session>, text: &mut String) -> Result<Session> {
+    scan_inner(
+        &f.path,
+        f.harness,
+        f.is_subagent,
+        f.parent.clone(),
+        prev,
+        Some(text),
+    )
 }
 
 /// Whether a file now `size` bytes long can be read on from where `prev`
@@ -618,6 +683,7 @@ fn ends_a_line(file: &mut File, at: u64) -> bool {
 
 fn scan_inner(
     path: &Path,
+    harness: Harness,
     is_subagent: bool,
     parent: Option<String>,
     prev: Option<&Session>,
@@ -663,6 +729,7 @@ fn scan_inner(
                 .unwrap_or_default()
         };
         Session {
+            harness,
             id,
             path: path.to_path_buf(),
             project_dir: path
@@ -706,7 +773,12 @@ fn scan_inner(
         } else {
             line
         };
-        process_line(&mut s, line, &mut text);
+        match harness {
+            Harness::Claude => process_line(&mut s, line, &mut text),
+            Harness::Pi | Harness::Omp => crate::pi::process_line(&mut s, line, &mut text),
+            // Not found by `discover` yet.
+            Harness::Codex | Harness::Hermes => {}
+        }
         if buf.capacity() > (1 << 20) {
             buf = Vec::with_capacity(1 << 14);
         }

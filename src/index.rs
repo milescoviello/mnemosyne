@@ -901,7 +901,7 @@ pub fn refresh_with_progress(
 /// A refresh against a given index and set of transcripts.
 fn refresh_in(
     mut idx: Index,
-    found: Vec<(PathBuf, bool, Option<String>)>,
+    found: Vec<scan::Found>,
     progress: Option<&Progress>,
     everything: bool,
 ) -> Result<Vec<Session>> {
@@ -916,8 +916,8 @@ fn refresh_in(
 
     let scanned: Vec<(Session, String)> = found
         .par_iter()
-        .filter_map(|(path, is_sub, parent)| {
-            let key = path.to_string_lossy().to_string();
+        .filter_map(|f| {
+            let key = f.path.to_string_lossy().to_string();
             // Rows from an older scanner are shown, never reused: skipping a
             // file because its size and mtime match would leave yesterday's
             // logic in place forever.
@@ -929,9 +929,7 @@ fn refresh_in(
             // past its new lines without keeping their text, and they were
             // never searchable.
             let mut text = String::new();
-            let out = scan::scan_with_text(path, *is_sub, parent.clone(), prev, &mut text)
-                .ok()
-                .map(|s| (s, text));
+            let out = scan::scan_found(f, prev, &mut text).ok().map(|s| (s, text));
             if let Some(p) = &progress {
                 p.done.fetch_add(1, Ordering::Relaxed);
                 if let Some((s, _)) = &out {
@@ -976,7 +974,7 @@ fn refresh_in(
     if idx.persist(&changed, &text_rows).is_ok() {
         let paths: Vec<String> = found
             .iter()
-            .map(|(p, _, _)| p.to_string_lossy().to_string())
+            .map(|f| f.path.to_string_lossy().to_string())
             .collect();
         let _ = idx.prune(&paths);
         // Everything has been re-read with the current scanner and stored,
@@ -1869,12 +1867,24 @@ mod pipeline_tests {
 
         // untouched, and the scanner is the same: nothing to rewrite
         let idx = Index::open_at(&db).unwrap();
-        refresh_in(idx, vec![(path.clone(), false, None)], None, false).unwrap();
+        refresh_in(
+            idx,
+            vec![scan::Found::new(path.clone(), Harness::Claude)],
+            None,
+            false,
+        )
+        .unwrap();
         assert_eq!(title(&db), "from before");
 
         // unless asked to rebuild, which is what --refresh and R are for
         let idx = Index::open_at(&db).unwrap();
-        refresh_in(idx, vec![(path.clone(), false, None)], None, true).unwrap();
+        refresh_in(
+            idx,
+            vec![scan::Found::new(path.clone(), Harness::Claude)],
+            None,
+            true,
+        )
+        .unwrap();
         assert_eq!(
             title(&db),
             "zebra came first",
@@ -1895,7 +1905,13 @@ mod pipeline_tests {
             .unwrap();
         let idx = Index::open_at(&db).unwrap();
         assert!(idx.stale);
-        refresh_in(idx, vec![(path, false, None)], None, false).unwrap();
+        refresh_in(
+            idx,
+            vec![scan::Found::new(path, Harness::Claude)],
+            None,
+            false,
+        )
+        .unwrap();
         assert_eq!(title(&db), "zebra came first");
     }
 
@@ -1914,8 +1930,13 @@ mod pipeline_tests {
         drop(f);
 
         let idx = Index::open_at(&db).unwrap();
-        let got = refresh_in(idx, vec![(path, false, None)], None, false)
-            .expect("an unwritable cache stopped the refresh");
+        let got = refresh_in(
+            idx,
+            vec![scan::Found::new(path, Harness::Claude)],
+            None,
+            false,
+        )
+        .expect("an unwritable cache stopped the refresh");
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].user_msgs, 2, "the new line was read all the same");
     }

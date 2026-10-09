@@ -14,6 +14,7 @@ mod live;
 mod meta;
 mod model;
 mod paths;
+mod pi;
 mod preview;
 mod scan;
 mod search;
