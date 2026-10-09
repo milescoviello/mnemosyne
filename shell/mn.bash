@@ -113,7 +113,14 @@ __mn_term_open() {
             # way, and the window opened and closed at once
             terminator) cmd=("$term" -u --working-directory="$cwd" -x bash -lc "$inner") ;;
             tilix)     cmd=("$term" -w "$cwd" -x bash -lc "$inner") ;;
-            qterminal) cmd=("$term" --workdir "$cwd" -e bash -lc "$inner") ;;
+            # One word, a script that removes itself: QTerminal before 1.2
+            # (Ubuntu 22.04's 0.17) joins -e's words and splits them again
+            # at every space, and the window ran `export` and closed.
+            qterminal)
+                local qs; qs="$(mktemp /tmp/mn-window.XXXXXX)" || return 1
+                printf '#!/usr/bin/env bash\nrm -f -- %q\nexec bash -lc %q\n' "$qs" "$inner" >| "$qs"
+                chmod +x "$qs"
+                cmd=("$term" --workdir "$cwd" -e "$qs") ;;
             lxterminal) cmd=("$term" --working-directory="$cwd" -e bash -lc "$inner") ;;
             urxvt)     cmd=("$term" -cd "$cwd" -e bash -lc "$inner") ;;
             # the desktop's own choice, whichever terminal that is

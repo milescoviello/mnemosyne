@@ -421,8 +421,15 @@ function __mn_term_open --description 'Run a command in a new terminal window; e
                 set cmd $term -u --working-directory="$cwd" -x fish -lc "$inner"
             case tilix
                 set cmd $term -w "$cwd" -x fish -lc "$inner"
+            # One word, a script that removes itself: QTerminal before 1.2
+            # (Ubuntu 22.04's 0.17) joins -e's words and splits them again
+            # at every space, and the window ran `set` and closed.
             case qterminal
-                set cmd $term --workdir "$cwd" -e fish -lc "$inner"
+                set -l qs (mktemp /tmp/mn-window.XXXXXX); or return 1
+                printf '#!/usr/bin/env fish\nrm -f -- %s\nexec fish -lc %s\n' \
+                    (string escape -- $qs) (string escape -- "$inner") > $qs
+                chmod +x $qs
+                set cmd $term --workdir "$cwd" -e $qs
             case lxterminal
                 set cmd $term --working-directory="$cwd" -e fish -lc "$inner"
             case urxvt

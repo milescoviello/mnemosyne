@@ -427,7 +427,7 @@ EOF
         "mate-terminal|--working-directory=$tmp/work-a -x $inner -lc " \
         "terminator|-u --working-directory=$tmp/work-a -x $inner -lc " \
         "tilix|-w $tmp/work-a -x $inner -lc " \
-        "qterminal|--workdir $tmp/work-a -e $inner -lc " \
+        "qterminal|--workdir $tmp/work-a -e /tmp/mn-window." \
         "lxterminal|--working-directory=$tmp/work-a -e $inner -lc " \
         "urxvt|-cd $tmp/work-a -e $inner -lc " \
         "cosmic-term|-e $inner -lc " \
@@ -441,6 +441,35 @@ EOF
         wait_for "$t: " "$log"
         has "$shell_name: $t is told what to run its own way" "$t: $want" "$(cat "$log")"
     done
+
+    # --- QTerminal before 1.2 splits what it is to run at every space
+    # Ubuntu 22.04's 0.17 (Lubuntu) joins -e's words into one line and
+    # splits it again on whitespace: the window ran `cd`, or `export`, and
+    # closed. Its stand-in does the same, then runs what it got.
+    rm -rf "$tmp/qterm"
+    mkdir -p "$tmp/qterm" "$tmp/qhome"
+    cat > "$tmp/qterm/qterminal" <<'EOF'
+#!/bin/sh
+echo "qterminal: $*" >> "$MN_TEST_LOG"
+while [ $# -gt 0 ] && [ "$1" != -e ]; do shift; done
+shift
+set -- $*
+HOME="$MN_QHOME" exec "$@"
+EOF
+    chmod +x "$tmp/qterm/qterminal"
+    # the one the loop above left: its stand-in only logs
+    for f in /tmp/mn-window.*; do grep -q "$tmp" "$f" 2>/dev/null && rm -f "$f"; done
+    write_plan "$WINDOW_PLAN"
+    : > "$log"
+    PATH="$tmp/qterm:$PATH" MN_TERMINAL=qterminal MN_QHOME="$tmp/qhome" "$runner" -c "$source_line; mn" >/dev/null 2>&1
+    wait_for "claude: " "$log"
+    has "$shell_name: QTerminal 0.17 runs the session too" "claude: --resume 026bcdb5" "$(cat "$log")"
+    sleep 0.3
+    if ls /tmp/mn-window.* >/dev/null 2>&1 && grep -q "$tmp" /tmp/mn-window.* 2>/dev/null; then
+        bad "$shell_name: and leaves no script behind" "$(ls /tmp/mn-window.*)"
+    else
+        ok "$shell_name: and leaves no script behind"
+    fi
 
     # --- a folder that is there but cannot be entered
     # fish printed the cd error and resumed where you were anyway.
