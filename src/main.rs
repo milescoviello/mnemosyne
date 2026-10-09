@@ -86,6 +86,60 @@ a tmux attach. It restores the model and the permission mode the session
 started in; pass --ask to resume with prompts on instead.
 ";
 
+/// A session as `--json` gives it.
+fn json_row(s: &model::Session) -> serde_json::Value {
+    serde_json::json!({
+        "id": s.id,
+        "path": s.path.to_string_lossy(),
+        "cwd": s.cwd,
+        "title": s.title(),
+        "last_prompt": s.last_prompt,
+        "branch": s.git_branch,
+        "model": s.model,
+        "mtime": s.mtime,
+        "size": s.size,
+        "entries": s.entries,
+        "favorite": s.favorite,
+        "tags": s.tags,
+        "note": s.note,
+        "live_pid": s.live_pid,
+        "subagents": s.subagent_count,
+        "is_subagent": s.is_subagent,
+        // which agent's it is: claude, pi, omp, codex or hermes
+        "agent": s.harness.name(),
+        "wsx": s.wsx.as_ref().map(|w| serde_json::json!({
+            "repo": w.repo,
+            "slug": w.slug,
+            "tag": w.tag(),
+            "state": w.status.word(),
+            "worktree": match &w.status {
+                wsx::Status::Live { worktree } => Some(worktree),
+                _ => None,
+            },
+            "checkout": match &w.status {
+                wsx::Status::Archived { checkout } => checkout.as_ref(),
+                _ => None,
+            },
+        })),
+    })
+}
+
+/// A session as `--list` gives it: what the browser shows, then its file,
+/// id, folder and -- after those, where a reader of four finds them as it
+/// did -- which agent's it is.
+fn list_row(s: &model::Session) -> String {
+    format!(
+        "{:>4} {} {}\t{}\t{}\t{}\t{}",
+        model::reltime(s.mtime),
+        model::pad_fit(&s.folder(), 24),
+        s.title(),
+        tsv(&s.path.to_string_lossy()),
+        tsv(&s.id),
+        tsv(&s.cwd),
+        s.harness.name()
+    )
+}
+
 /// Does the shell function reading the plan know how to resume every
 /// agent's sessions? It says so in the environment it runs mnemosyne with.
 /// One sourced before there were others says nothing, and would run
@@ -841,55 +895,14 @@ fn main() -> Result<()> {
             let mut out = Vec::new();
             for r in &app.view {
                 if let app::Row::Item(i) | app::Row::Sub(i) = r {
-                    let s = &app.all[*i];
-                    out.push(serde_json::json!({
-                        "id": s.id,
-                        "path": s.path.to_string_lossy(),
-                        "cwd": s.cwd,
-                        "title": s.title(),
-                        "last_prompt": s.last_prompt,
-                        "branch": s.git_branch,
-                        "model": s.model,
-                        "mtime": s.mtime,
-                        "size": s.size,
-                        "entries": s.entries,
-                        "favorite": s.favorite,
-                        "tags": s.tags,
-                        "note": s.note,
-                        "live_pid": s.live_pid,
-                        "subagents": s.subagent_count,
-                        "is_subagent": s.is_subagent,
-                        "wsx": s.wsx.as_ref().map(|w| serde_json::json!({
-                            "repo": w.repo,
-                            "slug": w.slug,
-                            "tag": w.tag(),
-                            "state": w.status.word(),
-                            "worktree": match &w.status {
-                                wsx::Status::Live { worktree } => Some(worktree),
-                                _ => None,
-                            },
-                            "checkout": match &w.status {
-                                wsx::Status::Archived { checkout } => checkout.as_ref(),
-                                _ => None,
-                            },
-                        })),
-                    }));
+                    out.push(json_row(&app.all[*i]));
                 }
             }
             println!("{}", serde_json::to_string_pretty(&out)?);
         } else {
             for r in &app.view {
                 if let app::Row::Item(i) | app::Row::Sub(i) = r {
-                    let s = &app.all[*i];
-                    println!(
-                        "{:>4} {} {}\t{}\t{}\t{}",
-                        model::reltime(s.mtime),
-                        model::pad_fit(&s.folder(), 24),
-                        s.title(),
-                        tsv(&s.path.to_string_lossy()),
-                        tsv(&s.id),
-                        tsv(&s.cwd)
-                    );
+                    println!("{}", list_row(&app.all[*i]));
                 }
             }
         }
@@ -1635,6 +1648,39 @@ mod restore_tests {
         assert!(!order.contains(&"gggggggg-7"), "{order:?}");
         // an archived workspace's is not wsx's any more
         assert!(order.contains(&"hhhhhhhh-8"), "{order:?}");
+    }
+}
+
+#[cfg(test)]
+mod row_tests {
+    use super::{json_row, list_row};
+    use crate::model::{Harness, Session};
+
+    fn codex() -> Session {
+        Session {
+            harness: Harness::Codex,
+            id: "01a113f0-ee19-7b12-b5a8-d3c549683529".into(),
+            cwd: "/home/u/site".into(),
+            ai_title: "Footer on mobile".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn json_says_whose_session_it_is() {
+        assert_eq!(json_row(&codex())["agent"], "codex");
+        assert_eq!(json_row(&Session::default())["agent"], "claude");
+    }
+
+    #[test]
+    fn a_list_line_names_the_agent_after_the_fields_it_had() {
+        let line = list_row(&codex());
+        let f: Vec<&str> = line.split('\t').collect();
+        assert_eq!(f.len(), 5, "{line:?}");
+        assert!(f[0].contains("Footer on mobile"));
+        assert_eq!(f[2], "01a113f0-ee19-7b12-b5a8-d3c549683529");
+        assert_eq!(f[3], "/home/u/site");
+        assert_eq!(f[4], "codex");
     }
 }
 
