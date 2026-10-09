@@ -242,7 +242,11 @@ function __mn_wintmux --description 'Open a resumed session in its own window, r
     # Quoted: the name is whatever the chat already runs under, and tmux
     # allows spaces and `(...)` in one.
     set -l term (__mn_term_open "$argv[1]" "exec tmux attach-session -t "(string escape -- "=$name"))
-    or begin
+    set -l st $status
+    if test $st -eq 2
+        echo (__mn_opened "$ttl" "tmux $name" $state)" — no display here to show it in; ctrl+t attaches"
+        return 0
+    else if test $st -ne 0
         echo (__mn_opened "$ttl" "tmux $name" $state)" — no terminal to show it in; ctrl+t attaches"
         return 0
     end
@@ -330,8 +334,12 @@ function __mn_window --description 'Open one resumed session in its own terminal
     set -l inner "cd "(string escape -- $cwd)"; exec "(string join ' ' -- (string escape -- (__mn_claude) --resume $sid $margs $extra))
 
     set -l term (__mn_term_open "$cwd" "$inner")
-    or begin
-        echo "  ✗ no terminal emulator found (set \$MN_TERMINAL)"
+    set -l st $status
+    if test $st -eq 2
+        echo "  ✗ no display here to open a window on: $ttl"
+        return 1
+    else if test $st -ne 0
+        echo "  ✗ no terminal emulator found (set \$MN_TERMINAL): $ttl"
         return 1
     end
     echo "  ▶ $ttl  ($term)"
@@ -347,6 +355,18 @@ end
 function __mn_term_open --description 'Run a command in a new terminal window; echo the terminal used'
     set -l cwd $argv[1]
     set -l inner $argv[2]
+
+    # No display to open a window on: over SSH, or at a console. A terminal
+    # asked for a window then opened it on the desktop's screen, which the
+    # person at the SSH prompt cannot see, or not at all -- and either way
+    # the session was reported as opened in it. Status 2 says why. Your own
+    # MN_TERMINAL is tried regardless, and a Mac's terminals need no
+    # display variable.
+    set -l os
+    command -q uname; and set os (uname -s)
+    if test -z "$MN_TERMINAL$DISPLAY$WAYLAND_DISPLAY"; and test "$os" != Darwin
+        return 2
+    end
 
     # The terminals people install for themselves first, then the ones
     # desktops ship, then whatever the system calls its terminal, and xterm

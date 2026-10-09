@@ -152,6 +152,10 @@ fi
 
 export PATH="$bin:$PATH"
 export MN_TERMINAL=faketerm
+# A display, as a terminal on a desktop has: windows are only opened where
+# there is one. The checks about having none take it away themselves.
+export DISPLAY=:99
+unset WAYLAND_DISPLAY
 # Run from inside tmux, these would say so, and the wrappers read them: it
 # picks switch-client over attach-session. The result should not depend on
 # where the test happens to be run from.
@@ -303,6 +307,50 @@ run_shell() {
     PATH="$lim2" MN_TERMINAL= "$runner" -c "$source_line; mn" >/dev/null 2>&1
     wait_for "terminal: " "$log"
     has "$shell_name: a desktop's own terminal comes before xterm" "mate-terminal: " "$(cat "$log")"
+
+    # --- over SSH, or on a console: no display to open a window on
+    # A terminal asked for a window there opens it on the desktop's screen,
+    # where the person at the SSH prompt is not, or not at all. Either way
+    # the session was reported as opened in it -- "▶ … (konsole)" over SSH
+    # to Fedora KDE, and nothing ran anywhere.
+    if [ "$(uname -s)" = Darwin ]; then
+        skip "$shell_name: with no display, no window is claimed" "a Mac's terminals need no display"
+    else
+        write_plan "$WINDOW_PLAN"
+        : > "$log"
+        out=$(PATH="$lim2" MN_TERMINAL= DISPLAY= WAYLAND_DISPLAY= "$runner" -c "$source_line; mn" 2>&1)
+        sleep 0.3
+        hasnt "$shell_name: with no display, no terminal is started" "terminal: " "$(cat "$log")"
+        hasnt "$shell_name: and no window is claimed" "▶" "$out"
+        has "$shell_name: it says there is no display" "no display" "$out"
+        # with tmux, the session still starts, for ctrl+t to attach to
+        if [ -n "$real_tmux" ]; then
+            kill_tmux
+            rm -rf "$tmp/nodisp"
+            mkdir -p "$tmp/nodisp"
+            # first in the list, so no real terminal on this machine is reached
+            printf '#!/bin/sh\necho "alacritty: $*" >> "$MN_TEST_LOG"\n' > "$tmp/nodisp/alacritty"
+            chmod +x "$tmp/nodisp/alacritty"
+            write_plan "wintmux\t$tmp/work-a\t026bcdb5-8d88-4ad7-9f23-58649bf4f353\t\tdefault\tover ssh\n"
+            : > "$log"
+            out=$(PATH="$tmp/nodisp:$PATH" MN_TERMINAL= DISPLAY= WAYLAND_DISPLAY= "$runner" -c "$source_line; mn --restore" 2>&1)
+            sleep 0.3
+            hasnt "$shell_name: with no display and tmux, no terminal is started" "alacritty: " "$(cat "$log")"
+            if "$bin/tmux" has-session -t =mn-026bcdb5 2>/dev/null; then
+                ok "$shell_name: and the session runs in tmux"
+            else
+                bad "$shell_name: and the session runs in tmux" "$out"
+            fi
+            has "$shell_name: and it says where, and why there is no window" "tmux mn-026bcdb5) — no display" "$out"
+            kill_tmux
+        fi
+        # MN_TERMINAL is yours, display or not
+        write_plan "$WINDOW_PLAN"
+        : > "$log"
+        PATH="$lim2:$bin" MN_TERMINAL=faketerm DISPLAY= WAYLAND_DISPLAY= "$runner" -c "$source_line; mn" >/dev/null 2>&1
+        wait_for "term: " "$log"
+        has "$shell_name: with no display, MN_TERMINAL is still used" "term: " "$(cat "$log")"
+    fi
 
     # --- and each is told what to run the way it understands
     # Ptyxis, GNOME's terminals, MATE's, XFCE's and LXQt's were not in the

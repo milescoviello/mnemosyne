@@ -66,6 +66,16 @@ __mn_quote() {
 __mn_term_open() {
     local cwd="$1" inner="$2" term
     local -a cmd
+    # No display to open a window on: over SSH, or at a console. A terminal
+    # asked for a window then opened it on the desktop's screen, which the
+    # person at the SSH prompt cannot see, or not at all -- and either way
+    # the session was reported as opened in it. Status 2 says why. Your own
+    # MN_TERMINAL is tried regardless, and a Mac's terminals need no
+    # display variable.
+    if [ -z "${MN_TERMINAL:-}" ] && [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] \
+        && [ "$(uname -s)" != Darwin ]; then
+        return 2
+    fi
     for term in $MN_TERMINAL alacritty konsole kitty wezterm foot ghostty \
             ptyxis gnome-terminal kgx xfce4-terminal mate-terminal qterminal \
             tilix terminator lxterminal urxvt cosmic-term \
@@ -184,6 +194,12 @@ __mn_tmux_ensure() {
     fi
     printf '  ✗ could not create tmux session %s\n' "$name" >&2
     return 1
+}
+
+# Why no window opened, from __mn_term_open's status.
+__mn_no_window() {
+    if [ "$1" = 2 ]; then printf 'no display here to open a window on'
+    else printf 'no terminal emulator found (set $MN_TERMINAL)'; fi
 }
 
 # One line saying where a chat went: $1 title, $2 where, $3 `running` if it
@@ -309,6 +325,8 @@ mn() {
                     # a leading one as `\=` for its own `=cmd` expansion.
                     if term="$(__mn_term_open "$cwd" "exec tmux attach-session -t =$(printf %q "$name")")"; then
                         notes+="$(__mn_opened "$ttl" "$term → tmux $name" "$state")"$'\n'
+                    elif [ $? = 2 ]; then
+                        notes+="$(__mn_opened "$ttl" "tmux $name" "$state") — no display here to show it in; ctrl+t attaches"$'\n'
                     else
                         notes+="$(__mn_opened "$ttl" "tmux $name" "$state") — no terminal to show it in; ctrl+t attaches"$'\n'
                     fi
@@ -319,7 +337,7 @@ mn() {
                     if term="$(__mn_term_open "$cwd" "$inner")"; then
                         notes+="  ▶ $ttl  ($term)"$'\n'
                     else
-                        notes+="  ✗ no terminal emulator found (set \$MN_TERMINAL)"$'\n'
+                        notes+="  ✗ $(__mn_no_window $?): $ttl"$'\n'
                     fi
                 fi
                 ;;
@@ -329,7 +347,7 @@ mn() {
                 if term="$(__mn_term_open "$cwd" "$inner")"; then
                     notes+="  ▶ $ttl  ($term)"$'\n'
                 else
-                    notes+="  ✗ no terminal emulator found (set \$MN_TERMINAL)"$'\n'
+                    notes+="  ✗ $(__mn_no_window $?): $ttl"$'\n'
                 fi
                 ;;
             *)
