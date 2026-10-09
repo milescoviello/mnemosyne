@@ -588,7 +588,24 @@ mod tests {
         let (tar, log) = chatty_tar(d.path());
         let out = d.path().join("out");
         std::fs::create_dir(&out).unwrap();
-        unpack(&t, &out, tar.to_str().unwrap(), "mn-test-no-such-python").unwrap();
+        // A script written a moment ago can be "Text file busy" to exec: a
+        // test on another thread that forks meanwhile holds it open for
+        // writing until its child execs. Only here; a real tar is not new.
+        let busy = |e: &anyhow::Error| {
+            e.downcast_ref::<std::io::Error>()
+                .and_then(|e| e.raw_os_error())
+                == Some(libc::ETXTBSY)
+        };
+        let mut tries = 0;
+        loop {
+            match unpack(&t, &out, tar.to_str().unwrap(), "mn-test-no-such-python") {
+                Err(e) if busy(&e) && tries < 50 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                r => break r.unwrap(),
+            }
+        }
         assert_eq!(std::fs::read(out.join("mnemosyne")).unwrap(), b"the binary");
         let shared = std::fs::read_to_string(&log).unwrap_or_default();
         assert!(shared.is_empty(), "{shared}");
