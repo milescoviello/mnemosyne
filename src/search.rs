@@ -201,9 +201,10 @@ fn is_conversation_of(h: Harness, line: &[u8]) -> bool {
         Harness::Claude => claude_conversation(line),
         Harness::Pi | Harness::Omp => {
             line.starts_with(b"{\"type\":\"message\"")
-                && (has(br#""role":"user""#)
-                    || has(br#""role":"assistant""#)
-                    || has(br#""role":"bashExecution""#))
+                && matches!(
+                    crate::pi::role_of(f),
+                    Some("user" | "assistant" | "bashExecution")
+                )
         }
         Harness::Codex => {
             if has(br#""payload":{"type":"function_call""#) {

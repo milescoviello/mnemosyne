@@ -62,6 +62,16 @@ fn discover_in(root: &std::path::Path) -> Vec<PathBuf> {
     out
 }
 
+/// Whose message a line holds, read where pi writes it: the first key of
+/// its `message`. Looked for anywhere, a role inside a tool call's
+/// arguments -- an object, so not escaped -- passed for the message's own.
+pub fn role_of(line: &[u8]) -> Option<&str> {
+    const AT: &[u8] = br#""message":{"role":""#;
+    let from = memmem::find(line, AT)? + AT.len();
+    let len = memchr::memchr(b'"', &line[from..])?;
+    std::str::from_utf8(&line[from..from + len]).ok()
+}
+
 /// Take in one line of a pi-format session.
 pub fn process_line(s: &mut Session, line: &[u8], text: &mut Option<&mut String>) {
     if line.is_empty() {
@@ -76,15 +86,16 @@ pub fn process_line(s: &mut Session, line: &[u8], text: &mut Option<&mut String>
         scan::note_time(s, &ts);
     }
 
+    let role = role_of(f);
     // What a tool handed back: output, not conversation, and where the big
     // lines are. Counted and nothing more.
-    if memmem::find(f, br#""role":"toolResult""#).is_some() {
+    if role == Some("toolResult") {
         return;
     }
-    let is_user = memmem::find(f, br#""role":"user""#).is_some();
-    let is_asst = !is_user && memmem::find(f, br#""role":"assistant""#).is_some();
+    let is_user = role == Some("user");
+    let is_asst = role == Some("assistant");
     // A command run with `!` is the user's own doing, and worth finding.
-    let is_bash = memmem::find(f, br#""role":"bashExecution""#).is_some();
+    let is_bash = role == Some("bashExecution");
     if is_user || is_asst || is_bash {
         scan::harvest_capped(s, line, text);
     }
@@ -322,6 +333,22 @@ mod tests {
             t2.contains("error spans") && !t2.contains("hand-rolled"),
             "only the new part: {t2:?}"
         );
+    }
+
+    #[test]
+    fn a_role_inside_a_tools_arguments_is_not_the_messages() {
+        // An assistant writing a chat request for you: its arguments hold
+        // `"role":"user"`, unescaped, being an object and not a string.
+        let lines = [
+            PI[0],
+            PI[2],
+            r#"{"type":"message","id":"x1","parentId":"a2","timestamp":"2026-10-01T09:00:07.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c9","name":"write","arguments":{"messages":[{"role":"user","content":"NOT A PROMPT"},{"role":"toolResult"}]}}],"model":"m","usage":{"input":5,"output":1,"cacheRead":0,"cacheWrite":0}}}"#,
+        ];
+        let (_d, p) = write(&lines, "r.jsonl");
+        let (s, _) = read(Harness::Pi, &p);
+        assert_eq!((s.user_msgs, s.assistant_msgs), (1, 1));
+        assert_eq!(s.last_prompt, "replace the hand-rolled lexer");
+        assert_eq!(s.in_tokens, 5, "the reply was taken for a tool's result");
     }
 
     #[test]
