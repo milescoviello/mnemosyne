@@ -42,8 +42,18 @@ __mn_perms() {
 # you, and "claude: command not found" in a window that then closes is a
 # poor way to find that out.
 __mn_claude() {
-    local c; c="$(command -v claude 2>/dev/null)"
-    case "$c" in /*) printf '%s\n' "$c" ;; *) printf '%s\n' claude ;; esac
+    local c a=""; c="$(command -v claude 2>/dev/null)"
+    case "$c" in /*) printf '%s\n' "$c"; return 0 ;; esac
+    # Not on PATH: an alias, which a window cannot see -- Claude Code's
+    # local install puts claude in ~/.claude/local and adds
+    # `alias claude=~/.claude/local/claude` -- or that install on its own.
+    if [ -n "${ZSH_VERSION:-}" ]; then a="${aliases[claude]:-}"
+    elif [ -n "${BASH_VERSION:-}" ]; then a="${BASH_ALIASES[claude]:-}"; fi
+    case "$a" in "~/"*) a="$HOME/${a#\~/}" ;; esac
+    for c in "$a" "$HOME/.claude/local/claude"; do
+        [ -n "$c" ] && [ -f "$c" ] && [ -x "$c" ] && { printf '%s\n' "$c"; return 0; }
+    done
+    printf '%s\n' claude
 }
 
 # Words quoted for a bash command line, for a window to run. Each one is

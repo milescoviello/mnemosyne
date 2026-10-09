@@ -386,6 +386,32 @@ EOF
     wait_for "claude-nvm: " "$log"
     has "$shell_name: a new window has your PATH (claude under nvm runs)" "claude-nvm: --resume 026bcdb5" "$(cat "$log")"
 
+    # --- a claude that is not on PATH: an alias, or Claude Code's local install
+    # Claude Code's local install puts it in ~/.claude/local and adds
+    # `alias claude=~/.claude/local/claude` to your shell's config. Not on
+    # PATH, so the window was told to run a bare `claude`, and it was not
+    # found there: "exec: claude: not found".
+    local lim3="$tmp/lim3"
+    rm -rf "$lim3"
+    cp -R "$lim" "$lim3"
+    rm -f "$lim3/claude"
+    cp "$bin/faketerm" "$lim3/"
+    mkdir -p "$tmp/aliased" "$tmp/home-local/.claude/local"
+    cp "$bin/claude" "$tmp/aliased/claude"
+    cp "$bin/claude" "$tmp/home-local/.claude/local/claude"
+    if [ "$shell_name" != fish ]; then
+        write_plan "$WINDOW_PLAN"
+        : > "$log"
+        PATH="$lim3" "$runner" -c "$source_line; alias claude=$tmp/aliased/claude; mn" >/dev/null 2>&1
+        wait_for "term: " "$log"
+        has "$shell_name: a claude that is an alias is what the window runs" "exec $tmp/aliased/claude --resume" "$(cat "$log")"
+    fi
+    write_plan "$WINDOW_PLAN"
+    : > "$log"
+    HOME="$tmp/home-local" PATH="$lim3" "$runner" -c "$source_line; mn" >/dev/null 2>&1
+    wait_for "term: " "$log"
+    has "$shell_name: so is Claude Code's local install, off PATH" "exec $tmp/home-local/.claude/local/claude --resume" "$(cat "$log")"
+
     # --- and each is told what to run the way it understands
     # Ptyxis, GNOME's terminals, MATE's, XFCE's and LXQt's were not in the
     # list at all; given `-e` the way xterm is, MATE's and XFCE's read `-lc`

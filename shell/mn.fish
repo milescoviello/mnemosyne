@@ -349,7 +349,14 @@ function __mn_claude --description 'The claude this shell would run, as a path'
     # A new window's login shell and a tmux server started from somewhere
     # else need not have the same PATH as you, and "claude: command not
     # found" in a window that then closes is a poor way to find that out.
-    command -s claude; or echo claude
+    command -s claude; and return
+    # Not on PATH: Claude Code's local install, in ~/.claude/local, which an
+    # alias (a function, in fish) points at and a window cannot see.
+    if test -f ~/.claude/local/claude; and test -x ~/.claude/local/claude
+        echo ~/.claude/local/claude
+        return
+    end
+    echo claude
 end
 
 function __mn_term_open --description 'Run a command in a new terminal window; echo the terminal used'
