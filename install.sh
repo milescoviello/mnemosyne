@@ -170,7 +170,11 @@ build_from_source() {
     # nothing about what to do.
     local need found
     need="$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' "$here/Cargo.toml" | head -1)"
-    found="$(rustc -V 2>/dev/null | awk '{print $2}')"
+    # rustc's, else cargo's (the same version, and NixOS's cargo runs a
+    # rustc it does not put on PATH). Not there is not a reason to stop:
+    # under set -e a failed `rustc -V` ended the install, exit 127, unsaid.
+    found="$(rustc -V 2>/dev/null | awk '{print $2}')" || found=""
+    [ -n "$found" ] || found="$(cargo -V 2>/dev/null | awk '{print $2}')" || found=""
     if [ -n "$need" ] && [ -n "$found" ] && ! version_ge "$found" "$need"; then
         say "building it needs Rust $need or newer, and this rustc is $found:"
         say "install a current one from https://rustup.rs and re-run."

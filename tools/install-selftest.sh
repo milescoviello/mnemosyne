@@ -354,6 +354,25 @@ else bad "a Rust too old to build it is not tried" "exit $code, cargo: $(cat "$t
 has "and it says which Rust it needs" "needs Rust $(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' "$root/Cargo.toml")" "$said"
 has "and which it found" "1.75.0" "$said"
 
+# ---- building, with cargo on PATH and rustc not --------------------------
+# NixOS's cargo package runs its own rustc without putting one on PATH.
+# The check for an old Rust then ran `rustc -V` under set -e and pipefail:
+# the install ended there, exit 127, without a word.
+norust="$tmp/norust"
+mkdir -p "$norust"
+for t in $tools; do
+    p=$(command -v "$t" 2>/dev/null) && ln -sf "$p" "$norust/$t"
+done
+rm -f "$norust/rustc"
+home="$tmp/home-norust"
+mkdir -p "$home"
+: > "$tmp/cargo.log"
+said=$(env -i HOME="$home" SHELL=/bin/bash PATH="$tmp/stub:$norust" TERM=dumb \
+    bash "$root/install.sh" --build 2>&1)
+code=$?
+if grep -q '^cargo build' "$tmp/cargo.log"; then ok "with no rustc on PATH, cargo still builds it"
+else bad "with no rustc on PATH, cargo still builds it" "exit $code: $(printf '%s\n' "$said" | tail -2)"; fi
+
 # ---- piped from curl, standing in some other project ------------------
 home="$tmp/home-pipe"
 mkdir -p "$home/elsewhere"
