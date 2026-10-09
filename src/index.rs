@@ -203,7 +203,7 @@ impl Index {
     /// home, a full disk -- we fall back to an in-memory index, which is
     /// slower but entirely usable.
     pub fn open() -> Result<Index> {
-        let _ = std::fs::create_dir_all(state_dir());
+        let _ = crate::paths::private_dir(&state_dir());
         Index::open_path(&db_path())
     }
 

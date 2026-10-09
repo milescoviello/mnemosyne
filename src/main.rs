@@ -357,7 +357,7 @@ fn main() -> Result<()> {
 
     if has("--write-config") {
         let p = config::path();
-        std::fs::create_dir_all(p.parent().unwrap())?;
+        paths::private_dir(p.parent().unwrap())?;
         if p.exists() {
             println!("{} already exists — leaving it alone", p.display());
         } else {

@@ -73,7 +73,7 @@ fn touch_stamp() {
 
 fn touch_stamp_at(stamp: &Path) {
     if let Some(dir) = stamp.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        let _ = crate::paths::private_dir(dir);
     }
     let _ = std::fs::write(stamp, chrono::Utc::now().to_rfc3339());
 }

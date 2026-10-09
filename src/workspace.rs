@@ -197,7 +197,7 @@ pub fn load_at(p: &std::path::Path) -> Workspace {
 
 pub fn save_at(p: &std::path::Path, w: &Workspace) -> std::io::Result<()> {
     if let Some(dir) = p.parent() {
-        std::fs::create_dir_all(dir)?;
+        crate::paths::private_dir(dir)?;
     }
     // Same temp-then-rename as the favourites file: a crash mid-write should
     // lose the update, never the file.

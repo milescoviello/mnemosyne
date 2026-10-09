@@ -3,7 +3,7 @@
 //! here, so the two can never disagree.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Your home directory: `$HOME`, or the password database's where that is
 /// unset or empty -- a service, a container, `env -i`.
@@ -64,9 +64,49 @@ fn claude_dir_from(var: Option<OsString>, home: PathBuf) -> PathBuf {
     }
 }
 
+/// Make `dir`, and keep it to you: 0700, and an existing one tightened to
+/// that. Everything mn keeps goes in one -- the index, which holds the prose
+/// of every conversation; your notes; what was open -- and it was 0755,
+/// with the files in it 0644: readable by every account on the machine,
+/// wherever home is 0755 too (Debian 11 and older, Ubuntu 20.04 and older,
+/// many servers), although Claude Code keeps the transcripts themselves to
+/// you alone. The folder is enough: nothing in it can be reached past it.
+pub fn private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    let mode = std::fs::metadata(dir)?.permissions().mode();
+    if mode & 0o077 != 0 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode & 0o7700))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mode(p: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o7777
+    }
+
+    #[test]
+    fn what_mn_keeps_is_kept_to_you() {
+        let t = tempfile::tempdir().unwrap();
+        let fresh = t.path().join("a/mnemosyne");
+        private_dir(&fresh).unwrap();
+        assert_eq!(mode(&fresh), 0o700);
+        // one an older mn made, open to everyone, is closed
+        let old = t.path().join("old");
+        std::fs::create_dir(&old).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
+        private_dir(&old).unwrap();
+        assert_eq!(mode(&old), 0o700);
+    }
 
     #[test]
     fn home_is_the_variable_when_there_is_one() {

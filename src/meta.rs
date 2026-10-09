@@ -202,7 +202,7 @@ impl Meta {
     /// that is missing or unreadable by now has nothing to merge with, and
     /// is written from everything this run knows.
     pub fn save_at(&mut self, p: &std::path::Path) -> Result<()> {
-        std::fs::create_dir_all(p.parent().unwrap())?;
+        crate::paths::private_dir(p.parent().unwrap())?;
         let _lock = lock(p)?;
         let on_disk = std::fs::read(p)
             .ok()
