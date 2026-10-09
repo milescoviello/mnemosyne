@@ -21,11 +21,12 @@ use std::path::PathBuf;
 
 /// Where an agent keeps its sessions.
 pub fn sessions_dir(h: Harness) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let home = crate::paths::home();
     match h {
         // pi lets its whole directory be moved, and says so in --help.
         Harness::Pi => Some(
             std::env::var_os("PI_CODING_AGENT_DIR")
+                .filter(|d| !d.is_empty())
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home.join(".pi/agent"))
                 .join("sessions"),

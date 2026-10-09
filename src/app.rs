@@ -1475,7 +1475,7 @@ impl App {
                     // goes back to the one it has itself; for the rest,
                     // home beats "the folder is gone".
                     None if s.cwd.is_empty() && s.harness == crate::model::Harness::Hermes => {
-                        std::env::var("HOME").unwrap_or_default()
+                        crate::paths::home().to_string_lossy().into_owned()
                     }
                     None => s.cwd.clone(),
                 },
@@ -4102,7 +4102,7 @@ mod logic_tests {
         let Some(Outcome::Resume { targets, .. }) = &a.outcome else {
             panic!("not resumed: {}", a.status)
         };
-        assert_eq!(targets[0].cwd, std::env::var("HOME").unwrap());
+        assert_eq!(targets[0].cwd, crate::paths::home().to_string_lossy());
     }
 
     #[test]

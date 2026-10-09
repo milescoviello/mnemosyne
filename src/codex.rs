@@ -24,8 +24,9 @@ use std::path::{Path, PathBuf};
 /// Where Codex keeps its rollouts.
 pub fn sessions_dir() -> Option<PathBuf> {
     let home = std::env::var_os("CODEX_HOME")
+        .filter(|h| !h.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex")))?;
+        .unwrap_or_else(|| crate::paths::home().join(".codex"));
     Some(home.join("sessions"))
 }
 

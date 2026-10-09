@@ -25,8 +25,9 @@ const SOURCES: &[&str] = &["cli", "oneshot"];
 /// Hermes's database, wherever `HERMES_HOME` puts it.
 pub fn db_path() -> Option<PathBuf> {
     let home = std::env::var_os("HERMES_HOME")
+        .filter(|h| !h.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".hermes")))?;
+        .unwrap_or_else(|| crate::paths::home().join(".hermes"));
     Some(home.join("state.db"))
 }
 
