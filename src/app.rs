@@ -1458,7 +1458,16 @@ impl App {
                 } else {
                     s.id.clone()
                 },
-                cwd: elsewhere.unwrap_or(&s.cwd).to_string(),
+                cwd: match elsewhere {
+                    Some(c) => c.to_string(),
+                    // Hermes recorded no folder for its older sessions. It
+                    // goes back to the one it has itself; for the rest,
+                    // home beats "the folder is gone".
+                    None if s.cwd.is_empty() && s.harness == crate::model::Harness::Hermes => {
+                        std::env::var("HOME").unwrap_or_default()
+                    }
+                    None => s.cwd.clone(),
+                },
                 // The others put their own model back when they resume, and
                 // `--model` is Claude's flag.
                 model: if self.restore_model && s.harness == crate::model::Harness::Claude {
@@ -4066,6 +4075,23 @@ mod logic_tests {
         assert_eq!(targets[0].harness, Harness::Pi);
         // pi restores its own model; --model is Claude's flag
         assert!(targets[0].model.is_empty(), "{:?}", targets[0].model);
+    }
+
+    #[test]
+    fn a_hermes_session_with_no_folder_resumes_at_home() {
+        // Hermes recorded no folder for older sessions. Resumed from
+        // "nowhere", the shell said the folder was gone.
+        use crate::model::Harness;
+        let mut a = app();
+        a.harness_plans = true;
+        let i = a.current_idx().unwrap();
+        a.all[i].harness = Harness::Hermes;
+        a.all[i].cwd.clear();
+        a.do_action(Action::Resume);
+        let Some(Outcome::Resume { targets, .. }) = &a.outcome else {
+            panic!("not resumed: {}", a.status)
+        };
+        assert_eq!(targets[0].cwd, std::env::var("HOME").unwrap());
     }
 
     #[test]

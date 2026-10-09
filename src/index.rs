@@ -596,6 +596,22 @@ impl Index {
 
     /// Record that the rows now match this scanner. Called once the rescan
     /// that makes it true has finished.
+    /// A value kept beside the rows, by name.
+    fn note(&self, key: &str) -> Option<String> {
+        self.conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .ok()
+    }
+
+    fn set_note(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO meta (key,value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value=?2",
+            [key, value],
+        )?;
+        Ok(())
+    }
+
     pub fn mark_current(&self) -> Result<()> {
         self.conn.execute(
             "INSERT INTO meta (key,value) VALUES ('scanner_version', ?1)
@@ -870,7 +886,13 @@ pub fn refresh(include_subagents: bool) -> Result<Vec<Session>> {
 /// wrong, and only deleting the cache by hand put it right.
 pub fn rebuild(include_subagents: bool) -> Result<Vec<Session>> {
     let idx = Index::open()?;
-    refresh_in(idx, scan::discover(include_subagents), None, true)
+    refresh_in(
+        idx,
+        scan::discover(include_subagents),
+        crate::hermes::db_path().as_deref(),
+        None,
+        true,
+    )
 }
 
 pub fn refresh_with_progress(
@@ -893,15 +915,71 @@ pub fn refresh_with_progress(
     refresh_in(
         idx,
         scan::discover(include_subagents),
+        crate::hermes::db_path().as_deref(),
         progress.as_ref(),
         false,
     )
+}
+
+/// Where the last read of Hermes's database is noted, as `hermes::stamp`.
+const HERMES_STAMP: &str = "hermes_db";
+
+/// Whether a session's row has to be written again.
+///
+/// A file's size, time and how far it was read say everything. A Hermes
+/// session's title, folder and totals are columns that change on their own,
+/// with no new message: renamed, or titled by Hermes a while in.
+fn row_changed(p: &Session, s: &Session) -> bool {
+    p.size != s.size
+        || p.mtime != s.mtime
+        || p.scanned_len != s.scanned_len
+        || (s.harness == Harness::Hermes
+            && (p.ai_title != s.ai_title
+                || p.cwd != s.cwd
+                || p.model != s.model
+                || p.git_branch != s.git_branch
+                || p.total_tokens() != s.total_tokens()))
+}
+
+/// Hermes's sessions, and the stamp to note once they are stored -- `None`
+/// when they were not read.
+fn hermes_rows(
+    idx: &Index,
+    db: &std::path::Path,
+    cached: &HashMap<String, Session>,
+    stale: bool,
+) -> (Vec<(Session, String)>, Option<String>) {
+    let mine: HashMap<String, Session> = cached
+        .iter()
+        .filter(|(k, _)| crate::hermes::is_key_of(db, k))
+        .map(|(k, s)| (k.clone(), s.clone()))
+        .collect();
+    let kept = |mine: HashMap<String, Session>| {
+        mine.into_values()
+            .map(|mut s| {
+                s.resumed_from = Some(s.scanned_len);
+                (s, String::new())
+            })
+            .collect::<Vec<_>>()
+    };
+    // No database: no sessions, and their rows go.
+    let Some(stamp) = crate::hermes::stamp(db) else {
+        return (Vec::new(), None);
+    };
+    if !stale && idx.note(HERMES_STAMP).as_deref() == Some(stamp.as_str()) {
+        return (kept(mine), None);
+    }
+    match crate::hermes::scan(db, &mine, stale) {
+        Some(rows) => (rows, Some(stamp)),
+        None => (kept(mine), None),
+    }
 }
 
 /// A refresh against a given index and set of transcripts.
 fn refresh_in(
     mut idx: Index,
     found: Vec<scan::Found>,
+    hermes_db: Option<&std::path::Path>,
     progress: Option<&Progress>,
     everything: bool,
 ) -> Result<Vec<Session>> {
@@ -940,9 +1018,18 @@ fn refresh_in(
         })
         .collect();
 
+    // Hermes's sessions are rows in its database, not files. Read only when
+    // it could have changed since the last refresh, and left as they were
+    // when it cannot be read: a database Hermes holds locked has not lost
+    // its sessions.
+    let (hermes, hermes_stamp) = match hermes_db {
+        Some(db) => hermes_rows(&idx, db, &cached, stale),
+        None => (Vec::new(), None),
+    };
+
     let mut text_rows: Vec<(String, TextUpdate)> = Vec::new();
-    let mut sessions: Vec<Session> = Vec::with_capacity(scanned.len());
-    for (s, t) in scanned {
+    let mut sessions: Vec<Session> = Vec::with_capacity(scanned.len() + hermes.len());
+    for (s, t) in scanned.into_iter().chain(hermes) {
         if let Some(update) = text_after_scan(&s, t) {
             text_rows.push((s.path.to_string_lossy().to_string(), update));
         }
@@ -965,18 +1052,27 @@ fn refresh_in(
             stale
                 || cached
                     .get(s.path.to_string_lossy().as_ref())
-                    .is_none_or(|p| {
-                        p.size != s.size || p.mtime != s.mtime || p.scanned_len != s.scanned_len
-                    })
+                    .is_none_or(|p| row_changed(p, s))
         })
         .cloned()
         .collect();
     if idx.persist(&changed, &text_rows).is_ok() {
-        let paths: Vec<String> = found
+        let mut paths: Vec<String> = found
             .iter()
             .map(|f| f.path.to_string_lossy().to_string())
             .collect();
+        paths.extend(
+            sessions
+                .iter()
+                .filter(|s| s.harness == Harness::Hermes)
+                .map(|s| s.path.to_string_lossy().to_string()),
+        );
         let _ = idx.prune(&paths);
+        // Only once its rows are stored: noted first, a failed write would
+        // leave the next refresh sure there was nothing to read.
+        if let Some(stamp) = hermes_stamp {
+            let _ = idx.set_note(HERMES_STAMP, &stamp);
+        }
         // Everything has been re-read with the current scanner and stored,
         // so the rows may now claim its version. Not before it is stored:
         // claimed over rows the old scanner wrote, the new one never runs.
@@ -1871,6 +1967,7 @@ mod pipeline_tests {
             idx,
             vec![scan::Found::new(path.clone(), Harness::Claude)],
             None,
+            None,
             false,
         )
         .unwrap();
@@ -1881,6 +1978,7 @@ mod pipeline_tests {
         refresh_in(
             idx,
             vec![scan::Found::new(path.clone(), Harness::Claude)],
+            None,
             None,
             true,
         )
@@ -1909,10 +2007,127 @@ mod pipeline_tests {
             idx,
             vec![scan::Found::new(path, Harness::Claude)],
             None,
+            None,
             false,
         )
         .unwrap();
         assert_eq!(title(&db), "zebra came first");
+    }
+
+    #[test]
+    fn hermes_sessions_are_kept_beside_the_files() {
+        use crate::hermes::tests::{add_session, make_db, say};
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("state.db");
+        let hermes = make_db(&db, false);
+        add_session(
+            &hermes,
+            "20260817_192329_cfe3e9",
+            "cli",
+            Some("/home/u/bot"),
+        );
+        say(
+            &hermes,
+            "20260817_192329_cfe3e9",
+            "user",
+            "set up a webhook",
+            1790845201.0,
+        );
+        drop(hermes);
+        let index = d.path().join("i.db");
+        let key = crate::hermes::key(&db, "20260817_192329_cfe3e9");
+        let refresh = || {
+            refresh_in(
+                Index::open_at(&index).unwrap(),
+                vec![],
+                Some(&db),
+                None,
+                false,
+            )
+            .unwrap()
+        };
+
+        let got = refresh();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].harness, Harness::Hermes);
+        let stored = Index::open_at(&index).unwrap().load().unwrap();
+        assert_eq!(stored[&key].first_prompt, "set up a webhook");
+        let idx = Index::open_at(&index).unwrap();
+        assert_eq!(
+            idx.search_paths("webhook").unwrap(),
+            std::slice::from_ref(&key),
+            "its words are searchable"
+        );
+
+        // Untouched since, as far as its size and time say: not opened. The
+        // session is deleted underneath and the time put back, so a refresh
+        // that read the database would find it gone.
+        let when = std::fs::metadata(&db).unwrap().modified().unwrap();
+        let size = std::fs::metadata(&db).unwrap().len();
+        let hermes = Connection::open(&db).unwrap();
+        hermes.execute("DELETE FROM messages", []).unwrap();
+        hermes.execute("DELETE FROM sessions", []).unwrap();
+        drop(hermes);
+        assert_eq!(std::fs::metadata(&db).unwrap().len(), size);
+        std::fs::File::options()
+            .write(true)
+            .open(&db)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+        let got = refresh();
+        assert_eq!(got.len(), 1, "an unchanged database was read again");
+        // Changed, and unreadable: what it had stands.
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::write(d.path().join("state.db-wal"), "").unwrap();
+        let got = refresh();
+        assert_eq!(
+            got.len(),
+            1,
+            "a database it could not read lost its sessions"
+        );
+        std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::remove_file(d.path().join("state.db-wal")).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&db)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now())
+            .unwrap();
+
+        // Read again: the deleted session goes. Then one renamed, with
+        // nothing said since: the new title is stored.
+        assert!(refresh().is_empty());
+        let hermes = Connection::open(&db).unwrap();
+        add_session(
+            &hermes,
+            "20260817_192329_cfe3e9",
+            "cli",
+            Some("/home/u/bot"),
+        );
+        say(
+            &hermes,
+            "20260817_192329_cfe3e9",
+            "user",
+            "set up a webhook",
+            1790845201.0,
+        );
+        drop(hermes);
+        assert_eq!(refresh().len(), 1);
+        let hermes = Connection::open(&db).unwrap();
+        hermes
+            .execute("UPDATE sessions SET title = 'Music webhook'", [])
+            .unwrap();
+        drop(hermes);
+        refresh();
+        let stored = Index::open_at(&index).unwrap().load().unwrap();
+        assert_eq!(stored[&key].ai_title, "Music webhook");
+
+        // Gone: so are its sessions.
+        std::fs::remove_file(&db).unwrap();
+        assert!(refresh().is_empty());
+        assert!(Index::open_at(&index).unwrap().load().unwrap().is_empty());
     }
 
     #[test]
@@ -1933,6 +2148,7 @@ mod pipeline_tests {
         let got = refresh_in(
             idx,
             vec![scan::Found::new(path, Harness::Claude)],
+            None,
             None,
             false,
         )

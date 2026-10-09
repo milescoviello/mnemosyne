@@ -10,6 +10,7 @@ mod art;
 mod codex;
 mod config;
 mod filter;
+mod hermes;
 mod index;
 mod live;
 mod meta;
