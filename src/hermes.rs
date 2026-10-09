@@ -35,6 +35,12 @@ pub fn key(db: &Path, id: &str) -> String {
     format!("{}#{id}", db.display())
 }
 
+/// The database and session a row's key names.
+pub fn split_key(key: &str) -> Option<(PathBuf, String)> {
+    let (db, id) = key.rsplit_once('#')?;
+    Some((PathBuf::from(db), id.to_string()))
+}
+
 /// Whether an index row is one of Hermes's.
 pub fn is_key_of(db: &Path, key: &str) -> bool {
     key.strip_prefix(&db.display().to_string())
@@ -68,7 +74,7 @@ pub fn stamp(db: &Path) -> Option<String> {
 
 /// Open it to read and nothing else, seeing what a running Hermes has
 /// written to its log but not yet folded in.
-fn open(db: &Path) -> Option<Connection> {
+pub fn open(db: &Path) -> Option<Connection> {
     let uri = format!("file:{}?mode=ro", db.display());
     let c = Connection::open_with_flags(
         uri,

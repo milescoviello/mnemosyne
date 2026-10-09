@@ -731,13 +731,13 @@ fn draw_reopen(f: &mut Frame, app: &mut App, area: Rect, indent: usize) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// Who said a turn, and in what: your words in your own ink, Claude's in
-/// the gold of the record.
-fn speaker(role: &str) -> (&'static str, Color) {
+/// Who said a turn, and in what: your words in your own ink, the agent's --
+/// Claude, pi, omp, codex or hermes, by name -- in the gold of the record.
+fn speaker(role: &'static str) -> (&'static str, Color) {
     if role == "you" {
         ("you", th().tag)
     } else {
-        ("claude", rgb(art::ramp(0.72)))
+        (role, rgb(art::ramp(0.72)))
     }
 }
 
@@ -2566,6 +2566,28 @@ mod render_tests {
                 "{w}x{h}: scrolled past the end"
             );
         }
+    }
+
+    #[test]
+    fn the_viewer_names_the_agent_that_spoke() {
+        let mut a = app();
+        a.viewer = Some((
+            vec![
+                crate::preview::Turn {
+                    role: "you",
+                    text: "a question".into(),
+                },
+                crate::preview::Turn {
+                    role: "codex",
+                    text: "an answer".into(),
+                },
+            ],
+            false,
+        ));
+        a.input_mode = InputMode::Viewer;
+        let screen = render(&mut a, 80, 12).join("\n");
+        assert!(screen.contains("codex   an answer"), "{screen}");
+        assert!(!screen.contains("claude"), "{screen}");
     }
 
     #[test]

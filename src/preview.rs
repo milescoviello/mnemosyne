@@ -5,7 +5,7 @@
 //! eight lines. We seek to the end and read backwards instead, so preview cost
 //! is independent of session size.
 
-use crate::model::Session;
+use crate::model::{Harness, Session};
 use std::io::{Read, Seek, SeekFrom};
 
 #[derive(Clone, Debug)]
@@ -40,6 +40,7 @@ fn shown(full: &str, find: Option<&crate::search::Spotter>) -> String {
 }
 
 fn extract_turns(
+    h: Harness,
     bytes: &[u8],
     drop_first_partial: bool,
     find: Option<&crate::search::Spotter>,
@@ -56,27 +57,133 @@ fn extract_turns(
         let Some(v) = crate::scan::parse_line(line) else {
             continue;
         };
-        if v.get("isMeta").and_then(|m| m.as_bool()) == Some(true) {
-            continue;
-        }
-        let role = match v.get("type").and_then(|t| t.as_str()) {
-            Some("user") => "you",
-            Some("assistant") => "claude",
-            _ => continue,
-        };
-        let Some(c) = v.get("message").and_then(|m| m.get("content")) else {
+        let Some((role, said)) = (match h {
+            Harness::Claude => claude_turn(&v),
+            Harness::Pi | Harness::Omp => pi_turn(h, &v),
+            Harness::Codex => codex_turn(&v),
+            Harness::Hermes => None,
+        }) else {
             continue;
         };
-        let text = shown(&flatten(c, role == "you"), find);
-        // Only what you sent is checked for being machinery: Claude's reply
-        // is never an injected envelope, and one that happens to open with
-        // `<` is still what it said.
+        let text = shown(&said, find);
+        // Only what you sent is checked for being machinery: the agent's
+        // reply is never an injected envelope, and one that happens to open
+        // with `<` is still what it said.
         if text.is_empty() || (role == "you" && !crate::scan::is_real_user_text(&text)) {
             continue;
         }
         turns.push(Turn { role, text });
     }
     turns
+}
+
+fn claude_turn(v: &serde_json::Value) -> Option<(&'static str, String)> {
+    if v.get("isMeta").and_then(|m| m.as_bool()) == Some(true) {
+        return None;
+    }
+    let role = match v.get("type").and_then(|t| t.as_str()) {
+        Some("user") => "you",
+        Some("assistant") => "claude",
+        _ => return None,
+    };
+    let c = v.get("message").and_then(|m| m.get("content"))?;
+    Some((role, flatten(c, role == "you")))
+}
+
+/// pi's and omp's: a `message` entry, whose tools' results are left out
+/// as Claude's are. A command run with `!` is yours.
+fn pi_turn(h: Harness, v: &serde_json::Value) -> Option<(&'static str, String)> {
+    if v.get("type").and_then(|t| t.as_str()) != Some("message") {
+        return None;
+    }
+    let m = v.get("message")?;
+    match m.get("role").and_then(|r| r.as_str())? {
+        "user" => Some(("you", flatten(m.get("content")?, true))),
+        "assistant" => Some((h.name(), flatten(m.get("content")?, false))),
+        "bashExecution" => Some(("you", format!("!{}", m.get("command")?.as_str()?))),
+        _ => None,
+    }
+}
+
+/// Codex's: what went to and from the model, without the context it sends
+/// along, and each command it ran named as Claude's tools are.
+fn codex_turn(v: &serde_json::Value) -> Option<(&'static str, String)> {
+    if v.get("type").and_then(|t| t.as_str()) != Some("response_item") {
+        return None;
+    }
+    let p = v.get("payload")?;
+    let blocks = |kind: &str| -> Vec<String> {
+        p.get("content")
+            .and_then(|c| c.as_array())
+            .into_iter()
+            .flatten()
+            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some(kind))
+            .filter_map(|b| b.get("text").and_then(|t| t.as_str()).map(str::to_string))
+            .collect()
+    };
+    match p.get("type").and_then(|t| t.as_str())? {
+        "message" => match p.get("role").and_then(|r| r.as_str())? {
+            "user" => {
+                let said: Vec<String> = blocks("input_text")
+                    .into_iter()
+                    .filter(|t| !crate::codex::sent_along(t))
+                    .collect();
+                Some(("you", said.join(" ")))
+            }
+            "assistant" => Some(("codex", blocks("output_text").join(" "))),
+            _ => None,
+        },
+        "function_call" | "custom_tool_call" => {
+            let name = p.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
+            Some(("codex", format!("[{name}]")))
+        }
+        _ => None,
+    }
+}
+
+/// A Hermes session's last `want` turns, from its database, and whether
+/// there were more.
+fn hermes_turns(s: &Session, want: usize) -> (Vec<Turn>, bool) {
+    let Some((db, id)) = crate::hermes::split_key(&s.path.to_string_lossy()) else {
+        return (Vec::new(), false);
+    };
+    let Some(c) = crate::hermes::open(&db) else {
+        return (Vec::new(), false);
+    };
+    // Newest first, enough to fill `want` once the tools' rows are passed
+    // over -- and one more, to know whether there was more.
+    let limit = (want.saturating_mul(4) + 1) as i64;
+    let Ok(mut st) = c.prepare(
+        "SELECT role, content FROM messages WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2",
+    ) else {
+        return (Vec::new(), false);
+    };
+    let Ok(rows) = st.query_map(rusqlite::params![id, limit], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+    }) else {
+        return (Vec::new(), false);
+    };
+    let rows: Vec<(String, Option<String>)> = rows.flatten().collect();
+    let mut more = rows.len() as i64 >= limit;
+    let mut turns: Vec<Turn> = rows
+        .into_iter()
+        .rev()
+        .filter_map(|(role, content)| {
+            let role = match role.as_str() {
+                "user" => "you",
+                "assistant" => "hermes",
+                _ => return None,
+            };
+            let text = crate::scan::squash(content.as_deref()?, 700);
+            (!text.is_empty() && (role != "you" || crate::scan::is_real_user_text(&text)))
+                .then_some(Turn { role, text })
+        })
+        .collect();
+    if turns.len() > want {
+        turns.drain(..turns.len() - want);
+        more = true;
+    }
+    (turns, more)
 }
 
 /// A message's content as one line of text.
@@ -99,7 +206,8 @@ fn flatten(c: &serde_json::Value, user: bool) -> String {
                             }
                         }
                     }
-                    Some("tool_use") => {
+                    // Claude's, and pi's
+                    Some("tool_use") | Some("toolCall") => {
                         let name = b.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
                         parts.push(format!("[{name}]"));
                     }
@@ -136,6 +244,13 @@ pub fn load_turns(
     want: usize,
     find: Option<&crate::search::Spotter>,
 ) -> (Vec<Turn>, bool) {
+    if s.harness == Harness::Hermes {
+        let (mut turns, more) = hermes_turns(s, want);
+        for t in &mut turns {
+            t.text = shown(&t.text, find);
+        }
+        return (turns, more);
+    }
     let Ok(mut f) = std::fs::File::open(&s.path) else {
         return (Vec::new(), false);
     };
@@ -156,7 +271,7 @@ pub fn load_turns(
     {
         return (Vec::new(), partial);
     }
-    let mut turns = extract_turns(&buf, partial, find);
+    let mut turns = extract_turns(s.harness, &buf, partial, find);
     let clipped = turns.len() > want;
     if clipped {
         let n = turns.len();
@@ -167,6 +282,9 @@ pub fn load_turns(
 
 /// The last `want` readable turns of a session.
 pub fn tail_turns(s: &Session, want: usize) -> Vec<Turn> {
+    if s.harness == Harness::Hermes {
+        return hermes_turns(s, want).0;
+    }
     let Ok(mut f) = std::fs::File::open(&s.path) else {
         return Vec::new();
     };
@@ -187,7 +305,7 @@ pub fn tail_turns(s: &Session, want: usize) -> Vec<Turn> {
     {
         return Vec::new();
     }
-    let mut turns = extract_turns(&buf, partial, None);
+    let mut turns = extract_turns(s.harness, &buf, partial, None);
     // A single enormous final message can swallow the whole window; if we found
     // nothing at all, fall back to a bigger bite before giving up.
     if turns.is_empty() && start > 0 {
@@ -197,7 +315,7 @@ pub fn tail_turns(s: &Session, want: usize) -> Vec<Turn> {
             if (&mut f).take(bigger + 4096).read_to_end(&mut buf).is_ok() {
                 // Partial only if it starts part way in: from the top of
                 // the file, the first line is a whole one.
-                turns = extract_turns(&buf, len > bigger, None);
+                turns = extract_turns(s.harness, &buf, len > bigger, None);
             }
         }
     }
@@ -349,6 +467,102 @@ mod tests {
         let t = tail_turns(&s, 8);
         assert_eq!(t.len(), 1, "{t:?}");
         assert_eq!(t[0].text, "the only real turn");
+    }
+
+    fn of(h: crate::model::Harness, lines: &[&str]) -> (tempfile::TempDir, Session) {
+        let (d, mut s) = write_transcript(&lines.iter().map(|l| l.to_string()).collect::<Vec<_>>());
+        s.harness = h;
+        (d, s)
+    }
+
+    #[test]
+    fn a_pi_session_is_shown_as_pi_said_it() {
+        use crate::model::Harness;
+        let lines = [
+            r#"{"type":"session","version":3,"id":"0f6c1d2e-1111-4222-8333-944455556666","timestamp":"2026-10-01T09:00:00.000Z","cwd":"/w"}"#,
+            r#"{"type":"message","id":"a2","parentId":null,"timestamp":"2026-10-01T09:00:05.000Z","message":{"role":"user","content":"replace the lexer"}}"#,
+            r#"{"type":"message","id":"a3","parentId":"a2","timestamp":"2026-10-01T09:00:09.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"Looking at the grammar."},{"type":"toolCall","id":"c1","name":"bash","arguments":{"command":"ls"}}]}}"#,
+            r#"{"type":"message","id":"a4","parentId":"a3","timestamp":"2026-10-01T09:00:10.000Z","message":{"role":"toolResult","toolCallId":"c1","toolName":"bash","content":[{"type":"text","text":"TOOLOUTPUT"}],"isError":false}}"#,
+            r#"{"type":"message","id":"a5","parentId":"a4","timestamp":"2026-10-01T09:01:00.000Z","message":{"role":"bashExecution","command":"cargo test","output":"ok","exitCode":0}}"#,
+        ];
+        for h in [Harness::Pi, Harness::Omp] {
+            let (_d, s) = of(h, &lines);
+            let t = tail_turns(&s, 8);
+            let got: Vec<(&str, &str)> = t.iter().map(|t| (t.role, t.text.as_str())).collect();
+            assert_eq!(
+                got,
+                [
+                    ("you", "replace the lexer"),
+                    (h.name(), "Looking at the grammar. [bash]"),
+                    ("you", "!cargo test"),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn a_codex_thread_is_shown_without_what_codex_sent_along() {
+        use crate::model::Harness;
+        let (_d, s) = of(
+            Harness::Codex,
+            &[
+                r#"{"timestamp":"2026-10-06T18:18:40Z","type":"session_meta","payload":{"id":"x","cwd":"/w"}}"#,
+                r#"{"timestamp":"2026-10-06T18:18:41Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>INJECTED</environment_context>"}]}}"#,
+                r#"{"timestamp":"2026-10-06T18:18:42Z","type":"event_msg","payload":{"type":"user_message","message":"why does the footer overlap"}}"#,
+                r#"{"timestamp":"2026-10-06T18:18:42Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"why does the footer overlap"}]}}"#,
+                r#"{"timestamp":"2026-10-06T18:18:50Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"rg footer\"}","call_id":"c"}}"#,
+                r#"{"timestamp":"2026-10-06T18:18:51Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c","output":"TOOLOUTPUT"}}"#,
+                r#"{"timestamp":"2026-10-06T18:19:00Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"It is fixed; make it static."}]}}"#,
+            ],
+        );
+        let t = tail_turns(&s, 8);
+        let got: Vec<(&str, &str)> = t.iter().map(|t| (t.role, t.text.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                ("you", "why does the footer overlap"),
+                ("codex", "[exec_command]"),
+                ("codex", "It is fixed; make it static."),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_hermes_session_is_read_from_its_database() {
+        use crate::hermes::tests::{add_session, make_db, say};
+        use crate::model::Harness;
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("state.db");
+        let c = make_db(&db, false);
+        add_session(&c, "h1", "cli", Some("/w"));
+        add_session(&c, "other", "cli", Some("/w"));
+        say(&c, "other", "user", "NOT THIS ONE", 1.0);
+        say(&c, "h1", "user", "set up a webhook", 2.0);
+        say(&c, "h1", "assistant", "Registering it.", 3.0);
+        say(&c, "h1", "tool", "TOOLOUTPUT", 4.0);
+        say(&c, "h1", "assistant", "Done.", 5.0);
+        let s = Session {
+            harness: Harness::Hermes,
+            id: "h1".into(),
+            path: crate::hermes::key(&db, "h1").into(),
+            ..Default::default()
+        };
+        let got: Vec<(&str, String)> = tail_turns(&s, 8)
+            .into_iter()
+            .map(|t| (t.role, t.text))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("you", "set up a webhook".to_string()),
+                ("hermes", "Registering it.".to_string()),
+                ("hermes", "Done.".to_string()),
+            ]
+        );
+        let (two, more) = load_turns(&s, 8 << 20, 2, None);
+        assert_eq!(two.len(), 2);
+        assert!(more, "the viewer is told it is not the whole of it");
+        assert_eq!(two[1].text, "Done.");
     }
 
     #[test]

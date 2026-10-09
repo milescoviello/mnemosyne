@@ -72,7 +72,7 @@ const OUTPUTS: &[&[u8]] = &[
 
 /// Context Codex sends with a prompt rather than anything you typed: the
 /// project's AGENTS.md and `<environment_context>` and the like.
-fn sent_along(t: &str) -> bool {
+pub fn sent_along(t: &str) -> bool {
     let t = t.trim_start();
     !scan::is_real_user_text(t) || t.starts_with("# AGENTS.md instructions")
 }
