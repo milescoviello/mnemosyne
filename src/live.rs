@@ -107,6 +107,54 @@ fn started_by_wsx(pid: i32) -> bool {
         .is_some_and(|comm| comm.trim() == "wsx")
 }
 
+/// Is this command line a claude you talk to? `claude` itself, with or
+/// without a prompt or `--resume` -- not one of its commands (`mcp serve`
+/// for an IDE, `doctor`, the background host's `daemon`), and not `-p` or
+/// `--print`, which answers once and exits. Those run in some folder too:
+/// each was matched to that folder's newest session, marked it running,
+/// and had it put back after a reboot.
+pub fn is_claude_session(args: &[String]) -> bool {
+    const NOT_CHATS: &[&str] = &[
+        "agents",
+        "auth",
+        "auto-mode",
+        "config",
+        "daemon",
+        "doctor",
+        "gateway",
+        "import",
+        "install",
+        "kill",
+        "logs",
+        "mcp",
+        "migrate-installer",
+        "plugin",
+        "plugins",
+        "purge",
+        "respawn",
+        "rm",
+        "setup-token",
+        "stop",
+        "ultrareview",
+        "update",
+        "upgrade",
+    ];
+    let Some(exe) = args.first() else {
+        return false;
+    };
+    if exe.rsplit('/').next() != Some("claude") {
+        return false;
+    }
+    if args.get(1).is_some_and(|a| NOT_CHATS.contains(&a.as_str())) {
+        return false;
+    }
+    !args
+        .iter()
+        .skip(1)
+        .take_while(|a| *a != "--")
+        .any(|a| a == "-p" || a == "--print" || a.starts_with("--print="))
+}
+
 pub fn scan_procs() -> Vec<Proc> {
     let mut out = Vec::new();
     if !detection_supported() {
@@ -139,8 +187,7 @@ pub fn scan_procs() -> Vec<Proc> {
         if args.is_empty() {
             continue;
         }
-        let exe = args[0].rsplit('/').next().unwrap_or("");
-        if exe != "claude" {
+        if !is_claude_session(&args) {
             continue;
         }
 
@@ -425,6 +472,33 @@ mod tests {
         );
         assert_eq!(resume_id_in("\"exec claude\""), None);
         assert_eq!(resume_id_in(""), None);
+    }
+
+    #[test]
+    fn only_a_claude_you_talk_to_is_a_session() {
+        let a = |s: &str| s.split(' ').map(String::from).collect::<Vec<_>>();
+        for chat in [
+            "claude",
+            "/home/x/.local/bin/claude --resume 026bcdb5-8d88-4ad7-9f23-58649bf4f353",
+            "claude --model opus fix the parser",
+            "claude attach 3f2a",
+        ] {
+            assert!(is_claude_session(&a(chat)), "{chat}");
+        }
+        // An MCP server for an IDE, a script's one-shot answer, the
+        // background host: each looked like a chat in its folder, was
+        // marked running, and was put back after a reboot.
+        for not in [
+            "claude mcp serve",
+            "claude -p summarise the diff",
+            "claude --model haiku --print hello",
+            "claude daemon run",
+            "claude doctor",
+            "claude update",
+            "node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js",
+        ] {
+            assert!(!is_claude_session(&a(not)), "{not}");
+        }
     }
 
     #[test]
