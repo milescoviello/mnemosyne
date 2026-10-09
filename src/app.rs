@@ -568,20 +568,23 @@ impl App {
             }
         }
         // cwd-only guesses: attribute to the newest session in that folder
-        let mut best: HashMap<String, usize> = HashMap::new();
+        // of the agent that is running there -- a pi in a folder says
+        // nothing about the Claude session beside it.
+        let mut best: HashMap<(crate::model::Harness, String), usize> = HashMap::new();
         for (i, s) in self.all.iter().enumerate() {
             if s.is_subagent || s.cwd.is_empty() || s.live_exact {
                 continue;
             }
-            match best.get(&s.cwd) {
+            let k = (s.harness, s.cwd.clone());
+            match best.get(&k) {
                 Some(&j) if self.all[j].mtime >= s.mtime => {}
                 _ => {
-                    best.insert(s.cwd.clone(), i);
+                    best.insert(k, i);
                 }
             }
         }
-        for (cwd, p) in &self.live.by_cwd {
-            if let Some(&i) = best.get(cwd) {
+        for (k, p) in &self.live.by_cwd {
+            if let Some(&i) = best.get(k) {
                 if self.all[i].live_pid.is_none() {
                     self.all[i].live_pid = Some(p.pid);
                     self.all[i].live_exact = false;
@@ -5398,7 +5401,7 @@ mod logic_tests {
         for p in procs {
             match p.resume_id.clone() {
                 Some(id) => by_id.insert(id, p),
-                None => by_cwd.insert(p.cwd.clone(), p),
+                None => by_cwd.insert((p.harness, p.cwd.clone()), p),
             };
         }
         a.live = LiveMap {
@@ -5414,11 +5417,34 @@ mod logic_tests {
     fn claude(pid: i32, resume: Option<&str>, cwd: &str, by_wsx: bool) -> crate::live::Proc {
         crate::live::Proc {
             pid,
+            harness: crate::model::Harness::Claude,
             cwd: cwd.into(),
             resume_id: resume.map(str::to_string),
             model: None,
             under_wsx: by_wsx,
         }
+    }
+
+    #[test]
+    fn a_running_agent_is_guessed_only_among_its_own_sessions() {
+        // pi says nothing of which session it is. Running in a folder that
+        // has a newer Claude session too, it is the pi session that runs.
+        use crate::model::Harness;
+        let mut a = app();
+        let newest = a.all.iter().position(|s| s.id == "bbbbbbbb-2").unwrap();
+        let older = a.all.iter().position(|s| s.id == "cccccccc-3").unwrap();
+        assert_eq!(a.all[newest].cwd, a.all[older].cwd);
+        a.all[older].harness = Harness::Pi;
+        let mut pi = claude(77, None, "/home/u/proj", false);
+        pi.harness = Harness::Pi;
+        running(&mut a, vec![pi]);
+        let s = |id: &str| a.all.iter().find(|s| s.id == id).unwrap();
+        assert_eq!(s("cccccccc-3").live_pid, Some(77));
+        assert_eq!(
+            s("bbbbbbbb-2").live_pid,
+            None,
+            "a Claude session was taken for pi's"
+        );
     }
 
     /// What would be resumed: handed to the shell now, or on the way out.

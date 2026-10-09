@@ -3078,6 +3078,7 @@ mod render_tests {
             "gggggggg-7".to_string(),
             crate::live::Proc {
                 pid: 14939,
+                harness: crate::model::Harness::Claude,
                 cwd: tree,
                 resume_id: Some("gggggggg-7".into()),
                 model: None,

@@ -13,11 +13,14 @@
 //! session doesn't silently drop it back to the default model, and notes which
 //! processes wsx started, since those are wsx's to bring back rather than ours.
 
+use crate::model::Harness;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 pub struct Proc {
     pub pid: i32,
+    /// Which agent it is, so a guess by folder picks among its own sessions.
+    pub harness: Harness,
     pub cwd: String,
     pub resume_id: Option<String>,
     pub model: Option<String>,
@@ -84,6 +87,105 @@ pub fn parse_claude_args(args: &[String]) -> (Option<String>, Option<String>) {
     (id, model)
 }
 
+/// Which agent a command line runs, and where its own words start.
+///
+/// Most are their own program. omp is a script bun runs, hermes one python
+/// runs, and pi one node runs -- though pi renames itself `pi` and leaves no
+/// arguments behind. Codex's `codex` is a node script that starts the real
+/// one, which is the one counted.
+pub fn agent_of(args: &[String]) -> Option<(Harness, usize)> {
+    let base = |i: usize| args.get(i).map(|a| a.rsplit('/').next().unwrap_or(a));
+    let first = base(0)?;
+    if let Some(h) = Harness::from_name(first) {
+        return Some((h, 0));
+    }
+    if !(first == "bun" || first == "node" || first.starts_with("python")) {
+        return None;
+    }
+    match base(1).and_then(Harness::from_name) {
+        Some(Harness::Codex) | None => None,
+        Some(h) => Some((h, 1)),
+    }
+}
+
+/// The session an agent's command line names, and for Claude the model.
+pub fn resume_of(h: Harness, args: &[String]) -> (Option<String>, Option<String>) {
+    match h {
+        Harness::Claude => parse_claude_args(args),
+        // A fork is a session of its own, not the one it came from.
+        Harness::Pi
+            if args
+                .iter()
+                .any(|a| a == "--fork" || a.starts_with("--fork=")) =>
+        {
+            (None, None)
+        }
+        Harness::Pi => (
+            flag_value(args, &["--session", "--session-id"]).and_then(|v| session_named(&v)),
+            None,
+        ),
+        Harness::Omp => (
+            flag_value(args, &["--resume", "-r", "--session-id"]).and_then(|v| session_named(&v)),
+            None,
+        ),
+        // `codex resume <id>`, with flags anywhere around it.
+        Harness::Codex => (
+            args.iter()
+                .position(|a| a == "resume")
+                .and_then(|i| args[i + 1..].iter().find(|a| looks_like_uuid(a)))
+                .cloned(),
+            None,
+        ),
+        // Hermes's ids are its own: `20260910_004421_837570`.
+        Harness::Hermes => (flag_value(args, &["--resume", "-r"]), None),
+    }
+}
+
+/// The value of the first of `names` given, as `--flag value` or
+/// `--flag=value`. A flag followed by another flag has none.
+fn flag_value(args: &[String], names: &[&str]) -> Option<String> {
+    for (i, a) in args.iter().enumerate() {
+        for n in names {
+            if a == n {
+                return args.get(i + 1).filter(|v| !v.starts_with('-')).cloned();
+            }
+            if let Some(v) = a.strip_prefix(n).and_then(|r| r.strip_prefix('=')) {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// A session named by its whole id, or by its file -- pi and omp take
+/// either, and call the file `<time>_<id>.jsonl`. A prefix is left alone:
+/// it is a guess at which session, not a name.
+fn session_named(v: &str) -> Option<String> {
+    let v = match v.strip_suffix(".jsonl") {
+        Some(stem) => stem.rsplit(['/', '_']).next().unwrap_or(stem),
+        None => v,
+    };
+    looks_like_uuid(v).then(|| v.to_string())
+}
+
+/// The thread a Codex rollout file is for: `rollout-<time>-<id>.jsonl`.
+pub fn rollout_id(path: &str) -> Option<String> {
+    let name = path.rsplit('/').next()?;
+    let stem = name.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
+    let id = stem.get(stem.len().checked_sub(36)?..)?;
+    looks_like_uuid(id).then(|| id.to_string())
+}
+
+/// The rollout a running codex has open: which thread it is, when its
+/// command line does not say.
+fn open_rollout(pid: i32) -> Option<String> {
+    std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .ok()?
+        .flatten()
+        .filter_map(|e| std::fs::read_link(e.path()).ok())
+        .find_map(|p| rollout_id(&p.to_string_lossy()))
+}
+
 /// The parent pid out of `/proc/<pid>/stat`.
 ///
 /// The command name comes second, in parentheses, and may itself contain
@@ -100,11 +202,19 @@ fn ppid_from_stat(stat: &str) -> Option<i32> {
 /// well, and a `claude` run by hand from there is not an agent wsx will put
 /// back. wsx runs each agent directly under its own process.
 fn started_by_wsx(pid: i32) -> bool {
+    parent_of(pid).is_some_and(|ppid| comm_of(ppid) == "wsx")
+}
+
+fn parent_of(pid: i32) -> Option<i32> {
     std::fs::read_to_string(format!("/proc/{pid}/stat"))
         .ok()
         .and_then(|s| ppid_from_stat(&s))
-        .and_then(|ppid| std::fs::read_to_string(format!("/proc/{ppid}/comm")).ok())
-        .is_some_and(|comm| comm.trim() == "wsx")
+}
+
+fn comm_of(pid: i32) -> String {
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .map(|c| c.trim().to_string())
+        .unwrap_or_default()
 }
 
 /// Is this command line a claude you talk to? `claude` itself, with or
@@ -187,22 +297,34 @@ pub fn scan_procs() -> Vec<Proc> {
         if args.is_empty() {
             continue;
         }
-        if !is_claude_session(&args) {
+        let Some((harness, at)) = agent_of(&args) else {
+            continue;
+        };
+        // `claude -p`, `claude mcp serve` and the rest are not chats.
+        if harness == Harness::Claude && !is_claude_session(&args[at..]) {
             continue;
         }
 
-        let (resume_id, model) = parse_claude_args(&args);
+        let (mut resume_id, model) = resume_of(harness, &args[at..]);
+        if resume_id.is_none() && harness == Harness::Codex {
+            resume_id = open_rollout(pid);
+        }
 
         let cwd = std::fs::read_link(format!("{base}/cwd"))
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_default();
 
+        // wsx starts Codex's node script, and that starts this.
+        let under_wsx = started_by_wsx(pid)
+            || (harness == Harness::Codex && parent_of(pid).is_some_and(started_by_wsx));
+
         out.push(Proc {
             pid,
+            harness,
             cwd,
             resume_id,
             model,
-            under_wsx: started_by_wsx(pid),
+            under_wsx,
         });
     }
     out
@@ -210,7 +332,8 @@ pub fn scan_procs() -> Vec<Proc> {
 
 pub struct LiveMap {
     pub by_id: HashMap<String, Proc>,
-    pub by_cwd: HashMap<String, Proc>,
+    /// The ones that do not say which session they are, by agent and folder.
+    pub by_cwd: HashMap<(Harness, String), Proc>,
     pub count: usize,
     /// False when the platform cannot tell us, as opposed to there being
     /// nothing to tell.
@@ -255,7 +378,7 @@ pub fn live_map() -> LiveMap {
             }
             None => {
                 if !p.cwd.is_empty() {
-                    by_cwd.insert(p.cwd.clone(), p);
+                    by_cwd.insert((p.harness, p.cwd.clone()), p);
                 }
             }
         }
@@ -343,14 +466,18 @@ pub fn by_session_id<'a>(panes: impl IntoIterator<Item = &'a Pane>) -> HashMap<S
     out
 }
 
-/// Pull the session id out of a command line that mentions `--resume`.
+/// Pull the session id out of a command line that names one, in whichever
+/// agent's way it runs.
 pub fn resume_id_in(cmd: &str) -> Option<String> {
     let words: Vec<String> = cmd
         .split([' ', '"', '\''])
         .filter(|w| !w.is_empty())
         .map(|w| w.to_string())
         .collect();
-    parse_claude_args(&words).0
+    match (0..words.len()).find_map(|i| agent_of(&words[i..]).map(|(h, at)| (h, i + at))) {
+        Some((h, at)) => resume_of(h, &words[at..]).0,
+        None => parse_claude_args(&words).0,
+    }
 }
 
 /// tmux treats `:` and `.` as target syntax, so a name carrying either
@@ -392,7 +519,7 @@ mod tests {
                     by_id.insert(id.clone(), p);
                 }
                 None => {
-                    by_cwd.insert(p.cwd.clone(), p);
+                    by_cwd.insert((p.harness, p.cwd.clone()), p);
                 }
             }
         }
@@ -407,6 +534,7 @@ mod tests {
     fn proc(pid: i32, id: &str) -> Proc {
         Proc {
             pid,
+            harness: Harness::Claude,
             cwd: format!("/home/u/{id}"),
             resume_id: Some(id.to_string()),
             model: None,
@@ -472,6 +600,139 @@ mod tests {
         );
         assert_eq!(resume_id_in("\"exec claude\""), None);
         assert_eq!(resume_id_in(""), None);
+    }
+
+    fn words(s: &str) -> Vec<String> {
+        s.split(' ').map(str::to_string).collect()
+    }
+
+    const PI_ID: &str = "01a10e6c-aaaa-7000-bbbb-0f1c045e7bd0";
+    const CODEX_ID: &str = "01a113f0-ee19-7b12-b5a8-d3c549683529";
+    const HERMES_ID: &str = "20260910_004421_837570";
+
+    #[test]
+    fn each_agent_is_known_by_how_it_runs() {
+        // As /proc showed them. pi renames itself and leaves no arguments.
+        assert_eq!(agent_of(&words("pi")), Some((Harness::Pi, 0)));
+        assert_eq!(
+            agent_of(&words("bun /home/u/.bun/bin/omp --resume=/p/x.jsonl")),
+            Some((Harness::Omp, 1))
+        );
+        let native = format!("/n/vendor/x86_64-unknown-linux-musl/bin/codex resume {CODEX_ID}");
+        assert_eq!(agent_of(&words(&native)), Some((Harness::Codex, 0)));
+        assert_eq!(
+            agent_of(&words(&format!(
+                "node /home/u/.local/npm-global/bin/codex resume {CODEX_ID}"
+            ))),
+            None,
+            "Codex's wrapper is counted through the codex it starts"
+        );
+        assert_eq!(
+            agent_of(&words(&format!(
+                "/h/venv/bin/python3 /h/venv/bin/hermes --resume {HERMES_ID}"
+            ))),
+            Some((Harness::Hermes, 1))
+        );
+        assert_eq!(
+            agent_of(&words("claude --resume x")),
+            Some((Harness::Claude, 0))
+        );
+        assert_eq!(agent_of(&words("/usr/bin/python3 -m http.server")), None);
+        assert_eq!(agent_of(&words("vim pi")), None);
+    }
+
+    #[test]
+    fn each_agent_says_which_session_its_own_way() {
+        let id = |h: Harness, cmd: &str| resume_of(h, &words(cmd)).0;
+        assert_eq!(
+            id(Harness::Pi, &format!("pi --session {PI_ID}")).as_deref(),
+            Some(PI_ID)
+        );
+        assert_eq!(
+            id(
+                Harness::Pi,
+                &format!("pi --session /h/.pi/agent/sessions/--w--/2026-10-01T09-00-00-000Z_{PI_ID}.jsonl")
+            )
+            .as_deref(),
+            Some(PI_ID),
+            "a session file names its session"
+        );
+        assert_eq!(
+            id(Harness::Pi, "pi --session 01a10e6c"),
+            None,
+            "a prefix is not certain"
+        );
+        assert_eq!(
+            id(Harness::Pi, &format!("pi --fork {PI_ID}")),
+            None,
+            "a fork is new"
+        );
+        assert_eq!(
+            id(Harness::Omp, &format!("omp --resume={PI_ID}")).as_deref(),
+            Some(PI_ID)
+        );
+        assert_eq!(
+            id(Harness::Omp, &format!("omp -r {PI_ID} --allow-home")).as_deref(),
+            Some(PI_ID)
+        );
+        assert_eq!(id(Harness::Omp, "omp --resume"), None, "the picker");
+        assert_eq!(
+            id(Harness::Codex, &format!("codex resume {CODEX_ID}")).as_deref(),
+            Some(CODEX_ID)
+        );
+        assert_eq!(
+            id(
+                Harness::Codex,
+                &format!("codex -c a=b resume --all {CODEX_ID}")
+            )
+            .as_deref(),
+            Some(CODEX_ID)
+        );
+        assert_eq!(id(Harness::Codex, "codex resume --last"), None);
+        assert_eq!(id(Harness::Codex, &format!("codex fork {CODEX_ID}")), None);
+        assert_eq!(
+            id(Harness::Hermes, &format!("hermes --resume {HERMES_ID}")).as_deref(),
+            Some(HERMES_ID)
+        );
+        assert_eq!(
+            id(Harness::Hermes, &format!("hermes -r {HERMES_ID} --yolo")).as_deref(),
+            Some(HERMES_ID)
+        );
+        assert_eq!(id(Harness::Hermes, "hermes --continue"), None);
+    }
+
+    #[test]
+    fn a_rollout_codex_holds_open_names_its_thread() {
+        assert_eq!(
+            rollout_id(&format!(
+                "/h/.codex/sessions/2026/10/06/rollout-2026-10-06T18-18-39-{CODEX_ID}.jsonl"
+            ))
+            .as_deref(),
+            Some(CODEX_ID)
+        );
+        assert_eq!(rollout_id("/h/.codex/log/codex-tui.log"), None);
+        assert_eq!(rollout_id("/h/.codex/state_5.sqlite"), None);
+    }
+
+    #[test]
+    fn any_agent_is_recognised_in_a_tmux_pane() {
+        for (cmd, want) in [
+            (format!("/home/u/.local/bin/pi --session {PI_ID}"), PI_ID),
+            (
+                format!("/home/u/.local/npm-global/bin/codex resume {CODEX_ID}"),
+                CODEX_ID,
+            ),
+            (
+                format!("/home/u/.local/bin/hermes --resume {HERMES_ID}"),
+                HERMES_ID,
+            ),
+            (
+                format!("/home/u/.bun/bin/omp --resume {PI_ID} --allow-home"),
+                PI_ID,
+            ),
+        ] {
+            assert_eq!(resume_id_in(&cmd).as_deref(), Some(want), "{cmd}");
+        }
     }
 
     #[test]
