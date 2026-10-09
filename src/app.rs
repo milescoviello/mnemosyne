@@ -502,11 +502,13 @@ impl App {
         let wsx_panes: HashSet<i32> = panes.iter().filter(owned).map(|p| p.pid).collect();
         let tmux = crate::live::by_session_id(panes.iter().filter(|p| !owned(p)));
         // One stat per distinct directory, not per session: 234 of the
-        // sessions here share a single cwd.
+        // sessions here share a single cwd. None on a network mount, where
+        // one out of reach held the first frame (paths::Mounts).
+        let mounts = crate::paths::Mounts::read();
         let mut dir_exists: HashMap<String, bool> = HashMap::new();
         for s in &self.all {
             if !s.cwd.is_empty() && !dir_exists.contains_key(&s.cwd) {
-                dir_exists.insert(s.cwd.clone(), std::path::Path::new(&s.cwd).is_dir());
+                dir_exists.insert(s.cwd.clone(), mounts.dir_there(&s.cwd));
             }
         }
         let mut subcount: HashMap<String, u32> = HashMap::new();

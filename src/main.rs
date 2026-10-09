@@ -647,6 +647,7 @@ fn main() -> Result<()> {
         let mut out = std::io::stdout().lock();
         let mut opened = 0;
         let mut put_back: Vec<workspace::Entry> = Vec::new();
+        let mounts = paths::Mounts::read();
         for s in most_recent_first(&app) {
             if opened >= n {
                 break;
@@ -655,7 +656,9 @@ fn main() -> Result<()> {
             if s.live_exact || s.has_tmux {
                 continue;
             }
-            if s.cwd.is_empty() || !std::path::Path::new(&s.cwd).is_dir() {
+            // not asked of a network mount (paths::Mounts): one out of
+            // reach held --restore for as long as the mount did
+            if s.cwd.is_empty() || !mounts.dir_there(&s.cwd) {
                 continue;
             }
             // Same landing as the post-reboot offer: a window each, with

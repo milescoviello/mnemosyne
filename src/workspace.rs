@@ -290,10 +290,13 @@ pub fn pending(
     if prev.boot == boot || (prev.dismissed && !include_dismissed) {
         return Vec::new();
     }
+    // Not asked of a network mount (paths::Mounts): one still coming up
+    // after the boot, or out of reach, held the offer for as long as it took.
+    let mounts = crate::paths::Mounts::read();
     prev.sessions
         .iter()
         .filter(|e| !e.id.is_empty() && !running(&e.id))
-        .filter(|e| !e.cwd.is_empty() && std::path::Path::new(&e.cwd).is_dir())
+        .filter(|e| !e.cwd.is_empty() && mounts.dir_there(&e.cwd))
         .cloned()
         .collect()
 }

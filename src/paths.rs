@@ -84,9 +84,145 @@ pub fn private_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The filesystems mounted here, to tell a folder on a network mount from
+/// one on a local disk without asking the folder itself.
+pub struct Mounts(Vec<(String, String)>);
+
+impl Mounts {
+    /// This process's mounts, from /proc/self/mountinfo; none where there is
+    /// no /proc (macOS), and every folder is then asked about as before.
+    pub fn read() -> Mounts {
+        Mounts::parse(&std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default())
+    }
+
+    fn parse(info: &str) -> Mounts {
+        // `id parent dev root MOUNTPOINT options... - FSTYPE source super`,
+        // the mount point with \040 for a space and the like
+        let unescape = |s: &str| {
+            let mut out = String::new();
+            let mut rest = s;
+            while let Some(i) = rest.find('\\') {
+                out.push_str(&rest[..i]);
+                let code = rest
+                    .get(i + 1..i + 4)
+                    .and_then(|o| u8::from_str_radix(o, 8).ok());
+                match code {
+                    Some(c) => {
+                        out.push(c as char);
+                        rest = &rest[i + 4..];
+                    }
+                    None => {
+                        out.push('\\');
+                        rest = &rest[i + 1..];
+                    }
+                }
+            }
+            out.push_str(rest);
+            out
+        };
+        let mut all: Vec<(String, String)> = info
+            .lines()
+            .filter_map(|l| {
+                let f: Vec<&str> = l.split(' ').collect();
+                let dash = f.iter().position(|x| *x == "-")?;
+                Some((unescape(f.get(4)?), f.get(dash + 1)?.to_string()))
+            })
+            .collect();
+        // the deepest mount point first: it is the one a path is on
+        all.sort_by_key(|(mp, _)| std::cmp::Reverse(mp.len()));
+        Mounts(all)
+    }
+
+    /// Is `path` on a network filesystem, or one served by a program (FUSE)?
+    pub fn remote(&self, path: &str) -> bool {
+        let Some((_, fs)) = self.0.iter().find(|(mp, _)| {
+            path == mp
+                || mp == "/"
+                || path
+                    .strip_prefix(mp.as_str())
+                    .is_some_and(|r| r.starts_with('/'))
+        }) else {
+            return false;
+        };
+        let fs = fs.as_str();
+        matches!(
+            fs,
+            "nfs"
+                | "nfs4"
+                | "cifs"
+                | "smb3"
+                | "smbfs"
+                | "ncpfs"
+                | "afs"
+                | "ceph"
+                | "glusterfs"
+                | "lustre"
+                | "9p"
+                | "autofs"
+                | "davfs"
+                | "fuse"
+        ) || (fs.starts_with("fuse.") && fs != "fuse.portal")
+    }
+
+    /// Is the folder there? Asked only of a local filesystem. On a network
+    /// mount out of reach -- NFS or sshfs away from home, an autofs share --
+    /// asking holds whoever asks, in a wait not even SIGKILL ends for FUSE:
+    /// the browser drew nothing, and could not be quit, for as long as the
+    /// mount took. A folder there is taken to be there; it is the rare one
+    /// that goes, and "gone" is a claim.
+    pub fn dir_there(&self, dir: &str) -> bool {
+        self.remote(dir) || Path::new(dir).is_dir()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const INFO: &str = "\
+22 1 0:21 / / rw,relatime shared:1 - btrfs /dev/nvme0n1p2 rw
+23 22 0:30 / /home rw,relatime shared:2 - btrfs /dev/nvme0n1p2 rw
+40 22 0:44 / /mnt/nas rw,relatime shared:9 - nfs4 nas:/export rw
+41 23 0:45 / /home/u/remote\\040box rw,nosuid shared:10 - fuse.sshfs box:/srv rw
+42 22 0:46 / /net rw,relatime shared:11 - autofs systemd-1 rw
+43 22 0:47 / /run/user/1000/doc rw,nosuid shared:12 - fuse.portal portal rw
+44 22 0:48 / /media/usb rw,nosuid shared:13 - fuseblk /dev/sdb1 rw
+";
+
+    #[test]
+    fn a_folder_on_a_network_mount_is_told_from_a_local_one() {
+        let m = Mounts::parse(INFO);
+        assert!(!m.remote("/home/u/proj"));
+        assert!(m.remote("/mnt/nas/proj"));
+        assert!(m.remote("/mnt/nas"));
+        assert!(
+            !m.remote("/mnt/nasty"),
+            "a prefix of the name is not the mount"
+        );
+        assert!(m.remote("/home/u/remote box/src"), "\\040 is a space");
+        assert!(m.remote("/net/fileserver/share"));
+        // local, though served through FUSE: the document portal, ntfs-3g
+        assert!(!m.remote("/run/user/1000/doc/x"));
+        assert!(!m.remote("/media/usb/stuff"));
+    }
+
+    #[test]
+    fn a_folder_on_a_network_mount_is_never_asked_about() {
+        // asked, one out of reach held mn for as long as the mount did
+        let m = Mounts::parse(INFO);
+        assert!(m.dir_there("/mnt/nas/no/such/folder"));
+        let t = tempfile::tempdir().unwrap();
+        let local = Mounts::parse("");
+        assert!(local.dir_there(&t.path().to_string_lossy()));
+        assert!(!local.dir_there(&t.path().join("gone").to_string_lossy()));
+    }
+
+    #[test]
+    fn this_machines_mounts_can_be_read() {
+        if cfg!(target_os = "linux") {
+            assert!(!Mounts::read().0.is_empty());
+        }
+    }
 
     fn mode(p: &Path) -> u32 {
         use std::os::unix::fs::PermissionsExt;
