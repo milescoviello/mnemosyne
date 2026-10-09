@@ -371,7 +371,7 @@ fn unpack(tarball: &Path, into: &Path, tar: &str, python: &str) -> Result<()> {
 /// Update the installed shell functions, but only where one already exists —
 /// an update should not start installing things you did not have.
 fn refresh_shell_files(from: &Path) {
-    refresh_shell_files_in(from, Path::new(&std::env::var("HOME").unwrap_or_default()));
+    refresh_shell_files_in(from, &crate::paths::home());
 }
 
 fn refresh_shell_files_in(from: &Path, home: &Path) {

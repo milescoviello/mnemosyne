@@ -13,9 +13,10 @@ use rusqlite::{params, Connection};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Beside Claude Code's own: under `$CLAUDE_CONFIG_DIR` where that is set,
+/// so each of several accounts has an index of its own sessions.
 pub fn state_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(home).join(".claude/mnemosyne")
+    crate::paths::claude_dir().join("mnemosyne")
 }
 
 pub fn db_path() -> PathBuf {

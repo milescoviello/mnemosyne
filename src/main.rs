@@ -13,6 +13,7 @@ mod index;
 mod live;
 mod meta;
 mod model;
+mod paths;
 mod preview;
 mod scan;
 mod search;

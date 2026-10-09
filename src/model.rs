@@ -425,7 +425,7 @@ pub fn pad_fit(s: &str, w: usize) -> String {
 
 /// `/home/miles/OS-DEV` -> `~/OS-DEV`
 pub fn short_cwd(cwd: &str) -> String {
-    short_cwd_in(cwd, &std::env::var("HOME").unwrap_or_default())
+    short_cwd_in(cwd, &crate::paths::home().to_string_lossy())
 }
 
 /// The same, with the home directory handed in. Its test used to set

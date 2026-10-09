@@ -65,7 +65,7 @@ pub struct Workspace {
 
 /// Where this machine's wsx keeps its worktrees.
 pub fn worktrees_root() -> Option<String> {
-    let home = std::env::var("HOME").unwrap_or_default();
+    let home = crate::paths::home().to_string_lossy().into_owned();
     let xdg = std::env::var("XDG_STATE_HOME").ok();
     root_for(&home, xdg.as_deref(), cfg!(target_os = "macos"))
 }

@@ -854,6 +854,10 @@ and are never required.
 | `~/.claude/mnemosyne/workspace.json` | which sessions were open, for reopening after a reboot |
 | `~/.claude/mnemosyne/wsx.json` | what wsx last said, to draw the first frame with while it is asked again |
 
+Where `CLAUDE_CONFIG_DIR` is set, as Claude Code reads it to keep everything
+elsewhere (one folder per account, say), `~/.claude` above is that folder:
+the sessions in it, and an index of their own beside them.
+
 Notes and tags out of `meta.json` are cleaned of control characters before
 anything is drawn. That file is edited by hand and synced between machines,
 and everything in it reaches a terminal — an escape sequence in a note is a

@@ -22,8 +22,7 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 pub fn projects_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
-    PathBuf::from(home).join(".claude/projects")
+    crate::paths::claude_dir().join("projects")
 }
 
 /// Every transcript on disk: `(path, is_subagent, parent_session_id)`.
