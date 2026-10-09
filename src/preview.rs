@@ -150,11 +150,16 @@ fn hermes_turns(s: &Session, want: usize) -> (Vec<Turn>, bool) {
     let Some(c) = crate::hermes::open(&db) else {
         return (Vec::new(), false);
     };
-    // Newest first, enough to fill `want` once the tools' rows are passed
-    // over -- and one more, to know whether there was more.
-    let limit = (want.saturating_mul(4) + 1) as i64;
+    // Newest first, only what was said -- the tools' rows can be many and
+    // long, and are not shown, and a reply that only called a tool is empty
+    // -- each cut to what a turn shows, and one more
+    // than asked for, to know whether there was more.
+    let limit = (want + 1) as i64;
     let Ok(mut st) = c.prepare(
-        "SELECT role, content FROM messages WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2",
+        "SELECT role, substr(content, 1, 8192) FROM messages
+         WHERE session_id = ?1 AND role IN ('user', 'assistant')
+           AND trim(coalesce(content, '')) != ''
+         ORDER BY id DESC LIMIT ?2",
     ) else {
         return (Vec::new(), false);
     };
@@ -563,6 +568,31 @@ mod tests {
         assert_eq!(two.len(), 2);
         assert!(more, "the viewer is told it is not the whole of it");
         assert_eq!(two[1].text, "Done.");
+    }
+
+    #[test]
+    fn a_hermes_session_ending_in_tool_output_still_shows_what_was_said() {
+        // Its last rows are a tool's, many of them and long. Counted against
+        // the turns asked for, they crowded the conversation out.
+        use crate::hermes::tests::{add_session, make_db, say};
+        use crate::model::Harness;
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("state.db");
+        let c = make_db(&db, false);
+        add_session(&c, "h1", "cli", Some("/w"));
+        say(&c, "h1", "user", "run the backups", 1.0);
+        say(&c, "h1", "assistant", "Running them.", 2.0);
+        for i in 0..40 {
+            say(&c, "h1", "tool", &"x".repeat(100_000), 3.0 + i as f64);
+        }
+        let s = Session {
+            harness: Harness::Hermes,
+            id: "h1".into(),
+            path: crate::hermes::key(&db, "h1").into(),
+            ..Default::default()
+        };
+        let got: Vec<String> = tail_turns(&s, 2).into_iter().map(|t| t.text).collect();
+        assert_eq!(got, ["run the backups", "Running them."]);
     }
 
     #[test]

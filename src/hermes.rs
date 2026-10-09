@@ -76,7 +76,7 @@ pub fn stamp(db: &Path) -> Option<String> {
 /// Open it to read and nothing else, seeing what a running Hermes has
 /// written to its log but not yet folded in.
 pub fn open(db: &Path) -> Option<Connection> {
-    let uri = format!("file:{}?mode=ro", db.display());
+    let uri = format!("file:{}?mode=ro", uri_path(db));
     let c = Connection::open_with_flags(
         uri,
         OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -87,6 +87,19 @@ pub fn open(db: &Path) -> Option<Connection> {
     // Hermes may be writing; a moment's wait beats a missing refresh.
     let _ = c.busy_timeout(std::time::Duration::from_millis(500));
     Some(c)
+}
+
+/// A path as a `file:` URI writes it: `?` would start the options, `#` end
+/// the path, and `%` begin an escape.
+fn uri_path(p: &Path) -> String {
+    let mut out = String::new();
+    for c in p.to_string_lossy().chars() {
+        match c {
+            '?' | '#' | '%' => out.push_str(&format!("%{:02X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Every terminal session in the database, each read on from where `cached`
@@ -496,6 +509,21 @@ pub mod tests {
         let got = scan(&db, &HashMap::new(), false).unwrap();
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].0.id, "a");
+    }
+
+    #[test]
+    fn a_home_with_odd_characters_in_its_name_is_read() {
+        // The database is opened by URI, where `?` starts the options, `#`
+        // ends the path and `%` escapes.
+        let d = tempfile::tempdir().unwrap();
+        let home = d.path().join("odd ?#% home");
+        std::fs::create_dir_all(&home).unwrap();
+        let db = home.join("state.db");
+        let c = make_db(&db, false);
+        add_session(&c, "a", "cli", Some("/w"));
+        drop(c);
+        let got = scan(&db, &HashMap::new(), false).expect("not read");
+        assert_eq!(got.len(), 1);
     }
 
     #[test]
