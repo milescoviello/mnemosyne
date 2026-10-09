@@ -56,6 +56,38 @@ __mn_claude() {
     printf '%s\n' claude
 }
 
+# Any agent this shell would run, as a path, for the same reason. Claude's
+# is found as above.
+__mn_bin() {
+    [ "$1" = claude ] && { __mn_claude; return; }
+    local c; c="$(command -v "$1" 2>/dev/null)"
+    case "$c" in /*) printf '%s\n' "$c" ;; *) printf '%s\n' "$1" ;; esac
+}
+
+# The command that resumes a session, a word to a line: $1 the agent (empty
+# for claude), $2 its id, $3 model, $4 permission mode, $5 --ask, $6 folder,
+# then what was typed after mn. The model and the permission mode are
+# Claude's: every other agent puts its own back when it resumes. What was
+# typed after mn is claude's too, and is added by the caller.
+__mn_cmd() {
+    local h="$1" sid="$2" mdl="$3" prm="$4" nb="$5" cwd="$6"; shift 6
+    case "$h" in
+        ""|claude)
+            __mn_bin claude; printf '%s\n' --resume "$sid"
+            [ -n "$mdl" ] && printf '%s\n' --model "$mdl"
+            __mn_perms "$prm" "$nb" "$@" ;;
+        pi) __mn_bin pi; printf '%s\n' --session "$sid" ;;
+        # Started in your home, omp moves itself to a temp folder.
+        omp) __mn_bin omp; printf '%s\n' --resume "$sid"
+             [ "$cwd" = "$HOME" ] && printf '%s\n' --allow-home ;;
+        codex) __mn_bin codex; printf '%s\n' resume "$sid" ;;
+        hermes) __mn_bin hermes; printf '%s\n' --resume "$sid" ;;
+        # One a newer mnemosyne knows and this does not. Never claude's.
+        *) return 1 ;;
+    esac
+    return 0
+}
+
 # Words quoted for a bash command line, for a window to run. Each one is
 # escaped on its own: pasted in bare, `--add-dir "/my projects"` arrived as
 # two arguments, and a `$(...)` inside one was run.
@@ -173,8 +205,11 @@ __mn_spawn() {
 # or `running`, and nothing else: saying what happened is the caller's job,
 # once, in the notes it prints after the browser has closed. Printing here as
 # well said everything twice. Errors go to stderr.
+#
+# $1 folder, $2 session id, $3 title, $4 the name asked for, then `--` and the
+# command that resumes it.
 __mn_tmux_ensure() {
-    local cwd="$1" sid="$2" mdl="$3" ttl="$4" want="$5"; shift 5
+    local cwd="$1" sid="$2" ttl="$3" want="$4"; shift 4
     [ "$1" = "--" ] && shift
     command -v tmux >/dev/null 2>&1 || { echo "  ✗ tmux is not installed" >&2; return 1; }
 
@@ -184,13 +219,14 @@ __mn_tmux_ensure() {
     # Already there, whatever it ended up called: attach rather than starting
     # a second client on the same transcript. tmux remembers the command each
     # pane was started with, so the chat is found by its session id and not by
-    # a name that is now yours to choose -- told to claude any of the ways
+    # a name that is now yours to choose -- told to its agent any of the ways
     # mnemosyne reads one: `--resume ID` alone missed `-r ID`, `--resume=ID`
     # and `--session-id ID`, and a second claude went on the same transcript.
-    # A fork is a chat of its own.
+    # pi takes `--session ID` and codex `resume ID`. A fork is a chat of its
+    # own.
     local have
     have="$(tmux list-panes -a -F '#{session_name}	#{pane_start_command}' 2>/dev/null \
-            | grep -E -- "[[:space:]\"'](--resume|-r|--session-id)[\"']?[ =][\"']?$sid" \
+            | grep -E -- "[[:space:]\"'](--resume|-r|--session-id|--session|resume)[\"']?[ =][\"']?$sid" \
             | grep -vF -- '--fork-session' | head -1 | cut -f1)"
     if [ -n "$have" ]; then
         printf '%s\nrunning\n' "$have"
@@ -208,14 +244,12 @@ __mn_tmux_ensure() {
     fi
     [ -d "$cwd" ] || { printf '  ✗ folder gone, skipping: %s\n' "$cwd" >&2; return 1; }
 
-    local margs=(); [ -n "$mdl" ] && margs=(--model "$mdl")
     local wname; wname="$(printf '%s' "$ttl" | tr -c 'a-zA-Z0-9._-' '-')"; wname="${wname:0:18}"
     [ -z "$wname" ] && wname="$name"
     # Separate words, which tmux runs as they are. Given one string it hands
     # that to your default shell to parse -- whichever shell that is -- and
     # an argument with a space in it came out as two.
-    if tmux new-session -d -s "$name" -n "$wname" -c "$cwd" \
-           "$(__mn_claude)" --resume "$sid" "${margs[@]}" "$@" 2>/dev/null; then
+    if tmux new-session -d -s "$name" -n "$wname" -c "$cwd" "$@" 2>/dev/null; then
         printf '%s\nnew\n' "$name"
         return 0
     fi
@@ -245,7 +279,7 @@ __mn_tmux_attach() {
     if [ -n "${TMUX:-}" ]; then tmux switch-client -t "=$1"; else tmux attach-session -t "=$1"; fi
 }
 
-# Split one plan line into its six fields.
+# Split one plan line into its fields.
 #
 # `read` cannot be given tab as the separator directly: bash treats tab as IFS
 # whitespace, so a run of them collapses into one and an empty field -- a
@@ -311,7 +345,7 @@ mn() {
     # Progress is collected, not printed: the browser is still on screen
     # while these run, and writing over it is what made it look like mn had
     # half-exited. It all comes out once the screen is ours again.
-    local finally="" tmux_first="" notes="" line mode cwd sid mdl prm ttl tmx term inner name state res flag
+    local finally="" tmux_first="" notes="" line mode cwd sid mdl prm ttl tmx hns term inner name state res flag w
     # Errors from __mn_tmux_ensure, kept apart from the name it prints and
     # shown with everything else once the browser has closed.
     local errf; errf="$(mktemp)" || return 1
@@ -327,16 +361,24 @@ mn() {
     # which is still running and reading the terminal.
     while IFS= read -r line <&3; do
         [ -z "$line" ] && continue
-        __mn_split "$line" mode cwd sid mdl prm ttl tmx
-        local extra=(); while IFS= read -r flag; do extra+=("$flag"); done < <(__mn_perms "$prm" "$no_bypass" "${fwd[@]}")
-        local margs=(); [ -n "$mdl" ] && margs=(--model "$mdl")
+        __mn_split "$line" mode cwd sid mdl prm ttl tmx hns
+        # The whole command, built once: claude's flags are claude's, and
+        # what was typed after mn goes to claude alone.
+        local cmd=(); while IFS= read -r w; do cmd+=("$w"); done < <(__mn_cmd "$hns" "$sid" "$mdl" "$prm" "$no_bypass" "$cwd" "${fwd[@]}")
+        case "$hns" in ""|claude) cmd+=("${fwd[@]}") ;; esac
+        # An agent this wrapper does not know how to resume: from a newer
+        # mnemosyne, say. Show it; do not guess.
+        if ! __mn_cmd "$hns" "" "" "" 1 "" >/dev/null; then
+            notes+="  ✗ cannot resume $hns sessions with this mn — update it: $ttl"$'\n'
+            continue
+        fi
 
         { case "$mode" in
             here)
                 finally="$line"
                 ;;
             tmux)
-                res="$(__mn_tmux_ensure "$cwd" "$sid" "$mdl" "$ttl" "$tmx" -- "${extra[@]}" "${fwd[@]}" 2>>"$errf")" || continue
+                res="$(__mn_tmux_ensure "$cwd" "$sid" "$ttl" "$tmx" -- "${cmd[@]}" 2>>"$errf")" || continue
                 { IFS= read -r name; IFS= read -r state; } <<< "$res"
                 [ -z "$tmux_first" ] && tmux_first="$name"
                 notes+="$(__mn_opened "$ttl" "tmux $name" "$state")"$'\n'
@@ -344,7 +386,7 @@ mn() {
             wintmux)
                 [ -d "$cwd" ] || { notes+="  ✗ folder gone, skipping: $cwd"$'\n'; continue; }
                 if command -v tmux >/dev/null 2>&1; then
-                    res="$(__mn_tmux_ensure "$cwd" "$sid" "$mdl" "$ttl" "$tmx" -- "${extra[@]}" "${fwd[@]}" 2>>"$errf")" || continue
+                    res="$(__mn_tmux_ensure "$cwd" "$sid" "$ttl" "$tmx" -- "${cmd[@]}" 2>>"$errf")" || continue
                     { IFS= read -r name; IFS= read -r state; } <<< "$res"
                     # Quoted: the name is whatever the chat already runs
                     # under, and tmux allows spaces and `$(...)` in one. The
@@ -358,7 +400,7 @@ mn() {
                         notes+="$(__mn_opened "$ttl" "tmux $name" "$state") — no terminal to show it in; ctrl+t attaches"$'\n'
                     fi
                 else
-                    inner="cd $(printf %q "$cwd"); exec $(__mn_quote "$(__mn_claude)" --resume "$sid" "${margs[@]}" "${extra[@]}" "${fwd[@]}")"
+                    inner="cd $(printf %q "$cwd"); exec $(__mn_quote "${cmd[@]}")"
                     # Said, as fish says it: without it the session was not
                     # opened and nothing was said at all.
                     if term="$(__mn_term_open "$cwd" "$inner")"; then
@@ -370,7 +412,7 @@ mn() {
                 ;;
             window)
                 [ -d "$cwd" ] || { notes+="  ✗ folder gone, skipping: $cwd"$'\n'; continue; }
-                inner="cd $(printf %q "$cwd"); exec $(__mn_quote "$(__mn_claude)" --resume "$sid" "${margs[@]}" "${extra[@]}" "${fwd[@]}")"
+                inner="cd $(printf %q "$cwd"); exec $(__mn_quote "${cmd[@]}")"
                 if term="$(__mn_term_open "$cwd" "$inner")"; then
                     notes+="  ▶ $ttl  ($term)"$'\n'
                 else
@@ -383,9 +425,11 @@ mn() {
                 notes+="$line"$'\n'
                 ;;
         esac; } </dev/null
+    # MNEMOSYNE_PLAN says this function resumes every agent, not only
+    # claude: one sourced before there were others is never handed one.
     # `>|`: the file is there already (mktemp made it), and under your
     # noclobber a plain `>` was refused and the status lost
-    done 3< <(mnemosyne "${mine[@]}"; echo "$?" >| "$stf")
+    done 3< <(MNEMOSYNE_PLAN=2 mnemosyne "${mine[@]}"; echo "$?" >| "$stf")
 
     local st; st="$(cat "$stf")"; rm -f "$stf"
     notes="$(cat "$errf")"$'\n'"$notes"; rm -f "$errf"
@@ -395,11 +439,11 @@ mn() {
 
     # Landing in this terminal: the cd has to happen here, which is the whole
     # reason this is a function.
-    __mn_split "$finally" mode cwd sid mdl prm ttl tmx
-    local extra=(); while IFS= read -r flag; do extra+=("$flag"); done < <(__mn_perms "$prm" "$no_bypass" "${fwd[@]}")
-    local margs=(); [ -n "$mdl" ] && margs=(--model "$mdl")
+    __mn_split "$finally" mode cwd sid mdl prm ttl tmx hns
+    local cmd=(); while IFS= read -r w; do cmd+=("$w"); done < <(__mn_cmd "$hns" "$sid" "$mdl" "$prm" "$no_bypass" "$cwd" "${fwd[@]}")
+    case "$hns" in ""|claude) cmd+=("${fwd[@]}") ;; esac
     if [ -d "$cwd" ]; then cd "$cwd" || return 1
     else printf 'folder is gone: %s — resuming from %s\n' "$cwd" "$PWD"; fi
     printf '▶ %s\n' "$ttl"
-    claude --resume "$sid" "${margs[@]}" "${extra[@]}" "${fwd[@]}"
+    "${cmd[@]}"
 }

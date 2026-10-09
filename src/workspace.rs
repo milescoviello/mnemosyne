@@ -17,6 +17,7 @@
 //! the first run after a reboot — when nothing is running yet — from
 //! overwriting the very list it is meant to offer you.
 
+use crate::model::Harness;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::PathBuf;
@@ -32,6 +33,28 @@ pub struct Entry {
     pub perms: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub title: String,
+    /// Which agent's it is, by name; empty for Claude's, as every entry
+    /// was before there were others.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub harness: String,
+}
+
+impl Entry {
+    /// Which agent resumes it, or `None` for one this build does not know.
+    pub fn harness(&self) -> Option<Harness> {
+        if self.harness.is_empty() {
+            Some(Harness::Claude)
+        } else {
+            Harness::from_name(&self.harness)
+        }
+    }
+
+    pub fn harness_name(h: Harness) -> String {
+        match h {
+            Harness::Claude => String::new(),
+            h => h.name().to_string(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -333,6 +356,29 @@ pub fn clear_previous_at(p: &std::path::Path) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn an_entry_says_whose_session_it_is() {
+        let pi = Entry {
+            id: "p".into(),
+            cwd: "/w".into(),
+            harness: "pi".into(),
+            ..Default::default()
+        };
+        let text = serde_json::to_string(&pi).unwrap();
+        assert!(text.contains(r#""harness":"pi""#), "{text}");
+        let back: Entry = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, pi);
+        // Claude's, as written before there was anything else
+        let claude = Entry {
+            id: "c".into(),
+            cwd: "/w".into(),
+            ..Default::default()
+        };
+        assert!(!serde_json::to_string(&claude).unwrap().contains("harness"));
+        let old: Entry = serde_json::from_str(r#"{"id":"c","cwd":"/w"}"#).unwrap();
+        assert!(old.harness.is_empty());
+    }
+
     fn e(id: &str) -> Entry {
         Entry {
             id: id.into(),
@@ -571,6 +617,7 @@ mod tests {
                 model: "claude-opus-5".into(),
                 perms: "bypassPermissions".into(),
                 title: "a title".into(),
+                ..Default::default()
             }],
             "A",
             true,

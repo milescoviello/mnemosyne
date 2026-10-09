@@ -62,6 +62,8 @@ cat > "$bin/mnemosyne" <<EOF
 #!/bin/sh
 # what it was asked, one bracket per argument so a split value shows
 { printf 'mnemosyne:'; printf ' [%s]' "\$@"; echo; } >> "\$MN_TEST_LOG.mn"
+# which plans the function reading this says it can carry out
+echo "plan-version: \${MNEMOSYNE_PLAN:-}" >> "\$MN_TEST_LOG.mn"
 cat "$plan_file"
 # Stay "open" a moment after handing the plan over, the way the browser
 # does, then say when it closed: whatever the wrapper prints before this
@@ -89,6 +91,19 @@ echo "claude-pwd: $(pwd)" >> "$MN_TEST_LOG"
 [ -n "$TMUX" ] && sleep 20
 exit 0
 EOF
+
+# The other agents mnemosyne resumes, each answering to its own name.
+for agent in pi omp codex hermes; do
+    cat > "$bin/$agent" <<'EOF'
+#!/bin/sh
+n=$(basename "$0")
+echo "$n: $*" >> "$MN_TEST_LOG"
+{ printf '%s-args:' "$n"; printf ' [%s]' "$@"; echo; } >> "$MN_TEST_LOG"
+echo "$n-pwd: $(pwd)" >> "$MN_TEST_LOG"
+[ -n "$TMUX" ] && sleep 20
+exit 0
+EOF
+done
 
 cat > "$bin/faketerm" <<'EOF'
 #!/bin/sh
@@ -872,6 +887,80 @@ EOF
         hasnt "$shell_name: with nothing unset complained of" "unbound" "$out"
         hasnt "$shell_name: (as zsh says it)" "parameter not set" "$out"
     fi
+
+    # --- the other agents, each resumed with its own command
+    : > "$log.mn"
+    write_plan ""
+    "$runner" -c "$source_line; mn" >/dev/null 2>&1
+    has "$shell_name: it tells mnemosyne it can resume other agents" "plan-version: 2" "$(cat "$log.mn")"
+
+    write_plan "here\t$tmp/work-b\t0f6c1d2e-1111-4222-8333-944455556666\t\t\tthe lexer, in pi\t\tpi\n"
+    : > "$log"
+    out=$("$runner" -c "$source_line; mn --verbose; pwd" 2>&1)
+    seen=$(cat "$log")
+    has "$shell_name: a pi session resumes in pi" \
+        "pi-args: [--session] [0f6c1d2e-1111-4222-8333-944455556666]" "$seen"
+    has "$shell_name: in its folder" "pi-pwd: $tmp/work-b" "$seen"
+    has "$shell_name: with the shell left there" "$tmp/work-b" "$out"
+    hasnt "$shell_name: and claude is not run for it" "claude:" "$seen"
+    hasnt "$shell_name: nor handed claude's flags" "--verbose" "$(grep '^pi' "$log")"
+    hasnt "$shell_name: nor claude's bypass for no recorded mode" "dangerously" "$seen"
+
+    # omp hops to a temp folder when started in your home, unless told not to
+    write_plan "here\t$tmp/work-a\t01a10e6c-aaaa-7000-bbbb-0f1c045e7bd0\t\t\tomp at home\t\tomp\n"
+    : > "$log"
+    HOME="$tmp/work-a" "$runner" -c "$source_line; mn" >/dev/null 2>&1
+    has "$shell_name: omp in your home stays there" \
+        "omp-args: [--resume] [01a10e6c-aaaa-7000-bbbb-0f1c045e7bd0] [--allow-home]" "$(cat "$log")"
+    write_plan "here\t$tmp/work-b\t01a10e6c-aaaa-7000-bbbb-0f1c045e7bd0\t\t\tomp elsewhere\t\tomp\n"
+    : > "$log"
+    HOME="$tmp/work-a" "$runner" -c "$source_line; mn" >/dev/null 2>&1
+    hasnt "$shell_name: omp elsewhere is resumed plainly" "--allow-home" "$(cat "$log")"
+    has "$shell_name: but resumed" "omp-args: [--resume] [01a10e6c-aaaa-7000-bbbb-0f1c045e7bd0]" "$(cat "$log")"
+
+    write_plan "window\t$tmp/work-a\t01a113f0-ee19-7b12-b5a8-d3c549683529\t\t\ta codex thread\t\tcodex\n"
+    : > "$log"
+    MN_TERM_RUN=1 "$runner" -c "$source_line; mn" >/dev/null 2>&1
+    wait_for "codex-pwd:" "$log"
+    seen=$(cat "$log")
+    has "$shell_name: a codex thread opens in a window, in codex" \
+        "codex-args: [resume] [01a113f0-ee19-7b12-b5a8-d3c549683529]" "$seen"
+    has "$shell_name: in its folder" "codex-pwd: $tmp/work-a" "$seen"
+
+    if [ -n "$real_tmux" ]; then
+        kill_tmux
+        write_plan "wintmux\t$tmp/work-b\t20260910_004421_837570\t\t\ta hermes chat\t\thermes\n"
+        : > "$log"
+        out=$("$runner" -c "$source_line; mn" 2>&1)
+        wait_for "hermes-args:" "$log"
+        has "$shell_name: a hermes chat runs under tmux, in hermes" \
+            "hermes-args: [--resume] [20260910_004421_837570]" "$(cat "$log")"
+        : > "$log"
+        out=$("$runner" -c "$source_line; mn" 2>&1)
+        has "$shell_name: and is found there again" "already running" "$out"
+        hasnt "$shell_name: rather than started twice" "hermes:" "$(cat "$log")"
+        kill_tmux
+        # however it was started there: `codex resume ID` names it too
+        : > "$log"
+        "$bin/tmux" new-session -d -s by-hand -c "$tmp/work-a" \
+            "codex resume 01a113f0-ee19-7b12-b5a8-d3c549683529"
+        wait_for "codex:" "$log"
+        write_plan "tmux\t$tmp/work-a\t01a113f0-ee19-7b12-b5a8-d3c549683529\t\t\ta codex thread\t\tcodex\n"
+        : > "$log"
+        out=$("$runner" -c "$source_line; mn" 2>&1)
+        has "$shell_name: a codex thread started by hand is found" "by-hand" "$out"
+        hasnt "$shell_name: and not started again" "codex:" "$(cat "$log")"
+        kill_tmux
+    else
+        skip "$shell_name: other agents under tmux" "tmux is not installed"
+    fi
+
+    # an agent this wrapper has not heard of is shown, never run as claude
+    write_plan "here\t$tmp/work-b\t99999999-0000-1111-2222-333333333333\t\t\tsomeone new\t\tgemini\n"
+    : > "$log"
+    out=$("$runner" -c "$source_line; mn" 2>&1)
+    hasnt "$shell_name: an unknown agent is not resumed as claude" "claude:" "$(cat "$log")"
+    has "$shell_name: it is said instead" "gemini" "$out"
 
     # --- a line that is not a plan is shown, not acted on
     # A newer mnemosyne could say something this wrapper does not know

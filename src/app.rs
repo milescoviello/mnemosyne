@@ -165,6 +165,8 @@ pub struct Hits {
 
 #[derive(Clone, Debug)]
 pub struct ResumeTarget {
+    /// Whose session it is, so the shell runs that agent's resume.
+    pub harness: crate::model::Harness,
     pub id: String,
     pub cwd: String,
     pub model: String,
@@ -174,6 +176,11 @@ pub struct ResumeTarget {
     /// not.
     pub note: String,
 }
+
+/// Why a session of another agent was not resumed: the `mn` function this
+/// shell sourced is older than the binary, and knows only `claude --resume`.
+pub const NEEDS_NEWER_SHELL: &str =
+    "this shell's mn predates the update and resumes only Claude's — a new terminal resumes the rest";
 
 /// Where a resumed session should land.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -325,6 +332,10 @@ pub struct App {
     pub list_state: ratatui::widgets::ListState,
     last_click: Option<(std::time::Instant, usize)>,
     pub restore_model: bool,
+    /// The shell function reading the plan can resume every agent's
+    /// sessions, not only Claude's. One sourced before this build cannot,
+    /// and would hand another agent's id to `claude --resume`.
+    pub harness_plans: bool,
     pub want_refresh: bool,
     /// A rescan is running behind the list, which is showing cached rows in
     /// the meantime.
@@ -448,6 +459,7 @@ impl App {
             list_state: ratatui::widgets::ListState::default(),
             last_click: None,
             restore_model,
+            harness_plans: false,
             want_refresh: false,
             indexing: false,
             to_open: Vec::new(),
@@ -1282,6 +1294,7 @@ impl App {
                 model: s.model.clone(),
                 perms: s.permission_mode.clone(),
                 title: s.title().to_string(),
+                harness: crate::workspace::Entry::harness_name(s.harness),
             });
         }
         out
@@ -1370,11 +1383,14 @@ impl App {
         // reopening that puts a second client on it.
         let running = self.running_ids();
         let busy = |id: &str| running.contains(id) || self.launched.iter().any(|t| t.id == id);
-        let targets: Vec<ResumeTarget> = self
-            .reopen
+        let free: Vec<&crate::workspace::Entry> =
+            self.reopen.iter().filter(|e| !busy(&e.id)).collect();
+        let targets: Vec<ResumeTarget> = free
             .iter()
-            .filter(|e| !busy(&e.id))
-            .map(|e| ResumeTarget {
+            .filter_map(|e| Some((e.harness()?, *e)))
+            .filter(|(h, _)| self.can_plan(*h))
+            .map(|(harness, e)| ResumeTarget {
+                harness,
                 id: e.id.clone(),
                 cwd: e.cwd.clone(),
                 model: if self.restore_model {
@@ -1387,6 +1403,11 @@ impl App {
                 note: String::new(),
             })
             .collect();
+        let open_already = self.reopen.len() - free.len();
+        let unrunnable = free
+            .iter()
+            .filter(|e| e.harness().is_some_and(|h| !self.can_plan(h)))
+            .count();
         // Same as any other window: hand them over and stay open, so the
         // list is still there when they appear.
         self.note_launched(&targets);
@@ -1394,12 +1415,21 @@ impl App {
         // `W` is still here, and every one of these went out under it --
         // `eft-work-2`, `eft-work-3` -- none of them the session you named.
         self.tmux_name.clear();
-        let open_already = self.reopen.len() - targets.len();
         self.status = match (targets.len(), open_already) {
+            (0, 0) => String::new(),
             (0, _) => "every one of them is open already".into(),
             (_, 0) => "reopening them in their own windows".into(),
             (n, k) => format!("reopening {n} in their own windows — {k} open already"),
         };
+        if unrunnable > 0 {
+            let said = format!("left out {unrunnable}: {NEEDS_NEWER_SHELL}");
+            self.status = if self.status.is_empty() {
+                said.clone()
+            } else {
+                format!("{} — {said}", self.status)
+            };
+            self.notes.push(said);
+        }
         if !targets.is_empty() {
             self.to_open.push((Target::WindowTmux, targets));
         }
@@ -1410,6 +1440,11 @@ impl App {
         self.rebuild();
     }
 
+    /// Can the shell reading the plan resume this agent's sessions?
+    pub fn can_plan(&self, h: crate::model::Harness) -> bool {
+        h == crate::model::Harness::Claude || self.harness_plans
+    }
+
     pub fn targets(&self) -> Vec<ResumeTarget> {
         let mk = |s: &Session| {
             // Every route the shell takes starts with a cd, and all but
@@ -1417,13 +1452,16 @@ impl App {
             // archived workspace in its repo is all a matter of this.
             let elsewhere = s.resumes_elsewhere();
             ResumeTarget {
+                harness: s.harness,
                 id: if s.is_subagent {
                     s.parent.clone().unwrap_or_else(|| s.id.clone())
                 } else {
                     s.id.clone()
                 },
                 cwd: elsewhere.unwrap_or(&s.cwd).to_string(),
-                model: if self.restore_model {
+                // The others put their own model back when they resume, and
+                // `--model` is Claude's flag.
+                model: if self.restore_model && s.harness == crate::model::Harness::Claude {
                     s.model.clone()
                 } else {
                     String::new()
@@ -1726,6 +1764,22 @@ impl App {
                 "cannot open {}: a tab or newline in its folder's name cannot reach the shell",
                 refused.join(", ")
             );
+            self.status = said.clone();
+            if targets.is_empty() {
+                return;
+            }
+            self.notes.push(said);
+        }
+        // Read by a shell function from before there were other agents to
+        // resume, the plan for one would become `claude --resume <its id>`.
+        let refused: Vec<String> = targets
+            .iter()
+            .filter(|t| !self.can_plan(t.harness))
+            .map(|t| t.title.clone())
+            .collect();
+        if !refused.is_empty() {
+            targets.retain(|t| self.can_plan(t.harness));
+            let said = format!("{}: {}", refused.join(", "), NEEDS_NEWER_SHELL);
             self.status = said.clone();
             if targets.is_empty() {
                 return;
@@ -3999,6 +4053,59 @@ mod logic_tests {
     }
 
     #[test]
+    fn another_harness_resumes_as_itself_without_claude_flags() {
+        use crate::model::Harness;
+        let mut a = app();
+        a.harness_plans = true;
+        let i = a.current_idx().unwrap();
+        a.all[i].harness = Harness::Pi;
+        a.do_action(Action::Resume);
+        let Some(Outcome::Resume { targets, .. }) = &a.outcome else {
+            panic!("not resumed: {}", a.status)
+        };
+        assert_eq!(targets[0].harness, Harness::Pi);
+        // pi restores its own model; --model is Claude's flag
+        assert!(targets[0].model.is_empty(), "{:?}", targets[0].model);
+    }
+
+    #[test]
+    fn an_older_shell_function_is_never_handed_another_harness() {
+        // It would run `claude --resume <pi's id>`. Said instead.
+        use crate::model::Harness;
+        let mut a = app();
+        let i = a.current_idx().unwrap();
+        a.all[i].harness = Harness::Codex;
+        a.do_action(Action::Resume);
+        assert!(a.outcome.is_none());
+        assert!(a.status.contains("shell"), "{}", a.status);
+        // a window, likewise
+        a.do_action(Action::NewWindow);
+        assert!(a.to_open.is_empty());
+        // and Claude's are as they were
+        a.all[i].harness = Harness::Claude;
+        a.do_action(Action::Resume);
+        assert!(a.outcome.is_some());
+    }
+
+    #[test]
+    fn what_was_open_remembers_whose_it_was() {
+        use crate::model::Harness;
+        let mut a = app();
+        a.all[1].harness = Harness::Omp;
+        a.all[1].live_pid = Some(4242);
+        a.all[1].live_exact = true;
+        let open = a.open_sessions();
+        let e = open.iter().find(|e| e.id == a.all[1].id).unwrap();
+        assert_eq!(e.harness, "omp");
+        let claude = a.all[0].clone();
+        a.all[0].live_pid = Some(4243);
+        a.all[0].live_exact = true;
+        let open = a.open_sessions();
+        let e = open.iter().find(|e| e.id == claude.id).unwrap();
+        assert!(e.harness.is_empty(), "Claude's entry is written as before");
+    }
+
+    #[test]
     fn the_preview_follows_a_session_that_grew() {
         // Remembered by path alone, the rail showed a live session as it was
         // the first time the cursor landed on it, however far it had got
@@ -4547,8 +4654,37 @@ mod logic_tests {
                 model: "claude-opus-5".into(),
                 perms: "bypassPermissions".into(),
                 title: format!("work in {id}"),
+                ..Default::default()
             })
             .collect();
+    }
+
+    #[test]
+    fn a_reboot_offer_puts_each_agent_back_as_itself() {
+        let mut a = app();
+        offer(&mut a, &["11111111-a", "22222222-b"]);
+        a.reopen[1].harness = "codex".into();
+        a.reopen[1].model.clear();
+        a.harness_plans = true;
+        a.reopen_previous();
+        let (_, targets) = &a.to_open[0];
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].harness, crate::model::Harness::Claude);
+        assert_eq!(targets[1].harness, crate::model::Harness::Codex);
+    }
+
+    #[test]
+    fn a_reboot_offer_says_what_an_older_shell_cannot_put_back() {
+        let mut a = app();
+        offer(&mut a, &["11111111-a", "22222222-b", "33333333-c"]);
+        a.reopen[1].harness = "hermes".into();
+        // a newer mnemosyne's: not this build's to put back, nor to count
+        a.reopen[2].harness = "gemini".into();
+        a.reopen_previous();
+        let (_, targets) = &a.to_open[0];
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].id, "11111111-a");
+        assert!(a.status.contains("left out 1:"), "{}", a.status);
     }
 
     fn press(a: &mut App, c: char) {

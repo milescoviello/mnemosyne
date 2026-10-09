@@ -74,22 +74,37 @@ function mn --description 'Browse, search, tag and resume Claude Code sessions (
     # while these run, and writing over it is what made it look like mn had
     # half-exited. It all comes out once the screen is ours again.
     set -l notes
+    # Says this function resumes every agent, not only claude: one sourced
+    # before there were others is never handed one.
+    set -lx MNEMOSYNE_PLAN 2
     mnemosyne $mine | while read -l line
         test -z "$line"; and continue
         set -l p (string split \t -- $line)
+        # The agent, when it is not claude, is an eighth field.
+        set -l hns ""
+        test (count $p) -ge 8; and set hns $p[8]
         # Everything in here gets /dev/null for input. Inside a `while read`
         # the loop's stdin *is* the pipe, so any command that reads stdin
         # swallows the next plan line -- tmux does exactly that, and the
         # second window never opened. It would take keystrokes from the
         # browser too, which is still running and reading the terminal.
         begin
-            set -l extra (__mn_perms "$p[5]" $no_bypass $fwd)
+            # The whole command, built once: claude's flags are claude's,
+            # and what was typed after mn goes to claude alone.
+            set -l cmd (__mn_cmd "$hns" "$p[3]" "$p[4]" "$p[5]" $no_bypass "$p[2]" $fwd)
+            if test $status -ne 0
+                # An agent this wrapper does not know how to resume: from a
+                # newer mnemosyne, say. Show it; do not guess.
+                set -a notes "  ✗ cannot resume $hns sessions with this mn — update it: $p[6]"
+                continue
+            end
+            contains -- "$hns" "" claude; and set -a cmd $fwd
             switch $p[1]
                 case here
                     set finally $line
                 case tmux
                     # Create each detached as it arrives; attach once, after.
-                    set -l res (__mn_tmux_ensure "$p[2]" "$p[3]" "$p[4]" "$p[6]" "$p[7]" -- $extra $fwd 2>&1)
+                    set -l res (__mn_tmux_ensure "$p[2]" "$p[3]" "$p[6]" "$p[7]" -- $cmd 2>&1)
                     if test $status -eq 0
                         test -z "$tmux_first"; and set tmux_first $res[-2]
                         set -a notes (__mn_opened "$p[6]" "tmux $res[-2]" $res[-1])
@@ -97,9 +112,9 @@ function mn --description 'Browse, search, tag and resume Claude Code sessions (
                         set -a notes $res
                     end
                 case wintmux
-                    set -a notes (__mn_wintmux "$p[2]" "$p[3]" "$p[4]" "$p[6]" "$p[7]" -- $extra $fwd 2>&1)
+                    set -a notes (__mn_wintmux "$p[2]" "$p[3]" "$p[6]" "$p[7]" -- $cmd 2>&1)
                 case window
-                    set -a notes (__mn_window "$p[2]" "$p[3]" "$p[4]" "$p[6]" -- $extra $fwd 2>&1)
+                    set -a notes (__mn_window "$p[2]" "$p[6]" -- $cmd 2>&1)
                 case '*'
                     # Not a plan this wrapper knows how to carry out -- from
                     # a newer mnemosyne, say. Show it; do not guess.
@@ -124,10 +139,11 @@ function mn --description 'Browse, search, tag and resume Claude Code sessions (
     # reason this is a function.
     set -l p (string split \t -- $finally)
     set -l cwd $p[2]
-    set -l sid $p[3]
-    set -l mdl $p[4]
     set -l ttl $p[6]
-    set -l extra (__mn_perms "$p[5]" $no_bypass $fwd)
+    set -l hns ""
+    test (count $p) -ge 8; and set hns $p[8]
+    set -l cmd (__mn_cmd "$hns" "$p[3]" "$p[4]" "$p[5]" $no_bypass "$cwd" $fwd)
+    contains -- "$hns" "" claude; and set -a cmd $fwd
     if test -d "$cwd"
         # There but not enterable: resuming from here instead is a session
         # in the wrong folder, which bash refuses too.
@@ -135,10 +151,8 @@ function mn --description 'Browse, search, tag and resume Claude Code sessions (
     else
         echo "folder is gone: $cwd — resuming from "(pwd)
     end
-    set -l margs
-    test -n "$mdl"; and set margs --model $mdl
     echo "▶ $ttl"
-    claude --resume $sid $margs $extra $fwd
+    $cmd
 end
 
 function __mn_tmux_ensure --description 'Make sure a tmux session exists for this chat; echo its name'
@@ -149,16 +163,15 @@ function __mn_tmux_ensure --description 'Make sure a tmux session exists for thi
     # Errors go to stderr, for the caller to collect.
     set -l cwd $argv[1]
     set -l sid $argv[2]
-    set -l mdl $argv[3]
-    set -l ttl $argv[4]
+    set -l ttl $argv[3]
     # A name you chose, or empty for the generated one.
-    set -l want $argv[5]
-    # Everything after the separator goes to claude, and the separator is
-    # always the sixth argument. Looking for the first `--` found a title,
-    # model or name that was `--` instead, and claude's flags went in as a
-    # prompt -- a bypass resumed with every prompt on.
-    set -l extra
-    test "$argv[6]" = --; and set extra $argv[7..-1]
+    set -l want $argv[4]
+    # Everything after the separator is the command that resumes it, and
+    # the separator is always the fifth argument. Looking for the first `--`
+    # found a title or name that was `--` instead, and claude's flags went
+    # in as a prompt -- a bypass resumed with every prompt on.
+    set -l cmd
+    test "$argv[5]" = --; and set cmd $argv[6..-1]
 
     if not command -q tmux
         echo "  ✗ tmux is not installed" >&2
@@ -170,12 +183,13 @@ function __mn_tmux_ensure --description 'Make sure a tmux session exists for thi
     # Already there, whatever it ended up called: attach rather than starting
     # a second client on the same transcript. tmux remembers the command each
     # pane was started with, so the chat is found by its session id and not
-    # by a name that is now yours to choose -- told to claude any of the ways
-    # mnemosyne reads one: `--resume` alone missed `-r ID` and
-    # `--session-id ID`, and a second claude went on the same transcript. A
-    # fork is a chat of its own.
+    # by a name that is now yours to choose -- told to its agent any of the
+    # ways mnemosyne reads one: `--resume` alone missed `-r ID` and
+    # `--session-id ID`, and a second claude went on the same transcript.
+    # pi takes `--session ID` and codex `resume ID`. A fork is a chat of its
+    # own.
     set -l running (tmux list-panes -a -F '#{session_name}	#{pane_start_command}' 2>/dev/null \
-        | string match -r '^[^\t]+\t.*[\s\x22\x27](--resume|-r|--session-id)[\x22\x27]?[ =][\x22\x27]?'$sid'.*$' \
+        | string match -r '^[^\t]+\t.*[\s\x22\x27](--resume|-r|--session-id|--session|resume)[\x22\x27]?[ =][\x22\x27]?'$sid'.*$' \
         | string match -v -- '*--fork-session*' | head -1)
     if test -n "$running"
         # Both lines from builtins. The name came out of `head`, and fish
@@ -204,15 +218,13 @@ function __mn_tmux_ensure --description 'Make sure a tmux session exists for thi
         echo "  ✗ folder gone, skipping: $cwd" >&2
         return 1
     end
-    set -l margs
-    test -n "$mdl"; and set margs --model $mdl
     set -l wname (string sub -l 18 -- (string replace -ra '[^a-zA-Z0-9._-]' '-' -- $ttl))
     test -z "$wname"; and set wname $name
 
     # Separate words, which tmux runs as they are. Given one string it hands
     # that to your default shell to parse -- whichever shell that is -- and
     # an argument with a space in it came out as two.
-    if tmux new-session -d -s $name -n "$wname" -c "$cwd" (__mn_claude) --resume $sid $margs $extra 2>/dev/null
+    if tmux new-session -d -s $name -n "$wname" -c "$cwd" $cmd 2>/dev/null
         echo $name
         echo new
         return 0
@@ -224,9 +236,10 @@ end
 function __mn_wintmux --description 'Open a resumed session in its own window, running under tmux'
     # Without tmux this is just a window, which is the next best thing rather
     # than an error: the session still opens.
+    # $argv: folder, session id, title, tmux name, `--`, the command.
     if not command -q tmux
-        # __mn_window does not take the tmux name, so drop it
-        __mn_window $argv[1..4] $argv[6..-1]
+        # __mn_window takes neither the id nor the tmux name
+        __mn_window $argv[1] $argv[3] $argv[5..-1]
         return $status
     end
     # Its errors are captured here, not left on stderr: this runs while the
@@ -238,7 +251,7 @@ function __mn_wintmux --description 'Open a resumed session in its own window, r
     end
     set -l name $res[-2]
     set -l state $res[-1]
-    set -l ttl $argv[4]
+    set -l ttl $argv[3]
     # Quoted: the name is whatever the chat already runs under, and tmux
     # allows spaces and `(...)` in one.
     set -l term (__mn_term_open "$argv[1]" "exec tmux attach-session -t "(string escape -- "=$name"))
@@ -315,23 +328,19 @@ end
 
 function __mn_window --description 'Open one resumed session in its own terminal window'
     set -l cwd $argv[1]
-    set -l sid $argv[2]
-    set -l mdl $argv[3]
-    set -l ttl $argv[4]
-    # Everything after the separator is passed through to claude. It is
-    # always the fifth argument: the first `--` could be the title.
-    set -l extra
-    test "$argv[5]" = --; and set extra $argv[6..-1]
+    set -l ttl $argv[2]
+    # Everything after the separator is the command that resumes it. It is
+    # always the third argument: the first `--` could be the title.
+    set -l cmd
+    test "$argv[3]" = --; and set cmd $argv[4..-1]
 
     if not test -d "$cwd"
         echo "  ✗ folder gone, skipping: $cwd"
         return 1
     end
-    set -l margs
-    test -n "$mdl"; and set margs --model $mdl
     # Each word escaped on its own: pasted in bare, `--add-dir "/my projects"`
     # arrived as two arguments, and a `$(...)` inside one was run.
-    set -l inner "cd "(string escape -- $cwd)"; exec "(string join ' ' -- (string escape -- (__mn_claude) --resume $sid $margs $extra))
+    set -l inner "cd "(string escape -- $cwd)"; exec "(string join ' ' -- (string escape -- $cmd))
 
     set -l term (__mn_term_open "$cwd" "$inner")
     set -l st $status
@@ -345,18 +354,60 @@ function __mn_window --description 'Open one resumed session in its own terminal
     echo "  ▶ $ttl  ($term)"
 end
 
-function __mn_claude --description 'The claude this shell would run, as a path'
+function __mn_bin --description 'The agent this shell would run, as a path'
     # A new window's login shell and a tmux server started from somewhere
     # else need not have the same PATH as you, and "claude: command not
     # found" in a window that then closes is a poor way to find that out.
-    command -s claude; and return
+    command -s $argv[1]; and return
     # Not on PATH: Claude Code's local install, in ~/.claude/local, which an
     # alias (a function, in fish) points at and a window cannot see.
-    if test -f ~/.claude/local/claude; and test -x ~/.claude/local/claude
+    if test "$argv[1]" = claude; and test -f ~/.claude/local/claude; and test -x ~/.claude/local/claude
         echo ~/.claude/local/claude
         return
     end
-    echo claude
+    echo $argv[1]
+end
+
+function __mn_cmd --description 'The command that resumes a session, a word to a line'
+    # $argv: the agent (empty for claude), its id, model, permission mode,
+    # --ask, folder, then what was typed after mn. The model and the
+    # permission mode are Claude's: every other agent puts its own back
+    # when it resumes. What was typed after mn is claude's too, and is added
+    # by the caller.
+    set -l sid $argv[2]
+    switch "$argv[1]"
+        case '' claude
+            __mn_bin claude
+            echo --resume
+            echo $sid
+            if test -n "$argv[3]"
+                echo --model
+                echo $argv[3]
+            end
+            __mn_perms "$argv[4]" $argv[5] $argv[7..-1]
+        case pi
+            __mn_bin pi
+            echo --session
+            echo $sid
+        case omp
+            __mn_bin omp
+            echo --resume
+            echo $sid
+            # Started in your home, omp moves itself to a temp folder.
+            test "$argv[6]" = "$HOME"; and echo --allow-home
+        case codex
+            __mn_bin codex
+            echo resume
+            echo $sid
+        case hermes
+            __mn_bin hermes
+            echo --resume
+            echo $sid
+        case '*'
+            # One a newer mnemosyne knows and this does not. Never claude's.
+            return 1
+    end
+    return 0
 end
 
 function __mn_term_open --description 'Run a command in a new terminal window; echo the terminal used'

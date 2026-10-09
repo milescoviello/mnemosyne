@@ -83,6 +83,17 @@ a tmux attach. It restores the model and the permission mode the session
 started in; pass --ask to resume with prompts on instead.
 ";
 
+/// Does the shell function reading the plan know how to resume every
+/// agent's sessions? It says so in the environment it runs mnemosyne with.
+/// One sourced before there were others says nothing, and would run
+/// `claude --resume` on whatever it was handed.
+fn shell_plans_harnesses() -> bool {
+    std::env::var("MNEMOSYNE_PLAN")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .is_some_and(|v| v >= 2)
+}
+
 /// Write one line of the plan, or explain why it cannot be written.
 ///
 /// The plan is tab-separated and the shell splits it back apart positionally,
@@ -101,6 +112,7 @@ fn plan_line(
     perms: &str,
     title: &str,
     tmux: &str,
+    harness: model::Harness,
 ) -> Result<bool> {
     let fields = [cwd, id, model, perms, title, tmux];
     // \x1f too: mn.bash splits on it, having swapped the tabs for it so that
@@ -112,10 +124,17 @@ fn plan_line(
         );
         return Ok(false);
     }
-    writeln!(
+    write!(
         out,
         "{mode}\t{cwd}\t{id}\t{model}\t{perms}\t{title}\t{tmux}"
     )?;
+    // Claude's lines are what they always were. Another agent's says which
+    // in a field of its own, last, where a reader that stops at seven
+    // finds every other field where it was.
+    if harness != model::Harness::Claude {
+        write!(out, "\t{}", harness.name())?;
+    }
+    writeln!(out)?;
     Ok(true)
 }
 
@@ -643,9 +662,11 @@ fn main() -> Result<()> {
         let n: usize = args.get(i + 1).and_then(|v| v.parse().ok()).unwrap_or(5);
         let live = live::live_map();
         let mut app = App::new(sessions, meta::Meta::load(), live, restore_model);
+        app.harness_plans = shell_plans_harnesses();
         app.set_wsx(wsx::load());
         let mut out = std::io::stdout().lock();
         let mut opened = 0;
+        let mut unrunnable = 0;
         let mut put_back: Vec<workspace::Entry> = Vec::new();
         let mounts = paths::Mounts::read();
         for s in most_recent_first(&app) {
@@ -661,10 +682,18 @@ fn main() -> Result<()> {
             if s.cwd.is_empty() || !mounts.dir_there(&s.cwd) {
                 continue;
             }
+            if !app.can_plan(s.harness) {
+                unrunnable += 1;
+                continue;
+            }
             // Same landing as the post-reboot offer: a window each, with
             // tmux underneath, so closing one leaves the session running.
             // An older shell wrapper treats this as a plain window.
-            let model = if restore_model { s.model.as_str() } else { "" };
+            let model = if restore_model && s.harness == model::Harness::Claude {
+                s.model.as_str()
+            } else {
+                ""
+            };
             if plan_line(
                 &mut out,
                 "wintmux",
@@ -674,6 +703,7 @@ fn main() -> Result<()> {
                 &s.permission_mode,
                 s.title(),
                 "",
+                s.harness,
             )? {
                 opened += 1;
                 put_back.push(workspace::Entry {
@@ -682,8 +712,12 @@ fn main() -> Result<()> {
                     model: model.to_string(),
                     perms: s.permission_mode.clone(),
                     title: s.title().to_string(),
+                    harness: workspace::Entry::harness_name(s.harness),
                 });
             }
+        }
+        if unrunnable > 0 {
+            eprintln!("left out {unrunnable}: {}", app::NEEDS_NEWER_SHELL);
         }
         if opened == 0 {
             eprintln!("nothing to restore — no recent sessions whose folder is still there and that are not running");
@@ -708,6 +742,7 @@ fn main() -> Result<()> {
     if has("--reopen") {
         let live = live::live_map();
         let mut app = App::new(sessions, meta::Meta::load(), live, restore_model);
+        app.harness_plans = shell_plans_harnesses();
         // Which running claudes are wsx's agents -- neither recorded nor
         // offered, since wsx puts them back -- is wsx's to say.
         app.set_wsx(wsx::load());
@@ -734,7 +769,16 @@ fn main() -> Result<()> {
             return Ok(());
         }
         let mut out = std::io::stdout().lock();
+        let mut unrunnable = 0;
         for e in &pending {
+            // One this build does not know cannot be put back by it.
+            let Some(h) = e.harness() else {
+                continue;
+            };
+            if !app.can_plan(h) {
+                unrunnable += 1;
+                continue;
+            }
             plan_line(
                 &mut out,
                 "wintmux",
@@ -744,7 +788,11 @@ fn main() -> Result<()> {
                 &e.perms,
                 &e.title,
                 "",
+                h,
             )?;
+        }
+        if unrunnable > 0 {
+            eprintln!("left out {unrunnable}: {}", app::NEEDS_NEWER_SHELL);
         }
         // Taken, so never offered again; what was just opened becomes the
         // current set instead.
@@ -850,6 +898,7 @@ fn main() -> Result<()> {
     // it will be seen: printed now, it was behind the browser at once.
     let (marks, said) = meta::Meta::load_quietly();
     let mut app = App::new(sessions, marks, live::live_map(), restore_model);
+    app.harness_plans = shell_plans_harnesses();
     if let Some(said) = said {
         app.status = said.clone();
         app.notes.push(said);
@@ -1029,6 +1078,7 @@ fn main() -> Result<()> {
                     model: t.model.clone(),
                     perms: t.perms.clone(),
                     title: t.title.clone(),
+                    harness: workspace::Entry::harness_name(t.harness),
                 });
             }
         }
@@ -1064,6 +1114,7 @@ fn main() -> Result<()> {
                 &t.perms,
                 &t.title,
                 &app.tmux_name,
+                t.harness,
             )?;
         }
     }
@@ -1266,6 +1317,7 @@ fn run<B: ratatui::backend::Backend>(
                         &t.perms,
                         &t.title,
                         &app.tmux_name,
+                        t.harness,
                     );
                 }
             }
@@ -1586,8 +1638,9 @@ mod restore_tests {
 #[cfg(test)]
 mod plan_tests {
     use super::plan_line;
+    use crate::model::Harness;
 
-    fn line(cwd: &str, title: &str) -> (bool, String) {
+    fn line_for(h: Harness, cwd: &str, title: &str) -> (bool, String) {
         let mut out: Vec<u8> = Vec::new();
         let wrote = plan_line(
             &mut out,
@@ -1598,9 +1651,35 @@ mod plan_tests {
             "bypassPermissions",
             title,
             "",
+            h,
         )
         .unwrap();
         (wrote, String::from_utf8(out).unwrap())
+    }
+
+    fn line(cwd: &str, title: &str) -> (bool, String) {
+        line_for(Harness::Claude, cwd, title)
+    }
+
+    #[test]
+    fn another_harness_is_named_in_an_eighth_field() {
+        // Appended, so a reader that knows seven fields still finds each
+        // where it was.
+        for h in [Harness::Pi, Harness::Omp, Harness::Codex, Harness::Hermes] {
+            let (wrote, text) = line_for(h, "/home/u/proj", "t");
+            assert!(wrote);
+            assert_eq!(text.matches('\t').count(), 7, "wrong shape: {text:?}");
+            assert!(text.ends_with(&format!("\t\t{}\n", h.name())), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn a_claude_line_is_what_it_always_was() {
+        let (_, text) = line("/home/u/proj", "t");
+        assert_eq!(
+            text,
+            "wintmux\t/home/u/proj\t026bcdb5-8d88-4ad7-9f23-58649bf4f353\tclaude-opus-5\tbypassPermissions\tt\t\n"
+        );
     }
 
     #[test]
