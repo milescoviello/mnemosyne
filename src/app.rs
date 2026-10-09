@@ -1053,6 +1053,14 @@ impl App {
         self.all.iter().any(|s| s.wsx.is_some())
     }
 
+    /// Whether any session is another agent's than Claude's, which is what
+    /// the list makes room to mark.
+    pub fn has_agents(&self) -> bool {
+        self.all
+            .iter()
+            .any(|s| s.harness != crate::model::Harness::Claude)
+    }
+
     /// Favourites among the sessions that exist, which is what the list
     /// marks. The overlay outlives transcripts, so counting its entries
     /// showed a star total nothing on screen accounted for.

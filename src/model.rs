@@ -47,6 +47,21 @@ impl Harness {
     pub fn from_name(s: &str) -> Option<Harness> {
         Harness::ALL.into_iter().find(|h| h.name() == s)
     }
+
+    /// The symbol before its title in the list, one column wide. Claude,
+    /// whose sessions are most of them, has none.
+    pub fn mark(self) -> &'static str {
+        match self {
+            Harness::Claude => "",
+            Harness::Pi => "π",
+            // pomega, the other way of writing pi: omp is pi's other build
+            Harness::Omp => "ϖ",
+            // chi, the x of codex
+            Harness::Codex => "χ",
+            // the caduceus, Hermes's staff
+            Harness::Hermes => "☤",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]

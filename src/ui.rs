@@ -996,6 +996,9 @@ fn draw_list(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
     // What a search in the conversations found, drawn out where a title
     // says it too.
     let deep = app.deep_spotter();
+    // Two columns at the head of the title for which agent a session is,
+    // once there is more than Claude to tell apart.
+    let agents = app.has_agents();
     // and what the `/` filter matched
     let filter = crate::filter::Filter::new(app.fuzzy.trim());
     let mut matcher = nucleo_matcher::Matcher::new(nucleo_matcher::Config::DEFAULT);
@@ -1182,7 +1185,15 @@ fn draw_list(f: &mut Frame, app: &mut App, c: &Cols, area: Rect) {
                     sp.push(Span::raw(" ".repeat(c.sub)));
                 }
 
-                let shown = pad_fit(s.title(), c.title);
+                let mut room = c.title;
+                if agents && room > 2 {
+                    sp.push(Span::styled(
+                        format!("{:<1} ", s.harness.mark()),
+                        Style::default().fg(rgb(art::ramp(0.72))),
+                    ));
+                    room -= 2;
+                }
+                let shown = pad_fit(s.title(), room);
                 let mut at = marks(crate::filter::Field::Title, &shown);
                 if let Some(find) = &deep {
                     at.extend(char_spots(&shown, find));
@@ -1375,11 +1386,16 @@ fn draw_rail(f: &mut Frame, app: &mut App, area: Rect, show_cue: bool) {
         .wsx
         .as_ref()
         .is_some_and(|w| !matches!(w.status, crate::wsx::Status::Unknown));
-    let mut facts: Vec<String> = vec![if s.cwd_missing && !known {
+    let mut facts: Vec<String> = Vec::new();
+    // Which agent, by its mark and by name: where the marks are learnt.
+    if s.harness != crate::model::Harness::Claude {
+        facts.push(format!("{} {}", s.harness.mark(), s.harness.name()));
+    }
+    facts.push(if s.cwd_missing && !known {
         format!("{} (gone)", s.folder())
     } else {
         s.folder()
-    }];
+    });
     if let Some(w) = &s.wsx {
         match &w.status {
             crate::wsx::Status::Live { .. } => facts.push("live".into()),
@@ -3224,6 +3240,60 @@ mod render_tests {
         assert!(!same_prefix("héllo", "hello", 3));
     }
 
+    /// Where on its row a title starts, and the row.
+    fn title_at(screen: &[String], title: &str) -> (usize, String) {
+        let row = screen
+            .iter()
+            .find(|r| r.contains(title))
+            .unwrap_or_else(|| panic!("{title:?} not drawn: {screen:#?}"))
+            .clone();
+        let byte = row.find(title).unwrap();
+        (crate::model::width(&row[..byte]), row)
+    }
+
+    #[test]
+    fn another_agent_is_marked_before_its_title() {
+        use crate::model::Harness;
+        let mut a = app();
+        let at = |a: &App, id: &str| a.all.iter().position(|s| s.id == id).unwrap();
+        let (pi, codex) = (at(&a, "bbbbbbbb-2"), at(&a, "cccccccc-3"));
+        a.all[pi].harness = Harness::Pi;
+        a.all[codex].harness = Harness::Codex;
+        a.rebuild();
+        let screen = render(&mut a, 150, 30);
+        let (x_pi, row) = title_at(&screen, "yesterday's thing");
+        assert!(row.contains("π yesterday's thing"), "{row}");
+        let (x_codex, row) = title_at(&screen, "last week");
+        assert!(row.contains("χ last week"), "{row}");
+        // Claude's carry none, and their titles line up with the rest.
+        let (x_claude, row) = title_at(&screen, "today's work");
+        assert!(row.contains("  today's work"), "{row}");
+        assert_eq!(x_pi, x_codex);
+        assert_eq!(x_claude, x_pi);
+        let (x_head, _) = title_at(&screen, "TITLE");
+        assert_eq!(x_head + 2, x_claude, "the heading sits over the marks");
+    }
+
+    #[test]
+    fn with_only_claude_nothing_moves() {
+        let mut a = app();
+        let screen = render(&mut a, 150, 30);
+        let (x_head, _) = title_at(&screen, "TITLE");
+        let (x_title, _) = title_at(&screen, "today's work");
+        assert_eq!(x_head, x_title, "a slot for marks no session has");
+    }
+
+    #[test]
+    fn the_rail_says_which_agent_it_is() {
+        use crate::model::Harness;
+        let mut a = app();
+        let i = a.current_idx().unwrap();
+        a.all[i].harness = Harness::Hermes;
+        a.rebuild();
+        let screen = render(&mut a, 150, 30).join("\n");
+        assert!(screen.contains("☤ hermes · "), "{screen}");
+    }
+
     #[test]
     fn column_widths_always_fit_the_terminal() {
         // 44 is the narrowest width the table still claims to be a table;
@@ -3258,7 +3328,12 @@ mod glyph_tests {
     /// carries — it rendered as a box and there was no way to tell from a
     /// text capture, because the codepoint survives whether or not the font
     /// can draw it.
-    const ALLOWED: &str = "▌▐▀▄█▸┄━╸❯★●◌◆⌁│└─—…·“”↵→←↑↓▏ ";
+    ///
+    /// ☤, Hermes's mark, is in DejaVu Sans Mono -- third in `fc-match -s
+    /// monospace` here, after two that lack it -- and in Noto Sans Symbols
+    /// and FreeSerif besides. The other agents' marks are Greek letters,
+    /// which every monospace font in that chain has.
+    const ALLOWED: &str = "▌▐▀▄█▸┄━╸❯★●◌◆⌁│└─—…·“”↵→←↑↓▏ ☤";
 
     /// Everything that draws: the list, and the wordmark and opening
     /// screen, which were not checked at all while this read only ui.rs.
