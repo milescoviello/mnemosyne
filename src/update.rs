@@ -339,17 +339,29 @@ with tarfile.open(sys.argv[1]) as t:
 /// Unpack a .tar.gz into `into` with `tar`, or with `python` where there is
 /// no tar. AlmaLinux and RHEL minimal images come without one -- install.sh
 /// died there on "tar: command not found" -- and dnf brings python with it.
+///
+/// Neither is handed mn's own streams: its stdout is the plan, its stderr the
+/// screen the browser is drawn on, and tar's warnings -- a clock behind the
+/// release's timestamps -- were drawn over the list. What they say is kept
+/// for the error instead.
 fn unpack(tarball: &Path, into: &Path, tar: &str, python: &str) -> Result<()> {
     let missing = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+    let failed = |o: &std::process::Output| {
+        let said = String::from_utf8_lossy(&o.stderr);
+        match said.lines().rev().find(|l| !l.trim().is_empty()) {
+            Some(l) => anyhow!("could not unpack the release: {}", l.trim()),
+            None => anyhow!("could not unpack the release"),
+        }
+    };
     match Command::new(tar)
         .arg("-C")
         .arg(into)
         .arg("-xzf")
         .arg(tarball)
-        .status()
+        .output()
     {
-        Ok(s) if s.success() => return Ok(()),
-        Ok(_) => return Err(anyhow!("could not unpack the release")),
+        Ok(o) if o.status.success() => return Ok(()),
+        Ok(o) => return Err(failed(&o)),
         Err(e) if !missing(&e) => return Err(e.into()),
         Err(_) => {}
     }
@@ -357,10 +369,10 @@ fn unpack(tarball: &Path, into: &Path, tar: &str, python: &str) -> Result<()> {
         .args(["-c", PY_UNTAR])
         .arg(tarball)
         .arg(into)
-        .status()
+        .output()
     {
-        Ok(s) if s.success() => Ok(()),
-        Ok(_) => Err(anyhow!("could not unpack the release")),
+        Ok(o) if o.status.success() => Ok(()),
+        Ok(o) => Err(failed(&o)),
         Err(e) if missing(&e) => Err(anyhow!(
             "there is no tar to unpack the release with (install tar, or python3)"
         )),
@@ -495,6 +507,43 @@ mod tests {
         std::fs::create_dir(&out).unwrap();
         unpack(&t, &out, "tar", "mn-test-no-such-python").unwrap();
         assert_eq!(std::fs::read(out.join("mnemosyne")).unwrap(), b"the binary");
+    }
+
+    /// A stand-in tar that notes whether it was handed mn's own stdout or
+    /// stderr -- the plan, and the screen the browser is drawn on -- says
+    /// what a real one says to a clock behind the release's, and works.
+    #[cfg(target_os = "linux")]
+    fn chatty_tar(dir: &Path) -> (PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let log = dir.join("shared.log");
+        let tar = dir.join("chatty-tar");
+        std::fs::write(
+            &tar,
+            format!(
+                "#!/bin/sh\nfor fd in 1 2; do\n  [ \"$(readlink /proc/self/fd/$fd)\" = \"$(readlink /proc/$PPID/fd/$fd)\" ] && echo \"shared $fd\" >> {log}\ndone\necho 'tar: ./mnemosyne: time stamp 2026-10-11 is 172063 s in the future' >&2\nexec tar \"$@\"\n",
+                log = log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&tar, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (tar, log)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unpacking_draws_nothing_over_the_browser() {
+        // tar and python3 were handed mn's own stdout and stderr: what tar
+        // says to a slow clock was drawn over the list, and anything on
+        // stdout would have gone to the shell as a plan.
+        let d = tempfile::tempdir().unwrap();
+        let Some(t) = packed(d.path()) else { return };
+        let (tar, log) = chatty_tar(d.path());
+        let out = d.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        unpack(&t, &out, tar.to_str().unwrap(), "mn-test-no-such-python").unwrap();
+        assert_eq!(std::fs::read(out.join("mnemosyne")).unwrap(), b"the binary");
+        let shared = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(shared.is_empty(), "{shared}");
     }
 
     #[test]
