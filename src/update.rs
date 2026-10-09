@@ -136,14 +136,44 @@ pub fn is_newer(candidate: &str, have: &str) -> bool {
     }
 }
 
+/// Ask GitHub something small: twenty seconds, or not at all.
 fn curl(args: &[&str]) -> Result<Vec<u8>> {
+    curl_with(&["--max-time", "20"], args)
+}
+
+/// Download a release's files. Not under the same twenty seconds: that cut
+/// a 2 MB tarball off below about 100 KB/s -- a phone's hotspot, a train --
+/// and every update there failed, start after start. Given up on only when
+/// it cannot connect, or stalls (under 1 KB/s for a minute).
+fn download(url: &str) -> Result<Vec<u8>> {
+    curl_with(
+        &[
+            "--connect-timeout",
+            "20",
+            "--speed-limit",
+            "1024",
+            "--speed-time",
+            "60",
+        ],
+        &[url],
+    )
+}
+
+fn curl_with(limits: &[&str], args: &[&str]) -> Result<Vec<u8>> {
     let out = Command::new("curl")
-        .args(["-fsSL", "--max-time", "20"])
+        .arg("-fsSL")
+        .args(limits)
         .args(args)
         .output()
         .map_err(|e| anyhow!("curl: {e}"))?;
     if !out.status.success() {
-        return Err(anyhow!("curl failed"));
+        // what curl said, not just that it failed: "Operation timed out
+        // after 20000 milliseconds with 400000 out of 600000 bytes"
+        let said = String::from_utf8_lossy(&out.stderr);
+        return Err(match said.lines().rev().find(|l| !l.trim().is_empty()) {
+            Some(l) => anyhow!("{}", l.trim()),
+            None => anyhow!("curl failed"),
+        });
     }
     Ok(out.stdout)
 }
@@ -278,12 +308,12 @@ pub fn install_latest() -> Result<String> {
     let tarball = dir.join(asset());
     let base = release_url(&tag);
 
-    let bytes = curl(&[&base])?;
+    let bytes = download(&base)?;
     std::fs::write(&tarball, &bytes)?;
 
     // Verify before trusting it. A missing checksum file is a reason to stop,
     // not a reason to shrug.
-    let sums = curl(&[&format!("{base}.sha256")])?;
+    let sums = download(&format!("{base}.sha256"))?;
     let want = String::from_utf8_lossy(&sums)
         .split_whitespace()
         .next()
