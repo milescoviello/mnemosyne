@@ -302,11 +302,20 @@ pub fn install_latest() -> Result<String> {
     if !is_newer(&tag, current()) {
         return Err(UpToDate(current()).into());
     }
+    install_tag(&tag)
+}
 
-    let staging = Staging::new()?;
+/// Download the release `tag` and put it in place; the version installed.
+pub fn install_tag(tag: &str) -> Result<String> {
+    let staging = Staging::new().map_err(|e| {
+        anyhow!(
+            "could not make a folder to unpack it in, in {}: {e}",
+            std::env::temp_dir().display()
+        )
+    })?;
     let dir = staging.0.clone();
     let tarball = dir.join(asset());
-    let base = release_url(&tag);
+    let base = release_url(tag);
 
     let bytes = download(&base)?;
     std::fs::write(&tarball, &bytes)?;
@@ -349,7 +358,10 @@ pub fn install_latest() -> Result<String> {
     if placed.is_err() {
         let _ = std::fs::remove_file(&staged);
     }
-    placed?;
+    // Where: "Permission denied (os error 13)" said nothing of which file,
+    // and a binary installed somewhere only root may write is updated the
+    // way it was installed.
+    placed.map_err(|e| anyhow!("could not replace {}: {e}", me.display()))?;
 
     // The shell functions ship in the tarball and can change with it.
     refresh_shell_files(&dir);
@@ -461,7 +473,7 @@ pub fn auto(every_hours: u64) -> Option<Found> {
 /// The check, with the network call injectable so the ordering around the
 /// stamp can be tested without one.
 pub fn auto_with(every_hours: u64, fetch: impl FnOnce() -> Option<String>) -> Option<Found> {
-    auto_full(&stamp_path(), every_hours, fetch, install_latest)
+    auto_full(&stamp_path(), every_hours, fetch, install_tag)
 }
 
 /// The whole decision, with the stamp, the network and the installer all
@@ -471,7 +483,7 @@ pub fn auto_full(
     stamp: &Path,
     every_hours: u64,
     fetch: impl FnOnce() -> Option<String>,
-    install: impl FnOnce() -> anyhow::Result<String>,
+    install: impl FnOnce(&str) -> anyhow::Result<String>,
 ) -> Option<Found> {
     if !check_due_at(stamp, every_hours) {
         return None;
@@ -486,7 +498,7 @@ pub fn auto_full(
         return None;
     }
     let version = tag.trim_start_matches('v').to_string();
-    match install() {
+    match install(&tag) {
         Ok(v) => Some(Found::Installed(v)),
         Err(_) => Some(Found::Available(version)),
     }
@@ -726,7 +738,7 @@ mod tests {
         // window. Also covers a session closed mid-download.
         let d = tempfile::tempdir().unwrap();
         let p = stamp(&d);
-        let got = auto_full(&p, 0, || None, || panic!("must not install"));
+        let got = auto_full(&p, 0, || None, |_| panic!("must not install"));
         assert_eq!(got, None);
         assert!(!p.exists(), "stamped without hearing back from GitHub");
     }
@@ -736,7 +748,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = stamp(&d);
         let v = format!("v{}", current());
-        let got = auto_full(&p, 0, move || Some(v), || panic!("must not install"));
+        let got = auto_full(&p, 0, move || Some(v), |_| panic!("must not install"));
         assert_eq!(got, None, "nothing to do");
         assert!(p.exists(), "a real answer from GitHub should be recorded");
     }
@@ -750,7 +762,13 @@ mod tests {
             &stamp(&d),
             0,
             || Some("v99.0.0".into()),
-            || Ok("99.0.0".into()),
+            // the release found newer, handed over: asking GitHub again
+            // was a second API call a start, on a limit of 60 an hour
+            // shared by everyone behind the same address
+            |tag| {
+                assert_eq!(tag, "v99.0.0");
+                Ok("99.0.0".into())
+            },
         );
         assert_eq!(got, Some(Found::Installed("99.0.0".into())));
     }
@@ -762,7 +780,7 @@ mod tests {
             &stamp(&d),
             0,
             || Some("v99.0.0".into()),
-            || Err(anyhow::anyhow!("no room on device")),
+            |_| Err(anyhow::anyhow!("no room on device")),
         );
         assert_eq!(
             got,
