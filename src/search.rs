@@ -6,7 +6,7 @@
 //! around two tenths of a second, so it runs on a background thread with the
 //! results folded in when they arrive.
 
-use crate::model::Session;
+use crate::model::{Harness, Session};
 use memchr::memmem;
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -181,7 +181,50 @@ fn injected_spans(line: &[u8]) -> Vec<(usize, usize)> {
 /// literally with `{"type":"`, and real turns carry `"role":"user"` or
 /// `"role":"assistant"`. This is what keeps `attachment` lines -- which is
 /// where the injected memory index lives -- out of content search.
+#[cfg(test)]
 fn is_conversation(line: &[u8]) -> bool {
+    is_conversation_of(Harness::Claude, line)
+}
+
+/// The same, for whichever agent wrote the line.
+///
+/// pi's and omp's lines all begin `{"type":"` -- a message is
+/// `{"type":"message"` -- so Claude's test turned every one of them away.
+/// What a tool handed back is left out, as Claude's tool results are. A
+/// Codex line is a message to or from the model, or a command it ran, and
+/// not the AGENTS.md and environment it sends along as messages of their
+/// own.
+fn is_conversation_of(h: Harness, line: &[u8]) -> bool {
+    let f = &line[..line.len().min(1 << 16)];
+    let has = |needle: &[u8]| memmem::find(f, needle).is_some();
+    match h {
+        Harness::Claude => claude_conversation(line),
+        Harness::Pi | Harness::Omp => {
+            line.starts_with(b"{\"type\":\"message\"")
+                && (has(br#""role":"user""#)
+                    || has(br#""role":"assistant""#)
+                    || has(br#""role":"bashExecution""#))
+        }
+        Harness::Codex => {
+            if has(br#""payload":{"type":"function_call""#) {
+                return true;
+            }
+            if !has(br#""payload":{"type":"message""#) {
+                return false;
+            }
+            if has(br#""role":"assistant""#) {
+                return true;
+            }
+            has(br#""role":"user""#)
+                && !has(br#""text":"<"#)
+                && !has(br##""text":"# AGENTS.md instructions"##)
+        }
+        // Rows of a database, read as they are: see `search_hermes`.
+        Harness::Hermes => true,
+    }
+}
+
+fn claude_conversation(line: &[u8]) -> bool {
     if line.starts_with(b"{\"type\":\"") {
         return false;
     }
@@ -323,10 +366,10 @@ struct Line<'a> {
 }
 
 /// First occurrence of `needle` that is real conversation, not injected context.
-fn content_hit(l: &Line, needle: &memmem::Finder) -> Option<usize> {
+fn content_hit(l: &Line, needle: &memmem::Finder, h: Harness) -> Option<usize> {
     let line = l.raw;
     let first = needle.find(l.low)?;
-    if !is_conversation(line) {
+    if !is_conversation_of(h, line) {
         return None;
     }
     let len = needle.needle().len();
@@ -930,6 +973,7 @@ impl Spotter {
 /// same line. The excerpt is from where the first of them did.
 fn search_file(
     path: &std::path::Path,
+    h: Harness,
     groups: &[Vec<memmem::Finder>],
     mode: Mode,
 ) -> Option<String> {
@@ -937,48 +981,105 @@ fn search_file(
     let f = std::fs::File::open(path).ok()?;
     let mut rdr = BufReader::with_capacity(1 << 18, f);
     let mut buf: Vec<u8> = Vec::with_capacity(1 << 14);
-    let mut low: Vec<u8> = Vec::with_capacity(1 << 14);
-    let mut found = vec![false; groups.len()];
-    let mut first: Option<String> = None;
+    let mut seen = Seen::new(groups.len());
     loop {
         buf.clear();
         let n = rdr.read_until(b'\n', &mut buf).ok()?;
         if n == 0 {
             return None;
         }
-        let line = &buf[..n];
+        if let Some(done) = seen.line(&buf[..n], h, groups, mode) {
+            return Some(done);
+        }
+        if buf.capacity() > (1 << 20) {
+            buf = Vec::with_capacity(1 << 14);
+            seen.low = Vec::with_capacity(1 << 14);
+        }
+    }
+}
+
+/// Which groups a session has shown so far, line by line, and where the
+/// first of them was.
+struct Seen {
+    found: Vec<bool>,
+    first: Option<String>,
+    low: Vec<u8>,
+}
+
+impl Seen {
+    fn new(groups: usize) -> Seen {
+        Seen {
+            found: vec![false; groups],
+            first: None,
+            low: Vec::with_capacity(1 << 14),
+        }
+    }
+
+    /// Look through one more line: the excerpt once every group has been
+    /// seen, `None` until then.
+    fn line(
+        &mut self,
+        line: &[u8],
+        h: Harness,
+        groups: &[Vec<memmem::Finder>],
+        mode: Mode,
+    ) -> Option<String> {
         if matches!(mode, Mode::Content | Mode::Everything) {
-            low.clear();
-            low.extend(line.iter().map(u8::to_ascii_lowercase));
+            self.low.clear();
+            self.low.extend(line.iter().map(u8::to_ascii_lowercase));
         }
         for (g, ways) in groups.iter().enumerate() {
-            if found[g] {
+            if self.found[g] {
                 continue;
             }
             let hit = ways.iter().find_map(|needle| match mode {
                 Mode::Content | Mode::Everything => content_hit(
                     &Line {
                         raw: line,
-                        low: &low,
+                        low: &self.low,
                     },
                     needle,
+                    h,
                 ),
                 Mode::File => file_hit(line, needle),
                 Mode::Tool => tool_hit(line, needle),
             });
             if let Some(at) = hit {
-                found[g] = true;
-                first.get_or_insert_with(|| snippet(line, at));
+                self.found[g] = true;
+                self.first.get_or_insert_with(|| snippet(line, at));
             }
         }
-        if found.iter().all(|f| *f) {
-            return first;
-        }
-        if buf.capacity() > (1 << 20) {
-            buf = Vec::with_capacity(1 << 14);
-            low = Vec::with_capacity(1 << 14);
+        if self.found.iter().all(|f| *f) {
+            self.first.take()
+        } else {
+            None
         }
     }
+}
+
+/// Scan a Hermes session: its messages are rows in a database, not lines of
+/// a file. What you and Hermes said is searched; a tool's result is not,
+/// and nor are the tool-call records the other modes look through.
+fn search_hermes(s: &Session, groups: &[Vec<memmem::Finder>], mode: Mode) -> Option<String> {
+    if !matches!(mode, Mode::Content | Mode::Everything) {
+        return None;
+    }
+    let (db, id) = crate::hermes::split_key(&s.path.to_string_lossy())?;
+    let c = crate::hermes::open(&db)?;
+    let mut st = c
+        .prepare(
+            "SELECT content FROM messages WHERE session_id = ?1
+             AND role IN ('user', 'assistant') ORDER BY id",
+        )
+        .ok()?;
+    let rows = st.query_map([id], |r| r.get::<_, Option<String>>(0)).ok()?;
+    let mut seen = Seen::new(groups.len());
+    for content in rows.flatten().flatten() {
+        if let Some(done) = seen.line(content.as_bytes(), Harness::Hermes, groups, mode) {
+            return Some(done);
+        }
+    }
+    None
 }
 
 /// Search every session in parallel, for the ones every group is in.
@@ -993,8 +1094,11 @@ fn brute(sessions: &[Session], groups: &[Vec<Vec<u8>>], mode: Mode) -> Hits {
     sessions
         .par_iter()
         .filter_map(|s| {
-            search_file(&s.path, &finders, mode)
-                .map(|snip| (s.path.to_string_lossy().to_string(), Hit::new(snip)))
+            match s.harness {
+                Harness::Hermes => search_hermes(s, &finders, mode),
+                h => search_file(&s.path, h, &finders, mode),
+            }
+            .map(|snip| (s.path.to_string_lossy().to_string(), Hit::new(snip)))
         })
         .collect()
 }
@@ -1251,6 +1355,7 @@ mod tests {
                 low: &low,
             },
             &memmem::Finder::new(needle),
+            Harness::Claude,
         )
     }
     fn hit(
@@ -1282,7 +1387,86 @@ mod tests {
             .iter()
             .map(|ways| ways.iter().map(memmem::Finder::new).collect())
             .collect();
-        search_file(&path, &groups, mode)
+        search_file(&path, Harness::Claude, &groups, mode)
+    }
+
+    /// The same, for another agent's file.
+    fn scan_finds_in(h: crate::model::Harness, lines: &[&str], query: &str) -> bool {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let s = Session {
+            harness: h,
+            path,
+            ..Default::default()
+        };
+        !brute(&[s], &scan_groups(query, Mode::Content), Mode::Content).is_empty()
+    }
+
+    #[test]
+    fn the_scan_reads_what_pi_and_omp_said() {
+        // Where the index cannot answer -- `c++` is not a word to it -- the
+        // scan does, and pi's lines all begin as Claude's metadata does.
+        use crate::model::Harness;
+        let said = r#"{"type":"message","id":"a","parentId":null,"timestamp":"2026-10-01T09:00:00Z","message":{"role":"user","content":"port the c++ templates"}}"#;
+        let tool = r#"{"type":"message","id":"b","parentId":"a","timestamp":"2026-10-01T09:00:01Z","message":{"role":"toolResult","toolCallId":"x","toolName":"bash","content":[{"type":"text","text":"g++ -std=c++20 src/zebra.cpp"}],"isError":false}}"#;
+        for h in [Harness::Pi, Harness::Omp] {
+            assert!(scan_finds_in(h, &[said, tool], "c++"), "{h:?}");
+            assert!(
+                !scan_finds_in(h, &[said, tool], "zebra.cpp"),
+                "a tool's output, {h:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_scan_reads_what_codex_was_asked_but_not_what_it_sent_along() {
+        use crate::model::Harness;
+        let sent = r##"{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /w <INSTRUCTIONS>use c++17</INSTRUCTIONS>"}]}}"##;
+        let asked = r#"{"timestamp":"t","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"why is the c++ build slow"}]}}"#;
+        let ran = r#"{"timestamp":"t","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"ninja -C out/zebra\"}","call_id":"c"}}"#;
+        let out = r#"{"timestamp":"t","type":"response_item","payload":{"type":"function_call_output","call_id":"c","output":"g++ quokka.o"}}"#;
+        assert!(scan_finds_in(Harness::Codex, &[sent, asked], "c++"));
+        assert!(
+            !scan_finds_in(Harness::Codex, &[sent], "c++17"),
+            "AGENTS.md was searched"
+        );
+        assert!(
+            scan_finds_in(Harness::Codex, &[ran], "out/zebra"),
+            "a command it ran"
+        );
+        assert!(
+            !scan_finds_in(Harness::Codex, &[out], "quokka.o"),
+            "a command's output"
+        );
+    }
+
+    #[test]
+    fn the_scan_reads_hermes_from_its_database() {
+        use crate::hermes::tests::{add_session, make_db, say};
+        use crate::model::Harness;
+        let d = tempfile::tempdir().unwrap();
+        let db = d.path().join("state.db");
+        let c = make_db(&db, false);
+        add_session(&c, "h1", "cli", Some("/w"));
+        say(&c, "h1", "user", "the c++ build broke", 1.0);
+        say(&c, "h1", "tool", "zebra.cpp:3 error", 2.0);
+        let s = Session {
+            harness: Harness::Hermes,
+            id: "h1".into(),
+            path: crate::hermes::key(&db, "h1").into(),
+            ..Default::default()
+        };
+        let find = |q: &str| {
+            !brute(
+                std::slice::from_ref(&s),
+                &scan_groups(q, Mode::Content),
+                Mode::Content,
+            )
+            .is_empty()
+        };
+        assert!(find("c++"));
+        assert!(!find("zebra.cpp"), "a tool's output");
     }
 
     fn user_said(text: &str) -> String {
