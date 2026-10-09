@@ -18,7 +18,9 @@ full-text search inside the conversations, and one keypress to reattach.
 Claude Code writes every session to `~/.claude/projects/<encoded-cwd>/<uuid>.jsonl`
 and nothing is lost on reboot. But `claude --resume` only lists sessions for the
 directory you happen to be standing in, so there is no way to see the whole
-picture. `mnemosyne` is that missing view.
+picture. `mnemosyne` is that missing view — and the sessions of the other
+coding agents [wsx](#wsx) drives, pi, omp, Codex and Hermes, are in it beside
+Claude's ([other agents](#other-agents)).
 
 ![the session list](docs/list.png)
 
@@ -569,7 +571,65 @@ A renamed workspace keeps its folder — `wsx workspace rename` never moves it
 it was created in. `mnemosyne --json` includes the same facts as a `wsx`
 object on each session that has one.
 
+## Other agents
+
+The other coding agents wsx drives keep their sessions too, each in its own
+place and format. They are read, indexed and searched alongside Claude's, and
+`Enter`, `ctrl+n`, tmux and `--restore` resume each with its own command, in
+its own folder:
+
+| | agent | read from | resumed with |
+|---|---|---|---|
+| | Claude Code | `~/.claude/projects/` | `claude --resume <id>` |
+| `π` | pi | `~/.pi/agent/sessions/` (`$PI_CODING_AGENT_DIR`) | `pi --session <id>` |
+| `ϖ` | omp (oh-my-pi) | `~/.omp/agent/sessions/` | `omp --resume <id>` |
+| `χ` | Codex | `~/.codex/sessions/` (`$CODEX_HOME`) | `codex resume <id>` |
+| `☤` | Hermes | `~/.hermes/state.db` (`$HERMES_HOME`) | `hermes --resume <id>` |
+
+**Marked by a symbol.** Once there is any session but Claude's, the title
+column keeps its first two cells for the agent's mark: pi, its other build omp
+in the other way of writing pi, chi for Codex, and the caduceus for Hermes.
+Claude's carry none. The rail names the agent in full, and the viewer labels
+each turn with the agent that said it. `--json` has an `"agent"` field and
+`--list` a fifth column.
+
+**What is read.** pi and omp write the same format: a header with the session's
+id and folder, then a line an entry. A Codex rollout opens with the thread's
+id, folder and branch; its prompts are read from what went to the model,
+without the AGENTS.md and environment Codex sends along with each. Hermes keeps
+everything in one SQLite database, opened read-only, and runs cron jobs and
+chat gateways as well as a terminal, so only the sessions started in one are
+listed: `cli` and `hermes -z`, and not the ones it archived. Each agent's own
+title is used — pi's `/name`, the title omp gives a session, Hermes's — and
+Codex's thread name when it has one, its first prompt otherwise. The search
+sees what was said, the reasoning and the commands run, never a tool's output.
+
+**Resuming.** The model and the permission mode are Claude's to restore: the
+others put back their own when they resume, so nothing is added, and `--ask`
+and anything typed after `mn` go to Claude's sessions only. omp started in
+your home moves itself to a temp folder unless told not to, so it is resumed
+there with `--allow-home`. Hermes goes back to the folder it recorded by
+itself; an old session that recorded none resumes in your home. A shell whose
+`mn` was sourced before an update cannot run another agent's command. It says
+so in the environment it starts `mnemosyne` with, and without that a session
+of another agent is left out with a word that a new terminal resumes it, rather
+than handed to `claude --resume`.
+
+**Running now.** omp, Codex and Hermes name their session on the command line,
+and a Codex that does not is known by the rollout it holds open. pi renames
+its process and keeps nothing open, so a running pi is matched to the newest
+pi session in its folder, the way a plain `claude` is. A guess by folder only
+ever picks among sessions of the agent that is running there.
+
+**Kept fast.** All of it goes through the same index: each file is read only
+as far as it grew, and Hermes's database only for the messages after the last
+one seen — and not opened at all while neither it nor its write-ahead log has
+changed. The first frame is drawn from the index as before.
+
 ## Permissions
+
+These are Claude's. The other agents resume under their own settings
+([other agents](#other-agents)).
 
 A session resumes under the permission mode it was **started** in, read from
 the transcript, the same way the model is restored:
@@ -854,6 +914,8 @@ and are never required.
 | path | what |
 |---|---|
 | `~/.claude/projects/**/*.jsonl` | read only, never modified |
+| `~/.pi/agent/sessions/`, `~/.omp/agent/sessions/`, `~/.codex/sessions/` | read only, never modified |
+| `~/.hermes/state.db` | opened read-only |
 | `~/.claude/mnemosyne/index.db` | disposable cache; delete it any time |
 | `~/.claude/mnemosyne/meta.json` | your favourites, tags and notes |
 | `~/.claude/mnemosyne/workspace.json` | which sessions were open, for reopening after a reboot |

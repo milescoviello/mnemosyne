@@ -1772,6 +1772,7 @@ fn guide() -> Vec<H> {
         Mark("◆", "picked, for acting on several at once"),
         Mark("⌁27", "has 27 subagents — → opens them, or click the count"),
         Mark("│", "a subagent, hanging off its parent"),
+        Mark("π ϖ χ ☤", "another agent's: pi, omp, Codex, Hermes — Claude's carry none"),
         Gap,
         Say("LEFT OFF is the last thing you said in that session — usually the fastest"),
         Say("way to recognise one. A folder in red no longer exists; resuming still"),
