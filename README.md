@@ -201,10 +201,11 @@ you can read all of it in `shell/mn.fish`.
 Each of these was installed fresh, with the one-liner above, and used the way
 you would use it. Everything below passed.
 
-**Distributions.** Install; `mn` in a new terminal and after an SSH login;
-the index; the browser drawing and quitting; and both selftests
-(`tools/shell-selftest.sh`, `tools/install-selftest.sh`) on that distro's own
-shells and tmux:
+**Distributions.** Install; `mn --update` putting a newer release in place
+(python3 unpacking it where there is no tar, as on AlmaLinux); `mn` in a new
+terminal and after an SSH login; the index; the browser drawing and
+quitting; and both selftests (`tools/shell-selftest.sh`,
+`tools/install-selftest.sh`) on that distro's own shells and tmux:
 
 - Debian 12 and 13
 - Ubuntu 22.04, 24.04 and 26.04
@@ -218,7 +219,9 @@ shells and tmux:
 
 Under bash and zsh on every one of them, and under fish on all but AlmaLinux
 (fish is not in its repositories) and NixOS (fish is set up declaratively
-there, with `programs.fish.enable`).
+there, with `programs.fish.enable`). Built from source with each one's own
+Rust, too, where that is 1.85 or newer: all of them but Debian 12 and
+Ubuntu 22.04 and 24.04, where the installer says to use rustup.
 
 **Desktops.** A real installed desktop each, driven at its own keyboard. Its
 terminal opened with its own shortcut, or its launcher where it ships
@@ -226,7 +229,9 @@ without one; `mn` typed there and the browser taking over; enter resuming
 the session in that same terminal and leaving the shell in the session's
 folder; ctrl+n resuming it in a new window; and `mn --restore` opening a
 window onto the session's own tmux session, which kept running when the
-window was closed:
+window was closed. All of it from bash, zsh and fish. And from an SSH
+login to the same machine, `mn --restore` saying there is no display to
+open a window on, rather than opening one on the desktop's screen:
 
 | Desktop | Distribution | Session | Terminal |
 | --- | --- | --- | --- |
