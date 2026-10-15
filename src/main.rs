@@ -914,6 +914,7 @@ fn main() -> Result<()> {
     }
 
     catch_signals();
+    exit_on_hangup();
     enable_raw_mode()?;
     stderr().execute(EnterAlternateScreen)?;
     // Put back on the way out, however the way out goes. The panic hook
@@ -1095,6 +1096,35 @@ fn signalled() -> Option<i32> {
         0 => None,
         s => Some(s),
     }
+}
+
+/// End the process if the terminal goes away underneath the browser.
+///
+/// Closing the window, or losing the ssh connection, hangs the terminal up,
+/// and from then on every read of it returns nothing at once. crossterm's
+/// reader takes that for "no input yet" and reads again, forever, without
+/// getting back to its timeout (crossterm-rs/crossterm#793). So the loop
+/// never came round to see SIGHUP or SIGTERM: a browser whose window had
+/// been closed while the screen was still sat at 100% of a core for a day,
+/// until it was killed by hand. Nothing here can reach into that loop, so a
+/// thread of its own watches the terminal instead. There is no terminal left
+/// to put back.
+///
+/// Checked once a second rather than waited on with poll(), which macOS does
+/// not support on terminals.
+fn exit_on_hangup() {
+    // SAFETY: isatty only inspects the descriptor.
+    if unsafe { libc::isatty(libc::STDERR_FILENO) } != 1 {
+        return;
+    }
+    std::thread::spawn(|| loop {
+        std::thread::sleep(Duration::from_secs(1));
+        // A hung-up terminal fails tcgetattr with EIO, so isatty says no.
+        // SAFETY: as above.
+        if unsafe { libc::isatty(libc::STDERR_FILENO) } != 1 {
+            std::process::exit(128 + libc::SIGHUP);
+        }
+    });
 }
 
 /// The terminal as the browser found it, put back when this is dropped --
